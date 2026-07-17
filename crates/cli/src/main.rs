@@ -461,11 +461,10 @@ fn service_install(config: &Config, interval_minutes: Option<u32>) -> Result<()>
     let exe = std::env::current_exe()?;
     service::manager()?.install(&exe, interval)?;
     println!(
-        "Installed background sync: \"{}\" runs `\"{}\" sync` every {interval} min.",
+        "Installed background sync: \"{}\" runs `{}` every {interval} min, windowless.",
         service::TASK_NAME,
         exe.display()
     );
-    println!("Note: it runs in your user session; a brief console window may appear each run.");
     Ok(())
 }
 

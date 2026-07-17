@@ -143,7 +143,9 @@ Cargo workspace, two crates under `crates/`:
   subscribe / add-source / subs / fetch / export / unsubscribe / sync / service /
   list. `sync` takes a single-instance file lock (Windows `share_mode(0)`).
   - `cli::service` — `ServiceManager` trait + Windows Task Scheduler impl (shells
-    out to `schtasks`); other platforms stubbed for later.
+    out to `schtasks`); other platforms stubbed for later. Install registers
+    `wscript.exe <sync-hidden.vbs>` so the periodic run is windowless (no console
+    flash); the VBS is generated in the data dir and removed on uninstall.
 
 Core design phases (design docs -> EPUB pipeline -> storage -> multi-source ->
 scheduled sync -> state machine/delta -> retention -> config/auto-export) are all

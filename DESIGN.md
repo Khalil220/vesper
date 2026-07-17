@@ -312,9 +312,11 @@ Verified by probing during design:
 - **Generic profile format for config-driven sites** (external files with
   selectors/pagination/tier) is still open — the two current sources are in
   code. Do this when a third, generic-shaped site appears.
-- **Windowless scheduled task:** the Task Scheduler job runs the console binary,
-  so a brief console window may flash each run. A windowless launch (a hidden
-  wrapper, or a GUI-subsystem shim) would make it truly unnoticed. Deferred.
+- **Windowless scheduled task — done.** The task runs `wscript.exe` against a
+  generated `sync-hidden.vbs` (in the data dir) that does
+  `WScript.Shell.Run "<exe> sync", 0, False` — window style 0 hides the console,
+  so nothing flashes. Keeps the friendly "only when logged on" task (no stored
+  password). Uninstall removes the launcher too.
 - **auto_append not live-tested:** exercised by unit/logic and the auto_export
   path, but appending on *new* chapters needs a novel that gains chapters during
   a test window, so it hasn't been observed live. Verify opportunistically.
