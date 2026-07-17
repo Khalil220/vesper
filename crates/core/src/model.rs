@@ -67,6 +67,8 @@ pub struct NovelMeta {
     pub title: String,
     pub author: Option<String>,
     pub cover_url: Option<String>,
+    /// Comma-separated genres, if the source exposes them.
+    pub genre: Option<String>,
     /// Hint only — never treated as ground truth for completion.
     pub status_hint: NovelStatus,
     pub source_url: String,

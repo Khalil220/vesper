@@ -74,6 +74,8 @@ fn parse_novel(html: &str, source_url: &str) -> Result<NovelMeta> {
         title,
         author: text_of(&doc, "a.author-link"),
         cover_url: meta_prop(&doc, "og:image"),
+        // Genre lives in the page's JSON-LD; not extracted (no JSON dep). None.
+        genre: None,
         status_hint: text_of(&doc, ".status-badge")
             .map(|s| parse_status_hint(&s))
             .unwrap_or(NovelStatus::Unknown),

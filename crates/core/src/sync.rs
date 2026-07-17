@@ -300,6 +300,7 @@ mod tests {
                 title: "Mock".into(),
                 author: None,
                 cover_url: None,
+                genre: None,
                 status_hint: NovelStatus::Unknown,
                 source_url: url.into(),
             })
@@ -338,6 +339,7 @@ mod tests {
             title: "Mock Novel".into(),
             author: Some("A".into()),
             cover_url: None,
+            genre: None,
             status_hint: NovelStatus::Ongoing,
             source_url: "https://primary.example/n".into(),
         };

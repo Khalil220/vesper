@@ -35,6 +35,7 @@ pub struct StoredNovel {
     pub title: String,
     pub author: Option<String>,
     pub cover_url: Option<String>,
+    pub genre: Option<String>,
     pub status_hint: NovelStatus,
     pub derived_state: DerivedState,
     /// A previous auto-export was blocked (e.g. the EPUB was locked); retry later.
@@ -55,6 +56,7 @@ impl StoredNovel {
             title: self.title.clone(),
             author: self.author.clone(),
             cover_url: self.cover_url.clone(),
+            genre: self.genre.clone(),
             status_hint: self.status_hint.clone(),
             source_url: self
                 .primary_source()
@@ -115,6 +117,7 @@ impl Store {
                 title          TEXT NOT NULL,
                 author         TEXT,
                 cover_url      TEXT,
+                genre          TEXT,
                 status_hint    TEXT NOT NULL,
                 derived_state  TEXT NOT NULL,
                 export_pending INTEGER NOT NULL DEFAULT 0,
@@ -153,6 +156,9 @@ impl Store {
             "ALTER TABLE novels ADD COLUMN export_pending INTEGER NOT NULL DEFAULT 0",
             [],
         );
+        let _ = self
+            .conn
+            .execute("ALTER TABLE novels ADD COLUMN genre TEXT", []);
         Ok(())
     }
 
@@ -173,12 +179,13 @@ impl Store {
 
         let now = now_unix();
         self.conn.execute(
-            "INSERT INTO novels (title, author, cover_url, status_hint, derived_state, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+            "INSERT INTO novels (title, author, cover_url, genre, status_hint, derived_state, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
             params![
                 meta.title,
                 meta.author,
                 meta.cover_url,
+                meta.genre,
                 meta.status_hint.as_str(),
                 DerivedState::Backfilling.as_str(),
                 now,
@@ -273,7 +280,7 @@ impl Store {
         let row = self
             .conn
             .query_row(
-                "SELECT title, author, cover_url, status_hint, derived_state, export_pending
+                "SELECT title, author, cover_url, genre, status_hint, derived_state, export_pending
                  FROM novels WHERE id = ?1",
                 params![id],
                 |r| {
@@ -281,15 +288,16 @@ impl Store {
                         r.get::<_, String>(0)?,
                         r.get::<_, Option<String>>(1)?,
                         r.get::<_, Option<String>>(2)?,
-                        r.get::<_, String>(3)?,
+                        r.get::<_, Option<String>>(3)?,
                         r.get::<_, String>(4)?,
-                        r.get::<_, i64>(5)? != 0,
+                        r.get::<_, String>(5)?,
+                        r.get::<_, i64>(6)? != 0,
                     ))
                 },
             )
             .optional()?;
 
-        let Some((title, author, cover_url, status, state, export_pending)) = row else {
+        let Some((title, author, cover_url, genre, status, state, export_pending)) = row else {
             return Ok(None);
         };
 
@@ -305,6 +313,7 @@ impl Store {
             title,
             author,
             cover_url,
+            genre,
             status_hint: NovelStatus::from_str(&status),
             derived_state: DerivedState::from_str(&state),
             export_pending,
@@ -549,6 +558,7 @@ mod tests {
             title: "Test Novel".into(),
             author: Some("An Author".into()),
             cover_url: None,
+            genre: None,
             status_hint: NovelStatus::Ongoing,
             source_url: url.into(),
         }
@@ -630,6 +640,7 @@ mod tests {
             title: "Done Novel".into(),
             author: Some("A".into()),
             cover_url: None,
+            genre: None,
             status_hint: NovelStatus::Completed,
             source_url: url.into(),
         }

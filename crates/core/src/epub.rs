@@ -76,6 +76,9 @@ pub fn build_epub(
     if let Some(author) = &meta.author {
         epub_try!(builder.metadata("author", author));
     }
+    if let Some(genre) = &meta.genre {
+        epub_try!(builder.metadata("subject", genre));
+    }
     epub_try!(builder.metadata("lang", "en"));
     if let Some(cover) = cover {
         epub_try!(builder.add_cover_image(cover_filename(&cover.mime), &cover.bytes[..], &cover.mime));

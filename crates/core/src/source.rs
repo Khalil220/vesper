@@ -201,6 +201,7 @@ pub(crate) fn parse_novel_meta(html: &str, source_url: &str) -> Result<NovelMeta
 
     let author = meta_content(&doc, "og:novel:author").filter(|s| !s.is_empty());
     let cover_url = meta_content(&doc, "og:image").filter(|s| !s.is_empty());
+    let genre = meta_content(&doc, "og:novel:genre").filter(|s| !s.is_empty());
 
     // Status is only a hint. Different sites encode it differently — novgo uses
     // "1"/"2", freewebnovel uses "Ongoing"/"Completed" — so accept both.
@@ -212,6 +213,7 @@ pub(crate) fn parse_novel_meta(html: &str, source_url: &str) -> Result<NovelMeta
         title,
         author,
         cover_url,
+        genre,
         status_hint,
         source_url: source_url.to_string(),
     })
