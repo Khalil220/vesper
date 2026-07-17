@@ -4,9 +4,11 @@ Rust tool that crawls webnovel sites, downloads chapters, and packages them into
 EPUBs. One binary, two faces: a CLI (control + export) and a lightweight
 background sync that keeps subscribed novels current.
 
-**Status: design phase, pre-scaffold.** No code yet. See `DESIGN.md` for the
-full decisions and rationale; this file is the short rules-of-the-road. Fill in
-the Build / Test / Run and module-map sections below once the workspace exists.
+**Status: implemented (v1).** All planned phases plus a second site adapter
+(freewebnovel), a second fetch tier (curl), a windowless scheduled task,
+fallback content upgrade, and external config-driven profiles are in place and
+tested (46 unit tests). See `DESIGN.md` for the full decisions and rationale;
+this file is the short rules-of-the-road.
 
 ## Load-bearing constraints (don't re-litigate — see DESIGN.md for why)
 
@@ -137,21 +139,26 @@ Cargo workspace, two crates under `crates/`:
     self-generating with commented defaults; tolerant reads. Drives output_dir,
     delays, retention/grace days, auto_export/auto_append, split_every_chapters,
     poll interval.
-  - `sync` — `sync_novel`: the shared multi-source engine. Discovers each ranked
-    source (best-effort), gap-fills missing chapter numbers from the
-    highest-priority source that has them (primary authoritative), returns a
-    `SyncReport`. Used by `fetch` now and the future scheduled `sync`.
+  - `sync` — `sync_novel`: the shared multi-source engine used by both `fetch`
+    and the scheduled `sync`. Backfilling walks the full ToC; a caught-up (Live)
+    novel does a cheap delta check (landing page) with a full-walk fallback on a
+    gap. Gap-fills missing chapters from the highest-priority source (primary
+    authoritative), upgrades fallback-sourced chapters once the primary catches
+    up, drives the Backfilling->Live transition, returns a `SyncReport`.
   - `util` — filename sanitization, chapter number/title parsing, `now_unix`.
 - `cli` (bin `crawler`): clap subcommands on a current-thread Tokio runtime.
-  subscribe / add-source / subs / fetch / export / unsubscribe / sync / service /
-  list. `sync` takes a single-instance file lock (Windows `share_mode(0)`).
+  subscribe / add-source / subs / fetch / export / unsubscribe / sync / prune /
+  service / config / profiles / list. `sync` takes a single-instance file lock
+  (Windows `share_mode(0)`).
   - `cli::service` — `ServiceManager` trait + Windows Task Scheduler impl (shells
     out to `schtasks`); other platforms stubbed for later. Install registers
     `wscript.exe <sync-hidden.vbs>` so the periodic run is windowless (no console
     flash); the VBS is generated in the data dir and removed on uninstall.
 
-Core design phases (design docs -> EPUB pipeline -> storage -> multi-source ->
-scheduled sync -> state machine/delta -> retention -> config/auto-export) are all
-implemented, and a second site (freewebnovel) validates the Source + Fetcher
-abstractions. Remaining are the smaller deferred items in DESIGN.md's open list
-(e.g. windowless scheduled task, fallback content upgrade).
+All planned phases are implemented (design docs -> EPUB pipeline -> storage ->
+multi-source + active fallback -> scheduled sync -> state machine/delta ->
+retention -> config/auto-export), a second site (freewebnovel) validates the
+Source + Fetcher abstractions, and the polish items (windowless task, fallback
+content upgrade, external profiles) are done. No functional work is outstanding;
+DESIGN.md's "Still open" list is optional/future ideas (EPUB cover embedding, a
+`status` command + logging, a Linux/macOS ServiceManager, zstd compression).

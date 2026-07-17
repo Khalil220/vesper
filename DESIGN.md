@@ -16,9 +16,9 @@ for depth.
   scheduler. This keeps the CLI and the background worker sharing identical code
   instead of drifting apart, and it is one artifact to distribute.
 
-- **The CLI owns:** subscription management (add/remove/list), EPUB export,
-  service install/configure/uninstall, and a `status` command. No TUI — plain
-  commands and arguments.
+- **The CLI owns:** subscription management (subscribe/add-source/unsubscribe/
+  subs), fetch, EPUB export, prune, `config`/`profiles` display, and service
+  install/uninstall/status. No TUI — plain commands and arguments.
 
 - **The background sync is a dumb poller:** check subscribed novels for new
   chapters, fetch the deltas, store them, and (conditionally) trigger export. It
@@ -74,10 +74,10 @@ A novel poller has no reason to hold state between runs — "last-seen chapter"
 lives in the DB, not in RAM — so the main thing a resident daemon would buy
 (in-memory state, sub-interval reactivity) is wasted here.
 
-- **Windows (primary target):** Task Scheduler. The CLI's `install` registers a
-  hidden task ("run every N minutes / at logon"); `uninstall` removes it.
-  Driving this by shelling out to `schtasks.exe` is far less code than
-  implementing a real Windows Service.
+- **Windows (primary target):** Task Scheduler, every N minutes. `install`
+  registers a windowless task via a hidden VBS launcher (see the "Windowless
+  scheduled task" resolved item); `uninstall` removes it. Shelling out to
+  `schtasks.exe` is far less code than implementing a real Windows Service.
 - **Portability:** put service install/uninstall behind a small trait so a
   systemd user unit (Linux) or launchd plist (macOS) can slot in later without
   touching the rest. Do Windows first; do not let this one component's
@@ -124,14 +124,19 @@ lives in the DB, not in RAM — so the main thing a resident daemon would buy
 
 ## Fetching and politeness
 
-- **Tiered fetcher behind a trait.** Pick the cheapest tier that works per-site,
-  configured per-site:
-  1. Plain `reqwest` + a normal browser User-Agent (novgo needs only this).
-  2. `rquest` with browser TLS/HTTP2 fingerprint impersonation (for sites that
-     fingerprint-block plain clients).
-  3. Headless browser (`chromiumoxide`) or FlareSolverr, used once to obtain a
-     `cf_clearance` cookie that is then handed to a fast client — never run a
-     browser per chapter.
+- **Tiered fetcher behind a trait.** Pick the cheapest tier that works per-site;
+  `build_source` selects it by host:
+  1. `ReqwestFetcher` — plain `reqwest` with a browser UA + consistent browser
+     headers (novgo needs only this).
+  2. `CurlFetcher` — shells out to the system `curl` (built into Windows 10+).
+     Used for freewebnovel, whose Cloudflare challenges reqwest's TLS ClientHello
+     even with browser headers/HTTP-1.1 and even though both use Schannel; curl's
+     ClientHello passes. Chosen over pulling in a heavyweight TLS-impersonation
+     stack (originally sketched as `rquest`).
+  3. Further escalation, if a site ever needs it: `rquest` fingerprint
+     impersonation, or a headless browser / FlareSolverr used once to obtain a
+     `cf_clearance` cookie handed to a fast client — never a browser per chapter.
+     Not currently needed.
 
 - **Adaptive rate control, per host.** Start at a modest delay (~1–2s) with a
   single request in flight per host and jitter on the delay. On 429/503 or a
@@ -239,33 +244,34 @@ export, regeneration is impossible. Resolution:
     `<novel> - Vol 01.epub`, `Vol 02`, ... inside the same novel folder; on
     append only the last, in-progress volume is rewritten.
 
-- **Metadata/cover come free from novgo:** `og:novel:author`,
-  `og:novel:genre`, `og:novel:novel_name`, and `og:image` (cover thumbnail).
+- **Metadata comes free from `og:novel:*` tags.** We extract title, author, and
+  `og:image` (cover URL, stored on the novel) plus the status hint. Genre is not
+  captured. **The cover URL is stored but not yet embedded in the EPUB** — no
+  cover image is downloaded or added to the package (see Still open).
 
 ## Configuration
 
 - **Global `config.ini`** (flat key=value; `rust-ini` or `configparser`)
   generated with defaults. **Per-novel overrides live in the DB** so one novel
   can differ without config sprawl.
-- Settings to generate with defaults:
-  - `output_dir` (default `Documents\lightnovels`)
-  - `auto_export`, `auto_append` (separate toggles)
-  - `retention_days` (0 = purge on export; N = grace period; never touches
-    un-exported)
-  - `keep_raw_for_ongoing` (default true — the working-set rule)
-  - `split_every_chapters` (0 = single file)
-  - `request_delay_ms` + backoff behavior, and `user_agent`
-  - `poll_interval` (mirrors the scheduled-task cadence for reference)
-  - `log_path` / verbosity — important precisely because it runs unnoticed; a
-    silent daemon with no log is undebuggable
+- Settings actually generated (see `core::config`): `output_dir`,
+  `request_delay_ms`, `poll_interval_minutes`, `retention_days`,
+  `quiet_grace_days`, `auto_export`, `auto_append`, `split_every_chapters`.
+- Deliberately *not* config keys: `keep_raw_for_ongoing` is implicit (retention
+  only ever touches *Likely complete* novels, so ongoing novels always keep their
+  working set); `user_agent` is a fixed browser UA in code; `log_path`/verbosity
+  await a logging pass (see Observability / Still open).
 
 ## Observability
 
-Because the sync runs unnoticed, it must be inspectable:
+Because the sync runs unnoticed, it must be inspectable. **Partially implemented:**
 
-- `status` command: last sync time, per-novel last-seen chapter and state,
-  recent errors.
-- A log file at `log_path`.
+- `subs` shows each novel's derived state, per-source last-seen chapter, and a
+  pending-export flag. Sync/fetch print warnings and state transitions to stderr.
+- **Not yet built:** a dedicated `status` command (last sync time, recent errors
+  across the whole library) and a persistent log file at `log_path`. A windowless
+  scheduled run discards its stderr, so a log file is the main gap for debugging
+  background runs. Deferred (see Still open).
 
 ## Site profile: novgo.net
 
@@ -293,48 +299,50 @@ Verified by probing during design:
 - **Status via `og:novel:status`** (`content="1"` seen for an Ongoing novel;
   confirm the completed value).
 
-## Open items
+## Status of deferred items
 
-- Map the `og:novel:status` values on novgo (which means completed) against a
-  known finished novel — as a *hint* feeding completion detection, not a trigger.
-- Decide the default `poll_interval`, and the reduced cadence + quiet grace
-  window for *Likely complete* novels.
-- Decide whether to zstd-compress stored chapter text from day one or later.
-- **Second source — done (freewebnovel):** validated the `Source` trait as a
+### Resolved
+
+- **Second source (freewebnovel).** Validated the `Source` trait as a
   hand-written adapter (AJAX ToC -> discovery generates sequential chapter URLs
   from `data-total-chapters`; title from the chapter page; word-form status) and
-  the `Fetcher` trait as a second tier. freewebnovel's Cloudflare challenges
-  reqwest's TLS ClientHello even with browser headers/HTTP-1.1 and even though
-  both use Schannel; the system `curl` passes, so Tier 2 is `CurlFetcher`
-  (shell-out). `build_source` resolves adapter + tier by host. Shared extractors
-  (`parse_novel_meta`, `parse_chapter_body`, status parsing) are reused, so the
-  storage/sync/export pipeline needed no changes.
-- **External config-driven profiles — done.** `SiteProfile` holds owned strings
-  and exposes `chapter_marker` + `page_param`, so generic-shaped sites can be
-  added via `.ini` files in `<config_dir>/profiles/` (required: name, host,
-  content_selector; the rest default). `profiles::all()` merges built-ins with
-  externally-loaded ones; bad files are skipped with a warning; a `README.txt`
-  self-documents the format. `crawler profiles` lists what's loaded. Sites
-  needing JS/odd layouts still need a hand-written adapter (freewebnovel).
-- **Windowless scheduled task — done.** The task runs `wscript.exe` against a
-  generated `sync-hidden.vbs` (in the data dir) that does
-  `WScript.Shell.Run "<exe> sync", 0, False` — window style 0 hides the console,
-  so nothing flashes. Keeps the friendly "only when logged on" task (no stored
-  password). Uninstall removes the launcher too.
-- **auto_append not live-tested:** exercised by unit/logic and the auto_export
-  path, but appending on *new* chapters needs a novel that gains chapters during
-  a test window, so it hasn't been observed live. Verify opportunistically.
-- **Fallback content upgrade — done.** After the gap-fill pass, `sync_novel`
-  re-fetches any chapter currently held from a fallback that the primary now
-  offers, replacing it with the primary's authoritative content (and clearing
-  its exported flag so a re-export picks it up). Steady state has none; it fires
-  once after a lagging primary catches up. Counted as `SyncReport.upgraded`.
-- **Same-site duplicate sources are indistinguishable by name:** two sources on
-  the same site both show their profile name (e.g. `novgo`) in `subs`/progress.
-  Fine for the real cross-site case; only cosmetic for the contrived same-site
-  case.
-- **Storage crate caveat:** on the current toolchain (Rust 1.92), the latest
-  `rusqlite` pulls `libsqlite3-sys 0.38.1`, whose build script uses the unstable
-  `cfg_select!` and fails to compile on stable. When adding persistence, pin an
-  older `rusqlite`/`libsqlite3-sys` (or reconsider the crate). The C toolchain
-  itself was not the blocker.
+  the `Fetcher` trait as a second tier (see Fetching for the curl rationale).
+  Shared extractors are reused, so the storage/sync/export pipeline was unchanged.
+- **External config-driven profiles.** `SiteProfile` holds owned strings and
+  exposes `chapter_marker` + `page_param`; generic sites are added via `.ini`
+  files in `<config_dir>/profiles/` (required: name, host, content_selector).
+  `profiles::all()` merges built-ins with loaded files; bad files skipped with a
+  warning; a `README.txt` self-documents; `crawler profiles` lists them.
+- **Windowless scheduled task.** The task runs `wscript.exe sync-hidden.vbs`
+  (`WScript.Shell.Run "<exe> sync", 0, False`), which hides the console. Keeps
+  the no-password "only when logged on" task; uninstall removes the launcher.
+- **Fallback content upgrade.** After gap-fill, `sync_novel` re-fetches any
+  chapter held from a fallback that the primary now offers, replacing it with the
+  primary's content and clearing its exported flag. Fires once after a lagging
+  primary catches up; counted as `SyncReport.upgraded`.
+- **Storage crate caveat.** Pinned `rusqlite = 0.31` (bundled SQLite) to dodge
+  `libsqlite3-sys 0.38.1`'s unstable `cfg_select!` on Rust 1.92; the C toolchain
+  itself was never the blocker. Revisit when the crate/toolchain catch up.
+- **Status hints mapped**: novgo `og:novel:status` "1"=Ongoing/"2"=Completed and
+  freewebnovel word forms; default `poll_interval_minutes` = 60.
+
+### Still open
+
+- **EPUB cover embedding.** `cover_url` is captured/stored but not downloaded or
+  embedded in the EPUB. Add via `epub-builder`'s `add_cover_image` (fetch the
+  image with the same politeness as chapters).
+- **Observability / logging.** No `status` command or log file yet; a windowless
+  scheduled run discards stderr, so a log is the main gap for debugging it.
+- **Reduced poll cadence for *Likely complete* novels.** The state exists, but
+  sync polls those at the normal interval regardless (the delta check is cheap
+  anyway); a genuinely reduced per-state cadence is deferred.
+- **auto_append not live-tested.** Exercised by logic and the auto_export path,
+  but observing an append on genuinely new chapters needs a novel that updates
+  during a test window. Verify opportunistically.
+- **Linux/macOS `ServiceManager`.** Only the Windows Task Scheduler impl exists;
+  other platforms are stubbed behind the trait.
+- **zstd compression of stored text.** Not needed yet at text sizes; revisit for
+  images or very large libraries.
+- **Genre metadata** (`og:novel:genre`) is available but not captured/stored.
+- **Same-site duplicate sources** show the same profile name in `subs`/progress
+  (cosmetic; only affects the contrived same-site case, not real cross-site use).
