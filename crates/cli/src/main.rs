@@ -76,6 +76,8 @@ enum Command {
     },
     /// Show the config file path and current settings.
     Config,
+    /// List loaded site profiles and where to add custom ones.
+    Profiles,
     /// List a novel's discovered chapters (walks the full ToC; no DB, no bodies).
     List {
         url: String,
@@ -123,6 +125,7 @@ async fn main() -> Result<()> {
             ServiceAction::Status => service_status(),
         },
         Command::Config => config_show(&config),
+        Command::Profiles => profiles_show(),
         Command::List { url, delay_ms } => list(&config, url, delay_ms).await,
     }
 }
@@ -502,6 +505,23 @@ fn config_show(config: &Config) -> Result<()> {
     println!("  auto_export           = {}", config.auto_export);
     println!("  auto_append           = {}", config.auto_append);
     println!("  split_every_chapters  = {}", config.split_every_chapters);
+    Ok(())
+}
+
+fn profiles_show() -> Result<()> {
+    use crawler_core::profiles;
+    // Calling all() also generates the README in the profiles folder.
+    let loaded = profiles::all();
+    if let Some(dir) = profiles::profiles_dir() {
+        println!("Add custom site profiles (.ini) in: {}", dir.display());
+        println!("(see README.txt there for the format)\n");
+    }
+    println!("Config-driven profiles:");
+    for p in &loaded {
+        println!("  {} — {}", p.host, p.name);
+    }
+    println!("Built-in hand-written adapters:");
+    println!("  freewebnovel.com — freewebnovel (Tier-2 curl)");
     Ok(())
 }
 

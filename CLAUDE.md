@@ -95,6 +95,7 @@ From the repo root:
   - `crawler prune [--retention-days N]` — purge exported chapters of
     LikelyComplete novels (never un-exported chapters or ongoing novels).
   - `crawler config` — show the config.ini path and current settings.
+  - `crawler profiles` — list loaded site profiles + the folder for custom ones.
   - `crawler service install|uninstall|status [--interval-minutes N]` — manage
     the Windows Task Scheduler job that runs `crawler sync`.
   - `crawler list <novel-url>` — discovery check: walk the full ToC, report
@@ -121,8 +122,10 @@ Cargo workspace, two crates under `crates/`:
     the non-`Send` `scraper::Html` never crosses an `.await`.
   - `freewebnovel` — hand-written `FreewebnovelSource` (AJAX-ToC site). Reuses
     the shared extractors; discovery generates sequential chapter URLs.
-  - `profiles` — built-in `SiteProfile`s (novgo). `crate::build_source` (in
-    lib.rs) resolves a URL to its adapter + fetch tier by host.
+  - `profiles` — `SiteProfile`s: built-in (novgo) plus user `.ini` files loaded
+    from `<config_dir>/profiles/` (`all()` merges them; self-documents via a
+    generated README; bad files skipped with a warning). `crate::build_source`
+    (in lib.rs) resolves a URL to its adapter + fetch tier by host.
   - `model` — domain types (`NovelMeta`, `ChapterRef`, `Chapter`, `NovelStatus`).
   - `epub` — EPUB packaging (reconstructed XHTML; atomic temp-file+rename).
   - `paths` — library layout (`epub_path`, `novel_dir`): author/novel/epub tree.

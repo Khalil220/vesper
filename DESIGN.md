@@ -309,9 +309,13 @@ Verified by probing during design:
   (shell-out). `build_source` resolves adapter + tier by host. Shared extractors
   (`parse_novel_meta`, `parse_chapter_body`, status parsing) are reused, so the
   storage/sync/export pipeline needed no changes.
-- **Generic profile format for config-driven sites** (external files with
-  selectors/pagination/tier) is still open — the two current sources are in
-  code. Do this when a third, generic-shaped site appears.
+- **External config-driven profiles — done.** `SiteProfile` holds owned strings
+  and exposes `chapter_marker` + `page_param`, so generic-shaped sites can be
+  added via `.ini` files in `<config_dir>/profiles/` (required: name, host,
+  content_selector; the rest default). `profiles::all()` merges built-ins with
+  externally-loaded ones; bad files are skipped with a warning; a `README.txt`
+  self-documents the format. `crawler profiles` lists what's loaded. Sites
+  needing JS/odd layouts still need a hand-written adapter (freewebnovel).
 - **Windowless scheduled task — done.** The task runs `wscript.exe` against a
   generated `sync-hidden.vbs` (in the data dir) that does
   `WScript.Shell.Run "<exe> sync", 0, False` — window style 0 hides the console,

@@ -48,16 +48,21 @@ pub trait Source: Send + Sync {
     }
 }
 
-/// A declarative description of a site that fits the generic adapter.
+/// A declarative description of a site that fits the generic adapter. Owned
+/// strings so profiles can be loaded from external config files at runtime.
 #[derive(Debug, Clone)]
 pub struct SiteProfile {
-    pub name: &'static str,
+    pub name: String,
     /// Host this profile handles, e.g. `"novgo.net"`.
-    pub host: &'static str,
+    pub host: String,
     /// CSS selector for the element containing a chapter's prose.
-    pub content_selector: &'static str,
+    pub content_selector: String,
     /// CSS selector for paragraph elements within the content container.
-    pub paragraph_selector: &'static str,
+    pub paragraph_selector: String,
+    /// Substring that marks a chapter link's href (e.g. `"/chapter-"`).
+    pub chapter_marker: String,
+    /// Query parameter for ToC pagination (e.g. `"page"` => `?page=N`).
+    pub page_param: String,
     /// Safety cap on how many ToC pages to walk.
     pub max_pages: u32,
 }
@@ -77,13 +82,13 @@ impl<F: Fetcher> GenericSource<F> {
 #[async_trait]
 impl<F: Fetcher> Source for GenericSource<F> {
     fn name(&self) -> &str {
-        self.profile.name
+        &self.profile.name
     }
 
     fn matches(&self, url: &str) -> bool {
         Url::parse(url)
             .ok()
-            .and_then(|u| u.host_str().map(|h| h.eq_ignore_ascii_case(self.profile.host)))
+            .and_then(|u| u.host_str().map(|h| h.eq_ignore_ascii_case(&self.profile.host)))
             .unwrap_or(false)
     }
 
@@ -102,10 +107,10 @@ impl<F: Fetcher> Source for GenericSource<F> {
             let page_url = if page == 1 {
                 url.to_string()
             } else {
-                format!("{url}?page={page}")
+                format!("{url}?{}={page}", self.profile.page_param)
             };
             let html = self.fetcher.get(&page_url).await?;
-            let links = parse_chapter_links(&html, url)?;
+            let links = parse_chapter_links(&html, url, &self.profile.chapter_marker)?;
 
             // A page with no chapter links means we've walked past the last ToC
             // page (or discovery is misconfigured); either way, stop.
@@ -140,8 +145,8 @@ impl<F: Fetcher> Source for GenericSource<F> {
         let html = self.fetcher.get(&chapter.url).await?;
         let paragraphs = parse_chapter_body(
             &html,
-            self.profile.content_selector,
-            self.profile.paragraph_selector,
+            &self.profile.content_selector,
+            &self.profile.paragraph_selector,
         )?;
         Ok(Chapter {
             number: chapter.number,
@@ -155,7 +160,7 @@ impl<F: Fetcher> Source for GenericSource<F> {
         // first block — enough to spot and fetch a handful of new chapters
         // without walking the entire table of contents.
         let html = self.fetcher.get(url).await?;
-        parse_chapter_links(&html, url)
+        parse_chapter_links(&html, url, &self.profile.chapter_marker)
     }
 }
 
@@ -214,7 +219,7 @@ pub(crate) fn parse_novel_meta(html: &str, source_url: &str) -> Result<NovelMeta
 
 /// Collect chapter links from a table-of-contents page, resolved to absolute
 /// URLs. Deduplication and ordering are the caller's job (via `BTreeMap`).
-fn parse_chapter_links(html: &str, base_url: &str) -> Result<Vec<ChapterRef>> {
+fn parse_chapter_links(html: &str, base_url: &str, marker: &str) -> Result<Vec<ChapterRef>> {
     let doc = Html::parse_document(html);
     let base = Url::parse(base_url).with_context(|| format!("parsing base URL {base_url}"))?;
     let anchors = sel("a[href]")?;
@@ -224,7 +229,7 @@ fn parse_chapter_links(html: &str, base_url: &str) -> Result<Vec<ChapterRef>> {
         let Some(href) = a.value().attr("href") else {
             continue;
         };
-        if !href.contains("/chapter-") {
+        if !href.contains(marker) {
             continue;
         }
         let Ok(abs) = base.join(href) else {
@@ -319,7 +324,7 @@ mod tests {
     #[test]
     fn parses_and_resolves_chapter_links() {
         let links =
-            parse_chapter_links(NOVEL_HTML, "https://novgo.net/cultivation-online-novel.html")
+            parse_chapter_links(NOVEL_HTML, "https://novgo.net/cultivation-online-novel.html", "/chapter-")
                 .unwrap();
         // Two distinct chapters plus a duplicate; the non-chapter link is skipped.
         assert_eq!(links.len(), 3);
