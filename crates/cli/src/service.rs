@@ -34,9 +34,17 @@ pub fn manager() -> Result<Box<dyn ServiceManager>> {
     {
         Ok(Box::new(windows::WindowsTaskScheduler))
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
     {
-        anyhow::bail!("background-service install is only implemented on Windows so far")
+        Ok(Box::new(linux::SystemdUser))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        Ok(Box::new(macos::Launchd))
+    }
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+    {
+        anyhow::bail!("background-service install is not implemented on this platform")
     }
 }
 
@@ -135,6 +143,198 @@ mod windows {
                 installed: out.status.success(),
                 detail: if out.status.success() {
                     String::from_utf8_lossy(&out.stdout).trim().to_string()
+                } else {
+                    "not installed".to_string()
+                },
+            })
+        }
+    }
+}
+
+// NOTE: the Linux and macOS implementations below are UNVERIFIED — they cannot
+// be compiled or run on the Windows development machine (cfg-gated code is not
+// type-checked here, and the C dependencies don't cross-compile). Treat them as
+// a careful starting point that needs testing on a real Linux/macOS box before
+// being relied on.
+
+#[cfg(target_os = "linux")]
+mod linux {
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+
+    use anyhow::{anyhow, bail, Result};
+
+    use super::{ServiceManager, ServiceStatus, TASK_NAME};
+
+    /// systemd *user* units live here (no root needed).
+    fn unit_dir() -> Result<PathBuf> {
+        let base = std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
+            .ok_or_else(|| anyhow!("cannot resolve ~/.config"))?;
+        Ok(base.join("systemd").join("user"))
+    }
+
+    fn service_unit() -> String {
+        format!("{TASK_NAME}.service")
+    }
+    fn timer_unit() -> String {
+        format!("{TASK_NAME}.timer")
+    }
+
+    fn systemctl(args: &[&str]) -> Result<std::process::Output> {
+        Command::new("systemctl")
+            .arg("--user")
+            .args(args)
+            .output()
+            .map_err(|e| anyhow!("running systemctl: {e}"))
+    }
+
+    pub struct SystemdUser;
+
+    impl ServiceManager for SystemdUser {
+        fn install(&self, exe: &Path, interval_minutes: u32) -> Result<()> {
+            let dir = unit_dir()?;
+            std::fs::create_dir_all(&dir)?;
+
+            let service = format!(
+                "[Unit]\nDescription=Webnovel crawler sync\n\n\
+                 [Service]\nType=oneshot\nExecStart=\"{}\" sync\n",
+                exe.display()
+            );
+            let timer = format!(
+                "[Unit]\nDescription=Webnovel crawler sync timer\n\n\
+                 [Timer]\nOnBootSec={interval_minutes}min\nOnUnitActiveSec={interval_minutes}min\n\
+                 Persistent=true\n\n\
+                 [Install]\nWantedBy=timers.target\n"
+            );
+            std::fs::write(dir.join(service_unit()), service)?;
+            std::fs::write(dir.join(timer_unit()), timer)?;
+
+            let reload = systemctl(&["daemon-reload"])?;
+            if !reload.status.success() {
+                bail!(
+                    "systemctl daemon-reload failed: {}",
+                    String::from_utf8_lossy(&reload.stderr).trim()
+                );
+            }
+            let enable = systemctl(&["enable", "--now", &timer_unit()])?;
+            if !enable.status.success() {
+                bail!(
+                    "systemctl enable failed: {}",
+                    String::from_utf8_lossy(&enable.stderr).trim()
+                );
+            }
+            Ok(())
+        }
+
+        fn uninstall(&self) -> Result<()> {
+            let _ = systemctl(&["disable", "--now", &timer_unit()]);
+            if let Ok(dir) = unit_dir() {
+                let _ = std::fs::remove_file(dir.join(timer_unit()));
+                let _ = std::fs::remove_file(dir.join(service_unit()));
+            }
+            let _ = systemctl(&["daemon-reload"]);
+            Ok(())
+        }
+
+        fn status(&self) -> Result<ServiceStatus> {
+            let out = systemctl(&["is-enabled", &timer_unit()])?;
+            let detail = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            Ok(ServiceStatus {
+                installed: out.status.success(),
+                detail: if out.status.success() {
+                    format!("timer is {detail}")
+                } else {
+                    "not installed".to_string()
+                },
+            })
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+mod macos {
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+
+    use anyhow::{anyhow, bail, Result};
+
+    use super::{ServiceManager, ServiceStatus};
+
+    fn label() -> String {
+        "com.webnovelcrawler.sync".to_string()
+    }
+
+    fn plist_path() -> Result<PathBuf> {
+        let home = std::env::var_os("HOME").ok_or_else(|| anyhow!("cannot resolve $HOME"))?;
+        Ok(PathBuf::from(home)
+            .join("Library")
+            .join("LaunchAgents")
+            .join(format!("{}.plist", label())))
+    }
+
+    pub struct Launchd;
+
+    impl ServiceManager for Launchd {
+        fn install(&self, exe: &Path, interval_minutes: u32) -> Result<()> {
+            let path = plist_path()?;
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let plist = format!(
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+                 <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \
+                 \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
+                 <plist version=\"1.0\"><dict>\n\
+                 <key>Label</key><string>{label}</string>\n\
+                 <key>ProgramArguments</key><array><string>{exe}</string><string>sync</string></array>\n\
+                 <key>StartInterval</key><integer>{secs}</integer>\n\
+                 </dict></plist>\n",
+                label = label(),
+                exe = exe.display(),
+                secs = interval_minutes as u64 * 60
+            );
+            std::fs::write(&path, plist)?;
+
+            let path_str = path.to_string_lossy().to_string();
+            // Reload if already loaded (ignore errors), then load.
+            let _ = Command::new("launchctl").args(["unload", &path_str]).output();
+            let out = Command::new("launchctl")
+                .args(["load", &path_str])
+                .output()
+                .map_err(|e| anyhow!("running launchctl: {e}"))?;
+            if !out.status.success() {
+                bail!(
+                    "launchctl load failed: {}",
+                    String::from_utf8_lossy(&out.stderr).trim()
+                );
+            }
+            Ok(())
+        }
+
+        fn uninstall(&self) -> Result<()> {
+            if let Ok(path) = plist_path() {
+                let _ = Command::new("launchctl")
+                    .args(["unload", &path.to_string_lossy()])
+                    .output();
+                let _ = std::fs::remove_file(&path);
+            }
+            Ok(())
+        }
+
+        fn status(&self) -> Result<ServiceStatus> {
+            let out = Command::new("launchctl")
+                .arg("list")
+                .output()
+                .map_err(|e| anyhow!("running launchctl: {e}"))?;
+            let listed = String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .any(|l| l.contains(&label()));
+            Ok(ServiceStatus {
+                installed: listed,
+                detail: if listed {
+                    format!("loaded: {}", label())
                 } else {
                     "not installed".to_string()
                 },
