@@ -1,0 +1,13 @@
+# Rust
+/target
+**/*.rs.bk
+Cargo.lock
+
+# Probe / scratch artifacts
+*.html
+
+# Local app data / runtime
+*.db
+*.db-wal
+*.db-shm
+*.log
