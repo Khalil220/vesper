@@ -27,31 +27,43 @@ struct Cli {
 enum Command {
     /// Subscribe to a novel (registers it and its primary source).
     Subscribe {
+        /// Novel landing-page URL.
         url: String,
+        /// Override the request delay, in milliseconds (default: config value).
         #[arg(long)]
         delay_ms: Option<u64>,
     },
     /// Add an alternate (fallback) source to an existing subscription.
     AddSource {
+        /// Existing novel to attach the source to (id or title).
         novel: String,
+        /// New source URL for the same novel.
         url: String,
+        /// Override the request delay, in milliseconds (default: config value).
         #[arg(long)]
         delay_ms: Option<u64>,
     },
     /// List all subscriptions.
     Subs,
     /// Remove a subscription and its downloaded chapters.
-    Unsubscribe { novel: String },
+    Unsubscribe {
+        /// Novel to remove (id or title).
+        novel: String,
+    },
     /// Download missing chapters for a subscribed novel (resume-aware).
     Fetch {
+        /// Novel to fetch (id or title).
         novel: String,
+        /// Max new chapters to fetch this run (0 = all missing).
         #[arg(long, default_value_t = 0)]
         limit: usize,
+        /// Override the request delay, in milliseconds (default: config value).
         #[arg(long)]
         delay_ms: Option<u64>,
     },
     /// Build an EPUB from a subscribed novel's stored chapters.
     Export {
+        /// Novel to export (id or title).
         novel: String,
         /// Output path override (single file, ignores output_dir/splitting).
         #[arg(long)]
@@ -59,13 +71,16 @@ enum Command {
     },
     /// Purge exported chapters of completed novels to free space.
     Prune {
+        /// Days to keep exported chapters before purging (default: config value).
         #[arg(long)]
         retention_days: Option<u32>,
     },
     /// Sync all subscriptions (what the background task runs).
     Sync {
+        /// Max new chapters per novel this run (0 = all missing).
         #[arg(long, default_value_t = 0)]
         limit: usize,
+        /// Override the request delay, in milliseconds (default: config value).
         #[arg(long)]
         delay_ms: Option<u64>,
     },
@@ -82,7 +97,9 @@ enum Command {
     Profiles,
     /// List a novel's discovered chapters (walks the full ToC; no DB, no bodies).
     List {
+        /// Novel landing-page URL.
         url: String,
+        /// Override the request delay, in milliseconds (default: config value).
         #[arg(long)]
         delay_ms: Option<u64>,
     },
