@@ -76,7 +76,9 @@ From the repo root:
 - Test: `cargo test` (unit tests live inline in `core`'s modules)
 - Run (subscription workflow, all DB-backed):
   - `crawler subscribe <novel-url>` — register a novel + its primary source.
-  - `crawler subs` — list subscriptions.
+  - `crawler add-source <novel> <novel-url>` — add a fallback source to an
+    existing novel (warns if the source's title differs; proceeds anyway).
+  - `crawler subs` — list subscriptions (shows primary + fallback sources).
   - `crawler fetch <novel> [--limit N]` — download missing chapters into the DB
     (resume-aware; `<novel>` is an id or title; `--limit 0` = all missing).
   - `crawler export <novel> [--out PATH]` — build an EPUB from stored chapters.
@@ -110,10 +112,13 @@ Cargo workspace, two crates under `crates/`:
     schema, WAL, resume-aware chapter insert, DB-backed load for export. rusqlite
     pinned to 0.31 (cfg_select workaround). Connection is not `Send`, so the CLI
     uses a current-thread runtime.
+  - `sync` — `sync_novel`: the shared multi-source engine. Discovers each ranked
+    source (best-effort), gap-fills missing chapter numbers from the
+    highest-priority source that has them (primary authoritative), returns a
+    `SyncReport`. Used by `fetch` now and the future scheduled `sync`.
   - `util` — filename sanitization, chapter number/title parsing, `now_unix`.
 - `cli` (bin `crawler`): clap subcommands on a current-thread Tokio runtime.
-  subscribe / subs / fetch / export / unsubscribe / list.
+  subscribe / add-source / subs / fetch / export / unsubscribe / list.
 
-Not yet built (see DESIGN.md): multi-source `add-source` + active fallback
-gap-fill (Step 2), the sync command + Task Scheduler install, retention, and the
-Backfilling->Live auto-export state machine.
+Not yet built (see DESIGN.md): the scheduled `sync` command + Task Scheduler
+install, retention, and the Backfilling->Live auto-export state machine.

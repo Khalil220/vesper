@@ -9,6 +9,7 @@ pub mod paths;
 pub mod profiles;
 pub mod source;
 pub mod store;
+pub mod sync;
 pub mod util;
 
 pub use epub::build_epub;
@@ -17,4 +18,5 @@ pub use model::{Chapter, ChapterRef, DerivedState, NovelMeta, NovelStatus};
 pub use paths::{epub_path, novel_dir};
 pub use source::{GenericSource, SiteProfile, Source};
 pub use store::{default_db_path, Store, StoredNovel, StoredSource};
+pub use sync::{sync_novel, SyncReport};
 pub use util::sanitize_filename;

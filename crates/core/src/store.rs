@@ -96,6 +96,15 @@ impl Store {
         Self::open(&default_db_path()?)
     }
 
+    /// An ephemeral in-memory DB (tests, dry runs).
+    pub fn open_in_memory() -> Result<Self> {
+        let conn = Connection::open_in_memory()?;
+        conn.execute_batch("PRAGMA foreign_keys=ON;")?;
+        let store = Store { conn };
+        store.migrate()?;
+        Ok(store)
+    }
+
     fn migrate(&self) -> Result<()> {
         self.conn.execute_batch(
             r#"
@@ -171,6 +180,26 @@ impl Store {
             params![novel_id, source_name, meta.source_url],
         )?;
         Ok(novel_id)
+    }
+
+    /// Add an alternate (fallback) source to an existing novel, at the next
+    /// priority. The caller is responsible for confirming it is the same novel
+    /// (cross-site titles differ). Errors if the URL is already in the library.
+    pub fn add_source(&self, novel_id: i64, source_name: &str, url: &str) -> Result<i64> {
+        if self.source_id_for_url(url)?.is_some() {
+            bail!("that source URL is already in the library");
+        }
+        let next_priority: i64 = self.conn.query_row(
+            "SELECT coalesce(max(priority), 0) + 1 FROM sources WHERE novel_id = ?1",
+            params![novel_id],
+            |r| r.get(0),
+        )?;
+        self.conn.execute(
+            "INSERT INTO sources (novel_id, source_name, url, priority, last_seen_chapter, last_synced_at)
+             VALUES (?1, ?2, ?3, ?4, NULL, NULL)",
+            params![novel_id, source_name, url, next_priority],
+        )?;
+        Ok(self.conn.last_insert_rowid())
     }
 
     fn source_id_for_url(&self, url: &str) -> Result<Option<i64>> {
@@ -374,12 +403,7 @@ mod tests {
     use crate::model::NovelStatus;
 
     fn mem_store() -> Store {
-        // A fresh in-memory DB per test.
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
-        let store = Store { conn };
-        store.migrate().unwrap();
-        store
+        Store::open_in_memory().unwrap()
     }
 
     fn sample_meta(url: &str) -> NovelMeta {
@@ -434,6 +458,25 @@ mod tests {
         let loaded = s.load_chapters(id).unwrap();
         assert_eq!(loaded.len(), 2);
         assert_eq!(loaded[0].paragraphs, vec!["Para one.", "Para two."]);
+    }
+
+    #[test]
+    fn add_source_appends_at_next_priority() {
+        let s = mem_store();
+        let id = s.subscribe(&sample_meta("https://novgo.net/a.html"), "novgo").unwrap();
+        s.add_source(id, "othersite", "https://other.example/a.html").unwrap();
+
+        let novel = s.find_novel(&id.to_string()).unwrap().unwrap();
+        assert_eq!(novel.sources.len(), 2);
+        assert_eq!(novel.primary_source().unwrap().priority, 1);
+        let fallback = novel.sources.iter().find(|s| s.priority == 2).unwrap();
+        assert_eq!(fallback.name, "othersite");
+
+        // Duplicate URL is rejected.
+        let err = s
+            .add_source(id, "novgo", "https://novgo.net/a.html")
+            .unwrap_err();
+        assert!(err.to_string().contains("already in the library"));
     }
 
     #[test]

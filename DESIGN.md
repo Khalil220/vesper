@@ -302,6 +302,15 @@ Verified by probing during design:
 - Decide whether to zstd-compress stored chapter text from day one or later.
 - Design the generic site-profile format (selectors, pagination pattern, tier,
   rate limits) and the second source to validate the abstraction against novgo.
+- **Fallback content upgrade (deferred):** once a chapter is stored from a
+  fallback, a later sync does not re-fetch it from the primary even if the
+  primary gains that number. "Primary authoritative" currently governs *where a
+  not-yet-stored chapter is fetched from*, not retroactive upgrades. Acceptable
+  for v1; revisit if it matters.
+- **Same-site duplicate sources are indistinguishable by name:** two sources on
+  the same site both show their profile name (e.g. `novgo`) in `subs`/progress.
+  Fine for the real cross-site case; only cosmetic for the contrived same-site
+  case.
 - **Storage crate caveat:** on the current toolchain (Rust 1.92), the latest
   `rusqlite` pulls `libsqlite3-sys 0.38.1`, whose build script uses the unstable
   `cfg_select!` and fails to compile on stable. When adding persistence, pin an

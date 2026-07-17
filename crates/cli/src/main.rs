@@ -6,10 +6,11 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use anyhow::{anyhow, ensure, Context, Result};
+use anyhow::{anyhow, ensure, Result};
 use clap::{Parser, Subcommand};
 use crawler_core::{
-    build_epub, epub_path, profiles, GenericSource, ReqwestFetcher, Source, Store,
+    build_epub, epub_path, profiles, sync_novel, GenericSource, ReqwestFetcher, Source, Store,
+    StoredSource,
 };
 
 #[derive(Parser)]
@@ -24,6 +25,15 @@ enum Command {
     /// Subscribe to a novel (registers it and its primary source).
     Subscribe {
         /// Novel landing-page URL.
+        url: String,
+        #[arg(long, default_value_t = 1500)]
+        delay_ms: u64,
+    },
+    /// Add an alternate (fallback) source to an existing subscription.
+    AddSource {
+        /// Existing novel id or title.
+        novel: String,
+        /// New source URL for the same novel.
         url: String,
         #[arg(long, default_value_t = 1500)]
         delay_ms: u64,
@@ -66,6 +76,11 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
         Command::Subscribe { url, delay_ms } => subscribe(url, delay_ms).await,
+        Command::AddSource {
+            novel,
+            url,
+            delay_ms,
+        } => add_source(novel, url, delay_ms).await,
         Command::Subs => subs(),
         Command::Unsubscribe { novel } => unsubscribe(novel),
         Command::Fetch {
@@ -108,6 +123,37 @@ async fn subscribe(url: String, delay_ms: u64) -> Result<()> {
     }
     println!("  Source: {} ({url})", source.name());
     println!("Next: `crawler fetch {id}` to download chapters.");
+    Ok(())
+}
+
+async fn add_source(novel: String, url: String, delay_ms: u64) -> Result<()> {
+    let store = Store::open_default()?;
+    let found = store
+        .find_novel(&novel)?
+        .ok_or_else(|| anyhow!("no subscription matches \"{novel}\""))?;
+
+    // Building the source validates that we have an adapter for the URL's host.
+    let source = source_for(&url, delay_ms)?;
+
+    // Sanity check: fetch the new source's title and warn if it differs — the
+    // user already confirmed by running this command, so we proceed regardless.
+    eprintln!("Checking new source...");
+    if let Ok(meta) = source.fetch_novel(&url).await {
+        if !meta.title.eq_ignore_ascii_case(&found.title) {
+            eprintln!(
+                "  warning: this source's title is \"{}\", but the novel is \"{}\". \
+                 Proceeding since you asked to link them.",
+                meta.title, found.title
+            );
+        }
+    }
+
+    let sid = store.add_source(found.id, source.name(), &url)?;
+    println!(
+        "Added {} as a fallback source (#{sid}) for \"{}\".",
+        source.name(),
+        found.title
+    );
     Ok(())
 }
 
@@ -158,55 +204,47 @@ async fn fetch(novel: String, limit: usize, delay_ms: u64) -> Result<()> {
     let found = store
         .find_novel(&novel)?
         .ok_or_else(|| anyhow!("no subscription matches \"{novel}\""))?;
-    let primary = found
-        .primary_source()
-        .ok_or_else(|| anyhow!("novel #{} has no source", found.id))?
-        .clone();
 
-    let source = source_for(&primary.url, delay_ms)?;
-
-    eprintln!("Discovering chapters for \"{}\"...", found.title);
-    let refs = source.discover_chapters(&primary.url, None).await?;
-    ensure!(!refs.is_empty(), "no chapters found at {}", primary.url);
-
-    let have = store.stored_chapter_numbers(found.id)?;
-    let missing: Vec<_> = refs.iter().filter(|r| !have.contains(&r.number)).collect();
-    let to_fetch: Vec<_> = if limit == 0 {
-        missing
-    } else {
-        missing.into_iter().take(limit).collect()
-    };
-
-    eprintln!(
-        "  {} discovered, {} already stored, {} to fetch.",
-        refs.len(),
-        have.len(),
-        to_fetch.len()
-    );
-    if to_fetch.is_empty() {
-        println!("Already up to date ({} chapters).", have.len());
-        return Ok(());
-    }
-
-    let mut fetched = 0u32;
-    let mut highest = primary.last_seen_chapter.unwrap_or(0);
-    for (i, cref) in to_fetch.iter().enumerate() {
-        eprintln!("[{}/{}] ch.{} {}", i + 1, to_fetch.len(), cref.number, cref.title);
-        let chapter = source
-            .fetch_chapter(cref)
-            .await
-            .with_context(|| format!("fetching chapter {}", cref.number))?;
-        if store.insert_chapter_if_absent(found.id, primary.id, &chapter)? {
-            fetched += 1;
+    // Build a source adapter per stored source, in priority order (primary
+    // first). Skip any source whose host we don't have an adapter for.
+    let mut sources: Vec<(StoredSource, Box<dyn Source>)> = Vec::new();
+    for s in &found.sources {
+        match profiles::for_url(&s.url) {
+            Some(profile) => {
+                let fetcher = ReqwestFetcher::new(Duration::from_millis(delay_ms))?;
+                sources.push((s.clone(), Box::new(GenericSource::new(profile, fetcher))));
+            }
+            None => eprintln!("  (skipping source {} — no adapter for its host)", s.url),
         }
-        highest = highest.max(cref.number);
     }
-    store.update_source_progress(primary.id, highest)?;
+    ensure!(!sources.is_empty(), "no usable sources for \"{}\"", found.title);
 
+    let before = store.stored_chapter_numbers(found.id)?.len();
+    eprintln!("Syncing \"{}\" from {} source(s)...", found.title, sources.len());
+
+    let report = sync_novel(&store, found.id, &sources, limit, |line| eprintln!("  {line}")).await?;
+
+    for w in &report.warnings {
+        eprintln!("  ! {w}");
+    }
+    if !report.failures.is_empty() {
+        eprintln!(
+            "  ! {} chapter(s) could not be fetched from any source: {:?}",
+            report.failures.len(),
+            report.failures
+        );
+    }
+
+    let fallback_note = if report.from_fallback > 0 {
+        format!(" ({} from fallback sources)", report.from_fallback)
+    } else {
+        String::new()
+    };
     println!(
-        "Fetched {fetched} new chapters for \"{}\" (now {} stored).",
+        "Fetched {} new chapters for \"{}\"{fallback_note} (now {} stored).",
+        report.newly_fetched,
         found.title,
-        have.len() + fetched as usize
+        before + report.newly_fetched as usize
     );
     Ok(())
 }
