@@ -1,4 +1,4 @@
-//! Source adapters: how the crawler understands a given site.
+//! Source adapters: how Vesper understands a given site.
 //!
 //! Most novel sites are structurally identical (server-rendered HTML,
 //! CSS-selectable content, `?page=N` pagination), so they are expressed as a

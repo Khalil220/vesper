@@ -319,33 +319,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
 
 [[package]]
-name = "crawler"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "crawler-core",
- "directories",
- "tokio",
-]
-
-[[package]]
-name = "crawler-core"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "directories",
- "epub-builder",
- "reqwest",
- "rusqlite",
- "rust-ini",
- "scraper",
- "tokio",
- "url",
-]
-
-[[package]]
 name = "crc32fast"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2210,6 +2183,33 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
+
+[[package]]
+name = "vesper"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "directories",
+ "tokio",
+ "vesper-core",
+]
+
+[[package]]
+name = "vesper-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "directories",
+ "epub-builder",
+ "reqwest",
+ "rusqlite",
+ "rust-ini",
+ "scraper",
+ "tokio",
+ "url",
+]
 
 [[package]]
 name = "want"

@@ -70,9 +70,9 @@ pub struct Store {
     conn: Connection,
 }
 
-/// Default library DB path: `%LOCALAPPDATA%/webnovel-crawler/data/library.db`.
+/// Default library DB path: `%LOCALAPPDATA%/vesper/data/library.db`.
 pub fn default_db_path() -> Result<PathBuf> {
-    let dirs = ProjectDirs::from("", "", "webnovel-crawler")
+    let dirs = ProjectDirs::from("", "", "vesper")
         .ok_or_else(|| anyhow!("could not resolve a local data directory"))?;
     Ok(dirs.data_local_dir().join("library.db"))
 }

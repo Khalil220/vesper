@@ -1,15 +1,15 @@
 [package]
-name = "crawler"
+name = "vesper"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 
 [[bin]]
-name = "crawler"
+name = "vesper"
 path = "src/main.rs"
 
 [dependencies]
-crawler-core = { path = "../core" }
+vesper-core = { path = "../core" }
 tokio = { version = "1", features = ["macros", "rt"] }
 clap = { version = "4", features = ["derive"] }
 directories = "5"

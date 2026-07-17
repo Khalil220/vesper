@@ -36,11 +36,11 @@ pub struct Config {
     pub log_path: PathBuf,
 }
 
-/// Default log path: `<data_local>/crawler.log`.
+/// Default log path: `<data_local>/vesper.log`.
 pub fn default_log_path() -> PathBuf {
-    ProjectDirs::from("", "", "webnovel-crawler")
-        .map(|d| d.data_local_dir().join("crawler.log"))
-        .unwrap_or_else(|| PathBuf::from("crawler.log"))
+    ProjectDirs::from("", "", "vesper")
+        .map(|d| d.data_local_dir().join("vesper.log"))
+        .unwrap_or_else(|| PathBuf::from("vesper.log"))
 }
 
 /// Default EPUB output directory: `<Documents>/lightnovels`, or `./lightnovels`.
@@ -69,7 +69,7 @@ impl Default for Config {
 
 /// Path to the config file: `<config_dir>/config.ini`.
 pub fn config_path() -> Result<PathBuf> {
-    let dirs = ProjectDirs::from("", "", "webnovel-crawler")
+    let dirs = ProjectDirs::from("", "", "vesper")
         .ok_or_else(|| anyhow!("could not resolve a config directory"))?;
     Ok(dirs.config_dir().join("config.ini"))
 }
@@ -138,7 +138,7 @@ impl Config {
                 .with_context(|| format!("creating config dir {}", parent.display()))?;
         }
         let content = format!(
-            "; webnovel-crawler configuration\n\
+            "; vesper configuration\n\
              ; Edit values below; delete this file to regenerate defaults.\n\n\
              [general]\n\
              ; Where EPUBs are written: <output_dir>/<author>/<novel>/...\n\
@@ -185,7 +185,7 @@ mod tests {
 
     #[test]
     fn write_then_read_roundtrips() {
-        let dir = std::env::temp_dir().join(format!("crawler-cfg-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vesper-cfg-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.ini");
 
@@ -208,25 +208,25 @@ mod tests {
 
     #[test]
     fn windows_paths_roundtrip_without_escaping() {
-        let dir = std::env::temp_dir().join(format!("crawler-cfg-win-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vesper-cfg-win-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.ini");
 
         let mut cfg = Config::default();
         cfg.output_dir = PathBuf::from(r"C:\Users\test\Documents\lightnovels");
-        cfg.log_path = PathBuf::from(r"C:\Users\test\AppData\Local\wc\crawler.log");
+        cfg.log_path = PathBuf::from(r"C:\Users\test\AppData\Local\wc\vesper.log");
         cfg.write(&path).unwrap();
 
         let read = Config::read(&path).unwrap();
         assert_eq!(read.output_dir, PathBuf::from(r"C:\Users\test\Documents\lightnovels"));
-        assert_eq!(read.log_path, PathBuf::from(r"C:\Users\test\AppData\Local\wc\crawler.log"));
+        assert_eq!(read.log_path, PathBuf::from(r"C:\Users\test\AppData\Local\wc\vesper.log"));
 
         std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn missing_keys_fall_back_to_defaults() {
-        let dir = std::env::temp_dir().join(format!("crawler-cfg-test2-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vesper-cfg-test2-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.ini");
         std::fs::write(&path, "[general]\nrequest_delay_ms = 500\n").unwrap();

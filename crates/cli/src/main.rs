@@ -1,4 +1,4 @@
-//! `crawler` CLI.
+//! `vesper` CLI.
 //!
 //! Runs on a current-thread Tokio runtime: the SQLite connection is not `Send`,
 //! and a poller has no need for a multi-threaded work-stealing runtime anyway.
@@ -11,13 +11,13 @@ use std::time::Duration;
 
 use anyhow::{anyhow, ensure, Result};
 use clap::{Parser, Subcommand};
-use crawler_core::{
+use vesper_core::{
     build_epub, build_source, download_cover, epub_path, sync_novel, Config, DerivedState, Source,
     Store, StoredNovel, StoredSource, SyncReport,
 };
 
 #[derive(Parser)]
-#[command(name = "crawler", about = "Webnovel crawler -> EPUB", version)]
+#[command(name = "vesper", about = "Vesper: webnovel crawler -> EPUB", version)]
 struct Cli {
     #[command(subcommand)]
     cmd: Command,
@@ -240,13 +240,13 @@ fn log_line(config: &Config, msg: &str) {
         let _ = std::fs::create_dir_all(parent);
     }
     if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(&config.log_path) {
-        let ts = crawler_core::util::format_unix_utc(crawler_core::util::now_unix());
+        let ts = vesper_core::util::format_unix_utc(vesper_core::util::now_unix());
         let _ = writeln!(f, "[{ts}] {msg}");
     }
 }
 
 fn acquire_sync_lock() -> Result<Option<File>> {
-    let lock_path = crawler_core::default_db_path()?
+    let lock_path = vesper_core::default_db_path()?
         .parent()
         .map(|p| p.join("sync.lock"))
         .ok_or_else(|| anyhow!("cannot resolve lock path"))?;
@@ -282,7 +282,7 @@ async fn subscribe(config: &Config, url: String, delay_ms: Option<u64>) -> Resul
         println!("  Author: {author}");
     }
     println!("  Source: {} ({url})", source.name());
-    println!("Next: `crawler fetch {id}` to download chapters.");
+    println!("Next: `vesper fetch {id}` to download chapters.");
     Ok(())
 }
 
@@ -313,7 +313,7 @@ fn subs() -> Result<()> {
     let store = Store::open_default()?;
     let novels = store.list_subscriptions()?;
     if novels.is_empty() {
-        println!("No subscriptions yet. Add one with `crawler subscribe <url>`.");
+        println!("No subscriptions yet. Add one with `vesper subscribe <url>`.");
         return Ok(());
     }
     for n in novels {
@@ -398,7 +398,7 @@ async fn export(config: &Config, novel: String, out: Option<PathBuf>) -> Result<
     let chapters = store.load_chapters(found.id)?;
     ensure!(
         !chapters.is_empty(),
-        "\"{}\" has no downloaded chapters yet; run `crawler fetch {}` first",
+        "\"{}\" has no downloaded chapters yet; run `vesper fetch {}` first",
         found.title,
         found.id
     );
@@ -456,7 +456,7 @@ async fn sync_all(config: &Config, limit: usize, delay_ms: Option<u64>) -> Resul
         if novel.derived_state == DerivedState::LikelyComplete {
             if let Ok(Some(last)) = store.last_synced_at(novel.id) {
                 let window = config.likely_complete_recheck_days as i64 * 86_400;
-                if crawler_core::util::now_unix() - last < window {
+                if vesper_core::util::now_unix() - last < window {
                     eprintln!("[{}] finished; re-checked recently, skipping", novel.title);
                     continue;
                 }
@@ -546,13 +546,13 @@ fn service_status() -> Result<()> {
     if st.installed {
         println!("Background sync is INSTALLED.\n{}", st.detail);
     } else {
-        println!("Background sync is not installed. Install with `crawler service install`.");
+        println!("Background sync is not installed. Install with `vesper service install`.");
     }
     Ok(())
 }
 
 fn config_show(config: &Config) -> Result<()> {
-    let path = crawler_core::config::config_path()?;
+    let path = vesper_core::config::config_path()?;
     println!("Config file: {}", path.display());
     println!("  output_dir            = {}", config.output_dir.display());
     println!("  request_delay_ms      = {}", config.request_delay_ms);
@@ -569,7 +569,7 @@ fn config_show(config: &Config) -> Result<()> {
 
 fn status(config: &Config) -> Result<()> {
     let store = Store::open_default()?;
-    println!("Library DB: {}", crawler_core::default_db_path()?.display());
+    println!("Library DB: {}", vesper_core::default_db_path()?.display());
     println!("Log file:   {}", config.log_path.display());
 
     let novels = store.list_subscriptions()?;
@@ -602,7 +602,7 @@ fn status(config: &Config) -> Result<()> {
 }
 
 fn profiles_show() -> Result<()> {
-    use crawler_core::profiles;
+    use vesper_core::profiles;
     // Calling all() also generates the README in the profiles folder.
     let loaded = profiles::all();
     if let Some(dir) = profiles::profiles_dir() {

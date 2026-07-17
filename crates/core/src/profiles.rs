@@ -2,7 +2,7 @@
 //!
 //! Built-in profiles live here in code (novgo). Users can add more
 //! *config-driven* profiles by dropping `.ini` files into
-//! `<config_dir>/webnovel-crawler/profiles/` — no recompile — for any site that
+//! `<config_dir>/vesper/profiles/` — no recompile — for any site that
 //! fits the generic shape (server-rendered, CSS-selectable content, `?page=N`
 //! table of contents). A `README.txt` documenting the format is generated
 //! there on first use.
@@ -47,7 +47,7 @@ pub fn for_url(url: &str) -> Option<SiteProfile> {
 
 /// Directory holding user-supplied profile files.
 pub fn profiles_dir() -> Option<PathBuf> {
-    ProjectDirs::from("", "", "webnovel-crawler").map(|d| d.config_dir().join("profiles"))
+    ProjectDirs::from("", "", "vesper").map(|d| d.config_dir().join("profiles"))
 }
 
 /// Load external profiles, skipping (with a warning) any that fail to parse.
@@ -120,7 +120,7 @@ fn ensure_readme(dir: &std::path::Path) -> Result<()> {
         return Ok(());
     }
     let text = "\
-Add a site by creating a `.ini` file in this folder (one per site). The crawler\n\
+Add a site by creating a `.ini` file in this folder (one per site). Vesper\n\
 loads every `.ini` here at startup. Files that fail to parse are skipped with a\n\
 warning. This works for sites with the generic shape: server-rendered HTML,\n\
 CSS-selectable chapter text, and a `?page=N` paginated table of contents. Sites\n\
@@ -148,7 +148,7 @@ mod tests {
 
     #[test]
     fn load_profile_reads_required_and_defaults() {
-        let dir = std::env::temp_dir().join(format!("crawler-prof-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vesper-prof-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("mysite.ini");
         fs::write(
@@ -170,7 +170,7 @@ mod tests {
 
     #[test]
     fn load_profile_rejects_missing_required_key() {
-        let dir = std::env::temp_dir().join(format!("crawler-prof2-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vesper-prof2-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("bad.ini");
         fs::write(&path, "[profile]\nname = incomplete\n").unwrap();

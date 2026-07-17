@@ -1,8 +1,9 @@
 # Design
 
-A Rust tool that crawls webnovel sites, downloads chapters, and packages them
-into EPUB files. It has two faces sharing one codebase: a CLI for control and
-export, and a lightweight background sync that keeps subscribed novels current.
+**Vesper** is a Rust tool that crawls webnovel sites, downloads chapters, and
+packages them into EPUB files. It has two faces sharing one codebase: a CLI for
+control and export, and a lightweight background sync that keeps subscribed
+novels current.
 
 This document records the decisions made and *why*, so they don't get
 re-litigated later. CLAUDE.md holds the short rules-of-the-road and points here
@@ -321,7 +322,7 @@ Verified by probing during design:
   exposes `chapter_marker` + `page_param`; generic sites are added via `.ini`
   files in `<config_dir>/profiles/` (required: name, host, content_selector).
   `profiles::all()` merges built-ins with loaded files; bad files skipped with a
-  warning; a `README.txt` self-documents; `crawler profiles` lists them.
+  warning; a `README.txt` self-documents; `vesper profiles` lists them.
 - **Windowless scheduled task.** The task runs `wscript.exe sync-hidden.vbs`
   (`WScript.Shell.Run "<exe> sync", 0, False`), which hides the console. Keeps
   the no-password "only when logged on" task; uninstall removes the launcher.

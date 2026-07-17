@@ -48,11 +48,11 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
       - name: Build binary
-        run: cargo build --release -p crawler
+        run: cargo build --release -p vesper
       - name: install / status / uninstall
         continue-on-error: true
         run: |
-          BIN=target/release/crawler
+          BIN=target/release/vesper
           echo "== install ==";   "$BIN" service install --interval-minutes 30; echo "exit $?"
           echo "== status ==";    "$BIN" service status;                        echo "exit $?"
           echo "== generated unit/plist files =="

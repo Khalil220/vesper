@@ -1,8 +1,8 @@
 # CLAUDE.md
 
-Rust tool that crawls webnovel sites, downloads chapters, and packages them into
-EPUBs. One binary, two faces: a CLI (control + export) and a lightweight
-background sync that keeps subscribed novels current.
+**Vesper** — a Rust tool that crawls webnovel sites, downloads chapters, and
+packages them into EPUBs. One binary, two faces: a CLI (control + export) and a
+lightweight background sync that keeps subscribed novels current.
 
 **Status: implemented (v1).** All planned phases plus three sources (novgo
 profile; hand-written freewebnovel + lightnovelworld adapters), a second fetch
@@ -93,37 +93,37 @@ From the repo root:
 - Build: `cargo build`
 - Test: `cargo test` (unit tests live inline in `core`'s modules)
 - Run (subscription workflow, all DB-backed):
-  - `crawler subscribe <novel-url>` — register a novel + its primary source.
-  - `crawler add-source <novel> <novel-url>` — add a fallback source to an
+  - `vesper subscribe <novel-url>` — register a novel + its primary source.
+  - `vesper add-source <novel> <novel-url>` — add a fallback source to an
     existing novel (warns if the source's title differs; proceeds anyway).
-  - `crawler subs` — list subscriptions (shows primary + fallback sources).
-  - `crawler fetch <novel> [--limit N]` — download missing chapters into the DB
+  - `vesper subs` — list subscriptions (shows primary + fallback sources).
+  - `vesper fetch <novel> [--limit N]` — download missing chapters into the DB
     (resume-aware; `<novel>` is an id or title; `--limit 0` = all missing).
-  - `crawler export <novel> [--out PATH]` — build an EPUB from stored chapters.
-  - `crawler unsubscribe <novel>` — remove a subscription (cascades chapters).
-  - `crawler sync [--limit N]` — sync ALL subscriptions (what the background task
+  - `vesper export <novel> [--out PATH]` — build an EPUB from stored chapters.
+  - `vesper unsubscribe <novel>` — remove a subscription (cascades chapters).
+  - `vesper sync [--limit N]` — sync ALL subscriptions (what the background task
     runs). Single-instance lock: overlapping runs skip. Re-evaluates completion.
-  - `crawler prune [--retention-days N]` — purge exported chapters of
+  - `vesper prune [--retention-days N]` — purge exported chapters of
     LikelyComplete novels (never un-exported chapters or ongoing novels).
-  - `crawler config` — show the config.ini path and current settings.
-  - `crawler status` — DB/log paths, per-novel state, last sync, recent log tail.
-  - `crawler profiles` — list loaded site profiles + the folder for custom ones.
-  - `crawler service install|uninstall|status [--interval-minutes N]` — manage
-    the Windows Task Scheduler job that runs `crawler sync`.
-  - `crawler list <novel-url>` — discovery check: walk the full ToC, report
+  - `vesper config` — show the config.ini path and current settings.
+  - `vesper status` — DB/log paths, per-novel state, last sync, recent log tail.
+  - `vesper profiles` — list loaded site profiles + the folder for custom ones.
+  - `vesper service install|uninstall|status [--interval-minutes N]` — manage
+    the Windows Task Scheduler job that runs `vesper sync`.
+  - `vesper list <novel-url>` — discovery check: walk the full ToC, report
     count + first/last (no DB, no bodies fetched).
-- DB + `sync.lock` live at `%LOCALAPPDATA%/webnovel-crawler/data/`.
-- Built binary: `target/debug/crawler.exe`
+- DB + `sync.lock` live at `%LOCALAPPDATA%/vesper/data/`.
+- Built binary: `target/debug/vesper.exe`
 - Live smoke test: export a few chapters from a novgo novel and validate the
   EPUB (unzip; check `mimetype` == `application/epub+zip`, `content.opf`, and
   that chapter XHTML holds real prose). `cargo test` does NOT rebuild the
-  binary — run `cargo build` before invoking `target/debug/crawler.exe`.
+  binary — run `cargo build` before invoking `target/debug/vesper.exe`.
 
 ## Module map
 
 Cargo workspace, two crates under `crates/`:
 
-- `core` (lib `crawler-core`):
+- `core` (lib `vesper-core`):
   - `fetch` — `Fetcher` trait; Tier-1 `ReqwestFetcher` (adaptive per-host backoff
     that grows on 429/503/`Retry-After` and relaxes on success, jitter, bounded
     retries; browser UA + headers) and Tier-2 `CurlFetcher` (shells out to
@@ -161,7 +161,7 @@ Cargo workspace, two crates under `crates/`:
     authoritative), upgrades fallback-sourced chapters once the primary catches
     up, drives the Backfilling->Live transition, returns a `SyncReport`.
   - `util` — filename sanitization, chapter number/title parsing, `now_unix`.
-- `cli` (bin `crawler`): clap subcommands on a current-thread Tokio runtime.
+- `cli` (bin `vesper`): clap subcommands on a current-thread Tokio runtime.
   subscribe / add-source / subs / fetch / export / unsubscribe / sync / prune /
   service / config / status / profiles / list. `sync` takes a single-instance
   file lock (Windows `share_mode(0)`) and appends to a log file.

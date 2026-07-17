@@ -1,4 +1,4 @@
-//! Core domain types shared across the crawler.
+//! Core domain types shared across Vesper.
 
 /// A novel's completion status as reported by a site.
 ///

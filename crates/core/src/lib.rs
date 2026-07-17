@@ -1,4 +1,4 @@
-//! Core library for the webnovel crawler: fetching, source adapters, chapter
+//! Core library for Vesper (a webnovel crawler): fetching, source adapters, chapter
 //! extraction, and EPUB packaging. See DESIGN.md for the architecture and the
 //! decisions behind it.
 

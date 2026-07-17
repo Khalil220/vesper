@@ -1,5 +1,5 @@
 [package]
-name = "crawler-core"
+name = "vesper-core"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
