@@ -87,6 +87,7 @@ From the repo root:
     runs). Single-instance lock: overlapping runs skip. Re-evaluates completion.
   - `crawler prune [--retention-days N]` — purge exported chapters of
     LikelyComplete novels (never un-exported chapters or ongoing novels).
+  - `crawler config` — show the config.ini path and current settings.
   - `crawler service install|uninstall|status [--interval-minutes N]` — manage
     the Windows Task Scheduler job that runs `crawler sync`.
   - `crawler list <novel-url>` — discovery check: walk the full ToC, report
@@ -118,6 +119,10 @@ Cargo workspace, two crates under `crates/`:
     schema, WAL, resume-aware chapter insert, DB-backed load for export. rusqlite
     pinned to 0.31 (cfg_select workaround). Connection is not `Send`, so the CLI
     uses a current-thread runtime.
+  - `config` — `Config`: flat `config.ini` (`<config_dir>/config.ini`),
+    self-generating with commented defaults; tolerant reads. Drives output_dir,
+    delays, retention/grace days, auto_export/auto_append, split_every_chapters,
+    poll interval.
   - `sync` — `sync_novel`: the shared multi-source engine. Discovers each ranked
     source (best-effort), gap-fills missing chapter numbers from the
     highest-priority source that has them (primary authoritative), returns a
@@ -129,7 +134,8 @@ Cargo workspace, two crates under `crates/`:
   - `cli::service` — `ServiceManager` trait + Windows Task Scheduler impl (shells
     out to `schtasks`); other platforms stubbed for later.
 
-Not yet built (see DESIGN.md): config.ini (making retention_days /
-quiet_grace_days / delay etc. configurable and auto-pruning in `sync`), and the
-auto-export state machine (auto_export on backfill-complete, auto_append on
-deltas).
+Core design phases (design docs -> EPUB pipeline -> storage -> multi-source ->
+scheduled sync -> state machine/delta -> retention -> config/auto-export) are all
+implemented. Remaining are the smaller deferred items in DESIGN.md's open list
+(e.g. windowless scheduled task, fallback content upgrade, a second site adapter
+to validate the profile abstraction).

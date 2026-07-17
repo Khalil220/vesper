@@ -2,6 +2,7 @@
 //! extraction, and EPUB packaging. See DESIGN.md for the architecture and the
 //! decisions behind it.
 
+pub mod config;
 pub mod epub;
 pub mod fetch;
 pub mod model;
@@ -12,6 +13,7 @@ pub mod store;
 pub mod sync;
 pub mod util;
 
+pub use config::Config;
 pub use epub::build_epub;
 pub use fetch::{FetchConfig, Fetcher, ReqwestFetcher};
 pub use model::{Chapter, ChapterRef, DerivedState, NovelMeta, NovelStatus};

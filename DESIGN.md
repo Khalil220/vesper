@@ -302,11 +302,12 @@ Verified by probing during design:
 - Decide whether to zstd-compress stored chapter text from day one or later.
 - Design the generic site-profile format (selectors, pagination pattern, tier,
   rate limits) and the second source to validate the abstraction against novgo.
-- **Auto-prune wiring (pending config):** `apply_retention` and the
-  LikelyComplete transition exist and are exercised by `crawler prune` and
-  `reevaluate_completion` after each sync, but the scheduled `sync` does not yet
-  auto-prune — `retention_days` and `quiet_grace_days` are hardcoded defaults
-  until config.ini lands. Wire auto-prune into `sync` with the config slice.
+- **Windowless scheduled task:** the Task Scheduler job runs the console binary,
+  so a brief console window may flash each run. A windowless launch (a hidden
+  wrapper, or a GUI-subsystem shim) would make it truly unnoticed. Deferred.
+- **auto_append not live-tested:** exercised by unit/logic and the auto_export
+  path, but appending on *new* chapters needs a novel that gains chapters during
+  a test window, so it hasn't been observed live. Verify opportunistically.
 - **Fallback content upgrade (deferred):** once a chapter is stored from a
   fallback, a later sync does not re-fetch it from the primary even if the
   primary gains that number. "Primary authoritative" currently governs *where a

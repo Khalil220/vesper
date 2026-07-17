@@ -37,6 +37,8 @@ pub struct StoredNovel {
     pub cover_url: Option<String>,
     pub status_hint: NovelStatus,
     pub derived_state: DerivedState,
+    /// A previous auto-export was blocked (e.g. the EPUB was locked); retry later.
+    pub export_pending: bool,
     pub sources: Vec<StoredSource>,
     pub chapter_count: i64,
 }
@@ -109,14 +111,15 @@ impl Store {
         self.conn.execute_batch(
             r#"
             CREATE TABLE IF NOT EXISTS novels (
-                id            INTEGER PRIMARY KEY,
-                title         TEXT NOT NULL,
-                author        TEXT,
-                cover_url     TEXT,
-                status_hint   TEXT NOT NULL,
-                derived_state TEXT NOT NULL,
-                created_at    INTEGER NOT NULL,
-                updated_at    INTEGER NOT NULL
+                id             INTEGER PRIMARY KEY,
+                title          TEXT NOT NULL,
+                author         TEXT,
+                cover_url      TEXT,
+                status_hint    TEXT NOT NULL,
+                derived_state  TEXT NOT NULL,
+                export_pending INTEGER NOT NULL DEFAULT 0,
+                created_at     INTEGER NOT NULL,
+                updated_at     INTEGER NOT NULL
             );
 
             CREATE TABLE IF NOT EXISTS sources (
@@ -142,10 +145,14 @@ impl Store {
             );
             "#,
         )?;
-        // Upgrade DBs created before exported_at existed (harmless no-op otherwise).
+        // Upgrade older DBs (harmless no-ops if the columns already exist).
         let _ = self
             .conn
             .execute("ALTER TABLE chapters ADD COLUMN exported_at INTEGER", []);
+        let _ = self.conn.execute(
+            "ALTER TABLE novels ADD COLUMN export_pending INTEGER NOT NULL DEFAULT 0",
+            [],
+        );
         Ok(())
     }
 
@@ -266,7 +273,8 @@ impl Store {
         let row = self
             .conn
             .query_row(
-                "SELECT title, author, cover_url, status_hint, derived_state FROM novels WHERE id = ?1",
+                "SELECT title, author, cover_url, status_hint, derived_state, export_pending
+                 FROM novels WHERE id = ?1",
                 params![id],
                 |r| {
                     Ok((
@@ -275,12 +283,13 @@ impl Store {
                         r.get::<_, Option<String>>(2)?,
                         r.get::<_, String>(3)?,
                         r.get::<_, String>(4)?,
+                        r.get::<_, i64>(5)? != 0,
                     ))
                 },
             )
             .optional()?;
 
-        let Some((title, author, cover_url, status, state)) = row else {
+        let Some((title, author, cover_url, status, state, export_pending)) = row else {
             return Ok(None);
         };
 
@@ -298,6 +307,7 @@ impl Store {
             cover_url,
             status_hint: NovelStatus::from_str(&status),
             derived_state: DerivedState::from_str(&state),
+            export_pending,
             sources,
             chapter_count,
         }))
@@ -453,6 +463,15 @@ impl Store {
             params![cutoff],
         )?;
         Ok(n)
+    }
+
+    /// Flag (or clear) that a novel has a pending export to retry next pass.
+    pub fn set_export_pending(&self, novel_id: i64, pending: bool) -> Result<()> {
+        self.conn.execute(
+            "UPDATE novels SET export_pending = ?2 WHERE id = ?1",
+            params![novel_id, pending as i64],
+        )?;
+        Ok(())
     }
 
     pub fn set_derived_state(&self, novel_id: i64, state: DerivedState) -> Result<()> {
