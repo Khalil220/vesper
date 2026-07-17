@@ -8,9 +8,10 @@ lightweight background sync that keeps subscribed novels current.
 profile; hand-written freewebnovel + lightnovelworld adapters), a second fetch
 tier (curl), a windowless scheduled task, fallback content upgrade, external
 config-driven profiles, EPUB cover + genre embedding, and a status command +
-sync logging are in place and tested (53 unit tests). Linux/macOS service impls
-exist but are unverified. See `DESIGN.md` for the full decisions and rationale;
-this file is the short rules-of-the-road.
+sync logging are in place and tested (53 unit + 2 CLI tests). Linux/macOS service
+impls are verified in CI (GitHub Actions builds/tests on ubuntu/macos/windows and
+round-trips the service install). See `DESIGN.md` for the full decisions and
+rationale; this file is the short rules-of-the-road.
 
 ## Load-bearing constraints (don't re-litigate — see DESIGN.md for why)
 
@@ -176,7 +177,7 @@ retention -> config/auto-export), two hand-written adapters (freewebnovel,
 lightnovelworld) validate the Source + Fetcher abstractions, and the polish items
 (windowless task, fallback content upgrade, external profiles) plus the wrap-up
 pass (cover + genre embedding, status command + logging, reduced poll cadence,
-verified auto_append, cross-platform service impls) are done. The only real
-remaining work in DESIGN.md's "Still open" is verifying the Linux/macOS service
-impls on real machines; zstd and same-site-name disambiguation are documented
-decisions against.
+verified auto_append, cross-platform service impls) are done, and CI (GitHub
+Actions) builds/tests on ubuntu/macos/windows — which verified the Linux/macOS
+service impls. Nothing functional is outstanding; zstd and same-site-name
+disambiguation are documented decisions against.

@@ -351,10 +351,12 @@ Verified by probing during design:
 - **auto_append.** Verified live: backfill -> Live (auto_export) -> delete a
   stored chapter -> re-sync fetches it and auto-appends, with no state change.
 - **Linux/macOS `ServiceManager`.** systemd-user (`.service` + `.timer`) and
-  launchd (plist + `StartInterval`) impls added. **UNVERIFIED** — they can't be
-  compiled or run on the Windows dev box (cfg-gated code isn't type-checked here;
-  C deps don't cross-compile), only syntax-checked. Test on real Linux/macOS
-  before relying on them.
+  launchd (plist + `StartInterval`) impls added, and **verified in GitHub Actions**
+  (ubuntu + macos runners): they compile and type-check, and the actual
+  `service install` / `status` / `uninstall` round-trip succeeds — systemd
+  reports `timer is enabled`, launchd reports `loaded: com.vesper.sync`, with the
+  unit/plist files written and removed. The unit/plist *content* is also
+  unit-tested on every platform.
 - **Genre metadata.** Captured from `og:novel:genre` (novgo, freewebnovel),
   stored on the novel, emitted as EPUB `dc:subject`. lightnovelworld leaves it
   `None` (genre is only in its JSON-LD, which we don't parse).
@@ -372,6 +374,8 @@ Verified by probing during design:
 
 ### Still open
 
-- **Verify the Linux/macOS `ServiceManager` impls on real machines** (above).
 - Tune the hardcoded-ish defaults (`quiet_grace_days`, `likely_complete_recheck_days`)
   if real-world usage suggests better values — all are config-exposed now.
+
+Everything else on the original roadmap is implemented and verified (CI runs the
+suite on ubuntu/macos/windows on every non-doc push; see `.github/workflows/`).

@@ -192,8 +192,9 @@ fn launchd_plist(exe: &Path, interval_minutes: u32, label: &str) -> String {
     )
 }
 
-// NOTE: the systemctl/launchctl *glue* below still can't be compiled on Windows
-// (cfg-gated). GitHub Actions builds + tests it on real ubuntu/macos runners.
+// NOTE: the systemctl/launchctl *glue* below is cfg-gated, so it isn't compiled
+// on Windows — but GitHub Actions builds and tests it on real ubuntu/macos
+// runners, where the full install/status/uninstall round-trip passes.
 
 #[cfg(test)]
 mod render_tests {
