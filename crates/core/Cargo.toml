@@ -12,6 +12,10 @@ epub-builder = "0.7"
 async-trait = "0.1"
 anyhow = "1"
 url = "2"
+# Pinned below 0.32: rusqlite 0.32+ pulls libsqlite3-sys >=0.30, whose build
+# script uses the unstable `cfg_select!` and fails on stable Rust 1.92.
+rusqlite = { version = "0.31", features = ["bundled"] }
+directories = "5"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }

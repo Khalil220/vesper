@@ -48,6 +48,15 @@ pub fn sanitize_filename(name: &str) -> String {
     }
 }
 
+/// Current wall-clock time as Unix seconds. Used for DB timestamps.
+pub fn now_unix() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
 /// Strip a leading "Chapter N -/–/:" prefix from a table-of-contents link's
 /// text, leaving just the chapter's actual name. ToC entries look like
 /// "Chapter 1 - Cultivation Online"; we render our own "Chapter N:" prefix, so

@@ -4,7 +4,22 @@
 //! first candidates to eventually move into external config files, but keeping
 //! them in code for now makes them trivially testable.
 
+use url::Url;
+
 use crate::source::SiteProfile;
+
+/// All built-in site profiles.
+pub fn all() -> Vec<SiteProfile> {
+    vec![novgo()]
+}
+
+/// The profile whose host matches `url`, if any.
+pub fn for_url(url: &str) -> Option<SiteProfile> {
+    let host = Url::parse(url).ok()?.host_str()?.to_string();
+    all()
+        .into_iter()
+        .find(|p| host.eq_ignore_ascii_case(p.host))
+}
 
 /// Profile for novgo.net.
 ///

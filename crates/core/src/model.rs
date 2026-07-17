@@ -12,6 +12,55 @@ pub enum NovelStatus {
     Unknown,
 }
 
+impl NovelStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            NovelStatus::Ongoing => "ongoing",
+            NovelStatus::Completed => "completed",
+            NovelStatus::Unknown => "unknown",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "ongoing" => NovelStatus::Ongoing,
+            "completed" => NovelStatus::Completed,
+            _ => NovelStatus::Unknown,
+        }
+    }
+}
+
+/// A novel's lifecycle state, *derived* from observed activity (not the site
+/// label). Drives auto-export and when it is safe to purge chapters. See
+/// DESIGN.md.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DerivedState {
+    /// Initial bulk download in progress.
+    Backfilling,
+    /// Caught up; receiving new chapters normally.
+    Live,
+    /// Labelled complete AND observably quiet — polled at reduced cadence.
+    LikelyComplete,
+}
+
+impl DerivedState {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            DerivedState::Backfilling => "backfilling",
+            DerivedState::Live => "live",
+            DerivedState::LikelyComplete => "likely_complete",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "live" => DerivedState::Live,
+            "likely_complete" => DerivedState::LikelyComplete,
+            _ => DerivedState::Backfilling,
+        }
+    }
+}
+
 /// Metadata about a novel, extracted from its landing page.
 #[derive(Debug, Clone)]
 pub struct NovelMeta {
