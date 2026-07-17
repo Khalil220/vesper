@@ -451,6 +451,17 @@ async fn sync_all(config: &Config, limit: usize, delay_ms: Option<u64>) -> Resul
 
     let mut total_new = 0u32;
     for novel in &novels {
+        // Poll finished novels less often: skip a LikelyComplete novel that was
+        // re-checked within the recheck window.
+        if novel.derived_state == DerivedState::LikelyComplete {
+            if let Ok(Some(last)) = store.last_synced_at(novel.id) {
+                let window = config.likely_complete_recheck_days as i64 * 86_400;
+                if crawler_core::util::now_unix() - last < window {
+                    eprintln!("[{}] finished; re-checked recently, skipping", novel.title);
+                    continue;
+                }
+            }
+        }
         let sources = match build_sources(novel, delay) {
             Ok(s) if !s.is_empty() => s,
             Ok(_) => {
@@ -548,6 +559,7 @@ fn config_show(config: &Config) -> Result<()> {
     println!("  poll_interval_minutes = {}", config.poll_interval_minutes);
     println!("  retention_days        = {}", config.retention_days);
     println!("  quiet_grace_days      = {}", config.quiet_grace_days);
+    println!("  likely_complete_recheck_days = {}", config.likely_complete_recheck_days);
     println!("  auto_export           = {}", config.auto_export);
     println!("  auto_append           = {}", config.auto_append);
     println!("  split_every_chapters  = {}", config.split_every_chapters);

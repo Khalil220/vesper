@@ -457,6 +457,19 @@ impl Store {
             .flatten())
     }
 
+    /// The most recent `last_synced_at` across a novel's sources.
+    pub fn last_synced_at(&self, novel_id: i64) -> Result<Option<i64>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT max(last_synced_at) FROM sources WHERE novel_id = ?1",
+                params![novel_id],
+                |r| r.get::<_, Option<i64>>(0),
+            )
+            .optional()?
+            .flatten())
+    }
+
     /// Re-evaluate a novel's completion: a *Live* novel whose site status is
     /// Completed and which has stored no new chapter for `quiet_grace_days`
     /// becomes *LikelyComplete*. Returns the (possibly unchanged) state.

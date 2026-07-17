@@ -23,6 +23,9 @@ pub struct Config {
     pub retention_days: u32,
     /// Days a completed novel must be quiet before it's judged LikelyComplete.
     pub quiet_grace_days: u32,
+    /// How often (days) to re-check a LikelyComplete novel; between re-checks the
+    /// scheduled sync skips it instead of polling every interval.
+    pub likely_complete_recheck_days: u32,
     /// Export automatically once a novel's initial backfill completes.
     pub auto_export: bool,
     /// Re-export automatically when a Live novel gains new chapters.
@@ -55,6 +58,7 @@ impl Default for Config {
             poll_interval_minutes: 60,
             retention_days: 30,
             quiet_grace_days: 30,
+            likely_complete_recheck_days: 7,
             auto_export: false,
             auto_append: false,
             split_every_chapters: 0,
@@ -113,6 +117,10 @@ impl Config {
             poll_interval_minutes: parse_u32("poll_interval_minutes", d.poll_interval_minutes),
             retention_days: parse_u32("retention_days", d.retention_days),
             quiet_grace_days: parse_u32("quiet_grace_days", d.quiet_grace_days),
+            likely_complete_recheck_days: parse_u32(
+                "likely_complete_recheck_days",
+                d.likely_complete_recheck_days,
+            ),
             auto_export: parse_bool("auto_export", d.auto_export),
             auto_append: parse_bool("auto_append", d.auto_append),
             split_every_chapters: parse_u32("split_every_chapters", d.split_every_chapters),
@@ -144,6 +152,8 @@ impl Config {
              retention_days = {}\n\n\
              ; Days a completed novel must be quiet before it's treated as finished.\n\
              quiet_grace_days = {}\n\n\
+             ; How often (days) to re-check a finished novel; it's skipped between re-checks.\n\
+             likely_complete_recheck_days = {}\n\n\
              ; Automatically export once a novel's initial backfill completes.\n\
              auto_export = {}\n\n\
              ; Automatically re-export when a caught-up novel gains new chapters.\n\
@@ -157,6 +167,7 @@ impl Config {
             self.poll_interval_minutes,
             self.retention_days,
             self.quiet_grace_days,
+            self.likely_complete_recheck_days,
             self.auto_export,
             self.auto_append,
             self.split_every_chapters,
