@@ -4,11 +4,11 @@ Rust tool that crawls webnovel sites, downloads chapters, and packages them into
 EPUBs. One binary, two faces: a CLI (control + export) and a lightweight
 background sync that keeps subscribed novels current.
 
-**Status: implemented (v1).** All planned phases plus a second site adapter
-(freewebnovel), a second fetch tier (curl), a windowless scheduled task,
-fallback content upgrade, and external config-driven profiles are in place and
-tested (46 unit tests). See `DESIGN.md` for the full decisions and rationale;
-this file is the short rules-of-the-road.
+**Status: implemented (v1).** All planned phases plus three sources (novgo
+profile; hand-written freewebnovel + lightnovelworld adapters), a second fetch
+tier (curl), a windowless scheduled task, fallback content upgrade, and external
+config-driven profiles are in place and tested (51 unit tests). See `DESIGN.md`
+for the full decisions and rationale; this file is the short rules-of-the-road.
 
 ## Load-bearing constraints (don't re-litigate — see DESIGN.md for why)
 
@@ -76,6 +76,13 @@ this file is the short rules-of-the-road.
   and generates sequential `/novel/<slug>/chapter-<n>` URLs from one request;
   chapter title comes from the chapter page `<title>`; content `.txt`; metadata
   `og:novel:*`; status word form ("Completed"/"Ongoing").
+- **lightnovelworld.org** (hand-written `lightnovelworld` adapter, Tier 1):
+  JS-rendered ToC, so discovery reads the total from `og:title` ("… - N
+  Chapters") and generates sequential `/novel/<slug>/chapter/<n>/` URLs.
+  Metadata from page elements (`h1.novel-title`, `a.author-link`,
+  `.status-badge`) + `og:image` — NOT `og:novel:*`. Content `#chapterText`;
+  `data-protected` is JS copy-blocking only (prose is plain `<p>` text, no
+  decoys observed).
 
 ## Build / Test / Run
 
@@ -124,6 +131,9 @@ Cargo workspace, two crates under `crates/`:
     the non-`Send` `scraper::Html` never crosses an `.await`.
   - `freewebnovel` — hand-written `FreewebnovelSource` (AJAX-ToC site). Reuses
     the shared extractors; discovery generates sequential chapter URLs.
+  - `lightnovelworld` — hand-written `LightNovelWorldSource` (JS-ToC site).
+    Element-based metadata (no `og:novel:*`); discovery generates sequential
+    `/chapter/<n>/` URLs from the count in `og:title`; content `#chapterText`.
   - `profiles` — `SiteProfile`s: built-in (novgo) plus user `.ini` files loaded
     from `<config_dir>/profiles/` (`all()` merges them; self-documents via a
     generated README; bad files skipped with a warning). `crate::build_source`
@@ -157,8 +167,9 @@ Cargo workspace, two crates under `crates/`:
 
 All planned phases are implemented (design docs -> EPUB pipeline -> storage ->
 multi-source + active fallback -> scheduled sync -> state machine/delta ->
-retention -> config/auto-export), a second site (freewebnovel) validates the
-Source + Fetcher abstractions, and the polish items (windowless task, fallback
-content upgrade, external profiles) are done. No functional work is outstanding;
+retention -> config/auto-export), two hand-written adapters (freewebnovel,
+lightnovelworld) validate the Source + Fetcher abstractions, and the polish items
+(windowless task, fallback content upgrade, external profiles) are done. No
+functional work is outstanding;
 DESIGN.md's "Still open" list is optional/future ideas (EPUB cover embedding, a
 `status` command + logging, a Linux/macOS ServiceManager, zstd compression).

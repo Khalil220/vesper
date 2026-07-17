@@ -6,6 +6,7 @@ pub mod config;
 pub mod epub;
 pub mod fetch;
 pub mod freewebnovel;
+pub mod lightnovelworld;
 pub mod model;
 pub mod paths;
 pub mod profiles;
@@ -18,6 +19,7 @@ pub use config::Config;
 pub use epub::build_epub;
 pub use fetch::{CurlFetcher, FetchConfig, Fetcher, ReqwestFetcher};
 pub use freewebnovel::FreewebnovelSource;
+pub use lightnovelworld::LightNovelWorldSource;
 pub use model::{Chapter, ChapterRef, DerivedState, NovelMeta, NovelStatus};
 pub use paths::{epub_path, novel_dir};
 pub use source::{GenericSource, SiteProfile, Source};
@@ -35,6 +37,10 @@ pub fn build_source(url: &str, delay: std::time::Duration) -> Option<Box<dyn Sou
         "freewebnovel.com" | "www.freewebnovel.com" => Some(Box::new(FreewebnovelSource::new(
             CurlFetcher::new(delay),
         ))),
+        "lightnovelworld.org" | "www.lightnovelworld.org" => {
+            let fetcher = ReqwestFetcher::new(delay).ok()?;
+            Some(Box::new(LightNovelWorldSource::new(fetcher)))
+        }
         _ => {
             let profile = profiles::for_url(url)?;
             let fetcher = ReqwestFetcher::new(delay).ok()?;

@@ -308,6 +308,15 @@ Verified by probing during design:
   from `data-total-chapters`; title from the chapter page; word-form status) and
   the `Fetcher` trait as a second tier (see Fetching for the curl rationale).
   Shared extractors are reused, so the storage/sync/export pipeline was unchanged.
+- **Third source (lightnovelworld).** A second hand-written adapter for a
+  JS-rendered ToC. Metadata comes from page elements (`h1.novel-title`,
+  `a.author-link`, `.status-badge`), not `og:novel:*`; discovery generates
+  sequential `/novel/<slug>/chapter/<n>/` URLs from the count in `og:title`;
+  content is `#chapterText`. Runs on Tier 1 (reqwest) — it doesn't
+  fingerprint-block, unlike freewebnovel. Its `data-protected` flag is JS
+  copy-blocking, not server-side obfuscation; prose is plain `<p>` text with no
+  decoys observed (checked several chapters). Reuses `parse_chapter_body`,
+  `parse_status_hint`, and `clean_chapter_title`.
 - **External config-driven profiles.** `SiteProfile` holds owned strings and
   exposes `chapter_marker` + `page_param`; generic sites are added via `.ini`
   files in `<config_dir>/profiles/` (required: name, host, content_selector).
