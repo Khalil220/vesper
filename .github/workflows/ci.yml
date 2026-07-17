@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  # Build + unit-test on all three platforms. On Linux/macOS this actually
+  # compiles and type-checks the cfg-gated ServiceManager code that the Windows
+  # dev machine can't, and runs the full test suite (including the SQLite bundled
+  # build and the systemd/launchd content-render tests).
+  test:
+    name: build & test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Linux TLS deps
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
+      - name: Build
+        run: cargo build --workspace --verbose
+      - name: Test
+        run: cargo test --workspace --verbose
+
+  # Best-effort real exercise of the service install/status/uninstall on Linux
+  # and macOS. systemctl --user / launchctl may not be fully available in CI, so
+  # this is informational (continue-on-error) — the `test` job is the real gate.
+  service-smoke:
+    name: service smoke (${{ matrix.os }})
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Linux TLS deps
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
+      - name: Build binary
+        run: cargo build --release -p crawler
+      - name: install / status / uninstall
+        continue-on-error: true
+        run: |
+          BIN=target/release/crawler
+          echo "== install ==";   "$BIN" service install --interval-minutes 30; echo "exit $?"
+          echo "== status ==";    "$BIN" service status;                        echo "exit $?"
+          echo "== generated unit/plist files =="
+          ls -la "$HOME/.config/systemd/user/" 2>/dev/null || true
+          ls -la "$HOME/Library/LaunchAgents/" 2>/dev/null || true
+          echo "== uninstall =="; "$BIN" service uninstall;                     echo "exit $?"

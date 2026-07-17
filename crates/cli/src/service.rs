@@ -151,11 +151,75 @@ mod windows {
     }
 }
 
-// NOTE: the Linux and macOS implementations below are UNVERIFIED — they cannot
-// be compiled or run on the Windows development machine (cfg-gated code is not
-// type-checked here, and the C dependencies don't cross-compile). Treat them as
-// a careful starting point that needs testing on a real Linux/macOS box before
-// being relied on.
+// ---- Unit-file / plist rendering (pure; testable on every platform) ----
+//
+// The Linux/macOS *invocation* glue (systemctl/launchctl) can only run on those
+// OSes, but the generated file *content* is the bug-prone part and is
+// platform-independent, so it lives here and is unit-tested everywhere.
+
+/// systemd user `.service` unit content (Linux).
+fn systemd_service_unit(exe: &Path) -> String {
+    format!(
+        "[Unit]\nDescription=Webnovel crawler sync\n\n\
+         [Service]\nType=oneshot\nExecStart=\"{}\" sync\n",
+        exe.display()
+    )
+}
+
+/// systemd user `.timer` unit content (Linux).
+fn systemd_timer_unit(interval_minutes: u32) -> String {
+    format!(
+        "[Unit]\nDescription=Webnovel crawler sync timer\n\n\
+         [Timer]\nOnBootSec={interval_minutes}min\nOnUnitActiveSec={interval_minutes}min\n\
+         Persistent=true\n\n\
+         [Install]\nWantedBy=timers.target\n"
+    )
+}
+
+/// launchd agent plist content (macOS).
+fn launchd_plist(exe: &Path, interval_minutes: u32, label: &str) -> String {
+    format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+         <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \
+         \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
+         <plist version=\"1.0\"><dict>\n\
+         <key>Label</key><string>{label}</string>\n\
+         <key>ProgramArguments</key><array><string>{}</string><string>sync</string></array>\n\
+         <key>StartInterval</key><integer>{}</integer>\n\
+         </dict></plist>\n",
+        exe.display(),
+        interval_minutes as u64 * 60,
+    )
+}
+
+// NOTE: the systemctl/launchctl *glue* below still can't be compiled on Windows
+// (cfg-gated). GitHub Actions builds + tests it on real ubuntu/macos runners.
+
+#[cfg(test)]
+mod render_tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn systemd_units_have_exe_and_interval() {
+        let svc = systemd_service_unit(Path::new("/usr/bin/crawler"));
+        assert!(svc.contains("ExecStart=\"/usr/bin/crawler\" sync"));
+        assert!(svc.contains("Type=oneshot"));
+        let timer = systemd_timer_unit(45);
+        assert!(timer.contains("OnUnitActiveSec=45min"));
+        assert!(timer.contains("WantedBy=timers.target"));
+    }
+
+    #[test]
+    fn launchd_plist_is_wellformed() {
+        let p = launchd_plist(Path::new("/usr/local/bin/crawler"), 30, "com.test.sync");
+        assert!(p.starts_with("<?xml"));
+        assert!(p.contains("<string>com.test.sync</string>"));
+        assert!(p.contains("<string>/usr/local/bin/crawler</string>"));
+        assert!(p.contains("<string>sync</string>"));
+        assert!(p.contains("<integer>1800</integer>")); // 30 min * 60
+    }
+}
 
 #[cfg(target_os = "linux")]
 mod linux {
@@ -197,19 +261,11 @@ mod linux {
             let dir = unit_dir()?;
             std::fs::create_dir_all(&dir)?;
 
-            let service = format!(
-                "[Unit]\nDescription=Webnovel crawler sync\n\n\
-                 [Service]\nType=oneshot\nExecStart=\"{}\" sync\n",
-                exe.display()
-            );
-            let timer = format!(
-                "[Unit]\nDescription=Webnovel crawler sync timer\n\n\
-                 [Timer]\nOnBootSec={interval_minutes}min\nOnUnitActiveSec={interval_minutes}min\n\
-                 Persistent=true\n\n\
-                 [Install]\nWantedBy=timers.target\n"
-            );
-            std::fs::write(dir.join(service_unit()), service)?;
-            std::fs::write(dir.join(timer_unit()), timer)?;
+            std::fs::write(dir.join(service_unit()), super::systemd_service_unit(exe))?;
+            std::fs::write(
+                dir.join(timer_unit()),
+                super::systemd_timer_unit(interval_minutes),
+            )?;
 
             let reload = systemctl(&["daemon-reload"])?;
             if !reload.status.success() {
@@ -282,20 +338,7 @@ mod macos {
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            let plist = format!(
-                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
-                 <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \
-                 \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
-                 <plist version=\"1.0\"><dict>\n\
-                 <key>Label</key><string>{label}</string>\n\
-                 <key>ProgramArguments</key><array><string>{exe}</string><string>sync</string></array>\n\
-                 <key>StartInterval</key><integer>{secs}</integer>\n\
-                 </dict></plist>\n",
-                label = label(),
-                exe = exe.display(),
-                secs = interval_minutes as u64 * 60
-            );
-            std::fs::write(&path, plist)?;
+            std::fs::write(&path, super::launchd_plist(exe, interval_minutes, &label()))?;
 
             let path_str = path.to_string_lossy().to_string();
             // Reload if already loaded (ignore errors), then load.
