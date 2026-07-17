@@ -191,8 +191,10 @@ fn post_sync(
 
     let just_caught_up =
         prev_state == DerivedState::Backfilling && report.new_state == DerivedState::Live;
-    let gained_new = report.newly_fetched > 0
-        && matches!(prev_state, DerivedState::Live | DerivedState::LikelyComplete);
+    // New chapters or content upgrades both make an existing EPUB stale.
+    let content_changed = report.newly_fetched > 0 || report.upgraded > 0;
+    let gained_new =
+        content_changed && matches!(prev_state, DerivedState::Live | DerivedState::LikelyComplete);
 
     let novel = store
         .find_novel(&novel_id.to_string())?
@@ -350,8 +352,13 @@ async fn fetch(config: &Config, novel: String, limit: usize, delay_ms: Option<u6
         String::new()
     };
     let mode = if report.delta_mode { "delta check" } else { "full scan" };
+    let upgrade_note = if report.upgraded > 0 {
+        format!(", {} upgraded from primary", report.upgraded)
+    } else {
+        String::new()
+    };
     println!(
-        "Fetched {} new chapters for \"{}\"{fallback_note} (now {} stored) [{mode}].",
+        "Fetched {} new chapters for \"{}\"{fallback_note}{upgrade_note} (now {} stored) [{mode}].",
         report.newly_fetched,
         found.title,
         before + report.newly_fetched as usize

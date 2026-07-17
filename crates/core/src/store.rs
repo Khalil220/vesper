@@ -385,6 +385,45 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// Chapter numbers currently sourced from something other than
+    /// `primary_source_id` — candidates to upgrade if the primary now has them.
+    pub fn chapters_from_other_sources(
+        &self,
+        novel_id: i64,
+        primary_source_id: i64,
+    ) -> Result<Vec<u32>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT number FROM chapters
+             WHERE novel_id = ?1 AND (source_id IS NULL OR source_id != ?2)
+             ORDER BY number",
+        )?;
+        let rows = stmt.query_map(params![novel_id, primary_source_id], |r| r.get::<_, i64>(0))?;
+        let mut out = Vec::new();
+        for n in rows {
+            out.push(n? as u32);
+        }
+        Ok(out)
+    }
+
+    /// Replace a stored chapter's content (used when upgrading a fallback-sourced
+    /// chapter to the primary's authoritative version). Re-attributes the source
+    /// and clears the exported flag so the change propagates to a re-export.
+    /// Leaves `fetched_at` intact so it doesn't disturb quiet/completion timing.
+    pub fn update_chapter_content(
+        &self,
+        novel_id: i64,
+        source_id: i64,
+        chapter: &Chapter,
+    ) -> Result<()> {
+        let body = chapter.paragraphs.join("\n\n");
+        self.conn.execute(
+            "UPDATE chapters SET title = ?3, body = ?4, source_id = ?5, exported = 0, exported_at = NULL
+             WHERE novel_id = ?1 AND number = ?2",
+            params![novel_id, chapter.number, chapter.title, body, source_id],
+        )?;
+        Ok(())
+    }
+
     /// Record a source's progress after a sync pass.
     pub fn update_source_progress(&self, source_id: i64, last_seen_chapter: u32) -> Result<()> {
         self.conn.execute(

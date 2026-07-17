@@ -28,6 +28,8 @@ pub struct SyncReport {
     pub newly_fetched: u32,
     /// Of those, how many came from a fallback (non-primary) source.
     pub from_fallback: u32,
+    /// Fallback-sourced chapters re-fetched from the primary this pass.
+    pub upgraded: u32,
     /// The novel's derived state after this pass.
     pub new_state: DerivedState,
     /// Whether this pass used cheap delta discovery (vs a full ToC walk).
@@ -85,6 +87,7 @@ pub async fn sync_novel(
     let mut report = SyncReport {
         newly_fetched: 0,
         from_fallback: 0,
+        upgraded: 0,
         new_state: state,
         delta_mode: !is_backfilling,
         warnings: Vec::new(),
@@ -172,6 +175,27 @@ pub async fn sync_novel(
         }
         if !done {
             report.failures.push(num);
+        }
+    }
+
+    // Content upgrade: the primary is authoritative, so any chapter we're
+    // currently holding from a fallback that the primary now offers gets
+    // re-fetched from the primary and replaced. Normally there are none (steady
+    // state is all-primary); this fires once after a lagging primary catches up.
+    if let Some((pmeta, psrc, pmap)) = discovered.iter().find(|(m, _, _)| m.priority == 1) {
+        for num in store.chapters_from_other_sources(novel_id, pmeta.id)? {
+            let Some(cref) = pmap.get(&num) else { continue };
+            on_progress(format!("ch.{num} upgrade <- {}", pmeta.name));
+            match psrc.fetch_chapter(cref).await {
+                Ok(chapter) => {
+                    store.update_chapter_content(novel_id, pmeta.id, &chapter)?;
+                    report.upgraded += 1;
+                }
+                Err(e) => report.warnings.push(format!(
+                    "upgrade of ch.{num} from {} failed: {e}",
+                    pmeta.name
+                )),
+            }
         }
     }
 
@@ -423,6 +447,63 @@ mod tests {
         assert!(!report.delta_mode, "gap forced a full-walk fallback");
         assert!(report.warnings.iter().any(|w| w.contains("falling back to a full walk")));
         assert_eq!(report.newly_fetched, 3, "ch.4, 5, 6 all filled");
+    }
+
+    #[tokio::test]
+    async fn primary_upgrades_fallback_sourced_chapters_when_it_catches_up() {
+        let store = Store::open_in_memory().unwrap();
+        let id = subscribe(&store);
+        store.add_source(id, "fallback", "https://fallback.example/n").unwrap();
+
+        // Backfill: primary has 1-3, fallback is ahead with 1-5. ch.4/5 come from
+        // the fallback.
+        let backfill = pair(
+            &store,
+            id,
+            vec![
+                Box::new(MockSource::new("primary", &[1, 2, 3])),
+                Box::new(MockSource::new("fallback", &[1, 2, 3, 4, 5])),
+            ],
+        );
+        let r1 = sync_novel(&store, id, DerivedState::Backfilling, &backfill, 0, |_| {})
+            .await
+            .unwrap();
+        assert_eq!(r1.from_fallback, 2);
+        let ch4 = store.load_chapters(id).unwrap().into_iter().find(|c| c.number == 4).unwrap();
+        assert_eq!(ch4.paragraphs, vec!["fallback body 4"]);
+
+        // Primary catches up to 1-5. Next sync should upgrade ch.4/5 to the
+        // primary's content.
+        let caught_up = pair(
+            &store,
+            id,
+            vec![
+                Box::new(MockSource::new("primary", &[1, 2, 3, 4, 5])),
+                Box::new(MockSource::new("fallback", &[1, 2, 3, 4, 5])),
+            ],
+        );
+        let r2 = sync_novel(&store, id, DerivedState::Live, &caught_up, 0, |_| {})
+            .await
+            .unwrap();
+        assert_eq!(r2.newly_fetched, 0, "nothing new");
+        assert_eq!(r2.upgraded, 2, "ch.4 and ch.5 upgraded to primary");
+
+        let ch4 = store.load_chapters(id).unwrap().into_iter().find(|c| c.number == 4).unwrap();
+        assert_eq!(ch4.paragraphs, vec!["primary body 4"]);
+
+        // A third sync has nothing left to upgrade.
+        let again = pair(
+            &store,
+            id,
+            vec![
+                Box::new(MockSource::new("primary", &[1, 2, 3, 4, 5])),
+                Box::new(MockSource::new("fallback", &[1, 2, 3, 4, 5])),
+            ],
+        );
+        let r3 = sync_novel(&store, id, DerivedState::Live, &again, 0, |_| {})
+            .await
+            .unwrap();
+        assert_eq!(r3.upgraded, 0);
     }
 
     #[tokio::test]

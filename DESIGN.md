@@ -320,11 +320,11 @@ Verified by probing during design:
 - **auto_append not live-tested:** exercised by unit/logic and the auto_export
   path, but appending on *new* chapters needs a novel that gains chapters during
   a test window, so it hasn't been observed live. Verify opportunistically.
-- **Fallback content upgrade (deferred):** once a chapter is stored from a
-  fallback, a later sync does not re-fetch it from the primary even if the
-  primary gains that number. "Primary authoritative" currently governs *where a
-  not-yet-stored chapter is fetched from*, not retroactive upgrades. Acceptable
-  for v1; revisit if it matters.
+- **Fallback content upgrade — done.** After the gap-fill pass, `sync_novel`
+  re-fetches any chapter currently held from a fallback that the primary now
+  offers, replacing it with the primary's authoritative content (and clearing
+  its exported flag so a re-export picks it up). Steady state has none; it fires
+  once after a lagging primary catches up. Counted as `SyncReport.upgraded`.
 - **Same-site duplicate sources are indistinguishable by name:** two sources on
   the same site both show their profile name (e.g. `novgo`) in `subs`/progress.
   Fine for the real cross-site case; only cosmetic for the contrived same-site
