@@ -39,6 +39,13 @@ pub trait Source: Send + Sync {
 
     /// Fetch and extract a single chapter's body.
     async fn fetch_chapter(&self, chapter: &ChapterRef) -> Result<Chapter>;
+
+    /// Cheap "what's new" discovery for delta syncs — typically just the landing
+    /// page, which lists the latest chapters. Defaults to full discovery so a
+    /// source that can't do better stays correct.
+    async fn discover_latest(&self, url: &str) -> Result<Vec<ChapterRef>> {
+        self.discover_chapters(url, None).await
+    }
 }
 
 /// A declarative description of a site that fits the generic adapter.
@@ -137,6 +144,14 @@ impl<F: Fetcher> Source for GenericSource<F> {
             title: chapter.title.clone(),
             paragraphs,
         })
+    }
+
+    async fn discover_latest(&self, url: &str) -> Result<Vec<ChapterRef>> {
+        // Page 1 (the landing URL) lists the newest chapters at the top plus the
+        // first block — enough to spot and fetch a handful of new chapters
+        // without walking the entire table of contents.
+        let html = self.fetcher.get(url).await?;
+        parse_chapter_links(&html, url)
     }
 }
 

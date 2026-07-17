@@ -308,7 +308,19 @@ async fn fetch(novel: String, limit: usize, delay_ms: u64) -> Result<()> {
     let before = store.stored_chapter_numbers(found.id)?.len();
     eprintln!("Syncing \"{}\" from {} source(s)...", found.title, sources.len());
 
-    let report = sync_novel(&store, found.id, &sources, limit, |line| eprintln!("  {line}")).await?;
+    let report = sync_novel(
+        &store,
+        found.id,
+        found.derived_state,
+        &sources,
+        limit,
+        |line| eprintln!("  {line}"),
+    )
+    .await?;
+
+    if report.new_state != found.derived_state {
+        eprintln!("  state: {} -> {}", found.derived_state.as_str(), report.new_state.as_str());
+    }
 
     for w in &report.warnings {
         eprintln!("  ! {w}");
@@ -326,8 +338,9 @@ async fn fetch(novel: String, limit: usize, delay_ms: u64) -> Result<()> {
     } else {
         String::new()
     };
+    let mode = if report.delta_mode { "delta check" } else { "full scan" };
     println!(
-        "Fetched {} new chapters for \"{}\"{fallback_note} (now {} stored).",
+        "Fetched {} new chapters for \"{}\"{fallback_note} (now {} stored) [{mode}].",
         report.newly_fetched,
         found.title,
         before + report.newly_fetched as usize
@@ -397,13 +410,26 @@ async fn sync_all(limit: usize, delay_ms: u64) -> Result<()> {
         };
         eprintln!("Syncing \"{}\"...", novel.title);
         // One novel's failure must not abort the whole run.
-        match sync_novel(&store, novel.id, &sources, limit, |line| eprintln!("  {line}")).await {
+        match sync_novel(
+            &store,
+            novel.id,
+            novel.derived_state,
+            &sources,
+            limit,
+            |line| eprintln!("  {line}"),
+        )
+        .await
+        {
             Ok(report) => {
                 for w in &report.warnings {
                     eprintln!("  ! {w}");
                 }
+                if report.new_state != novel.derived_state {
+                    eprintln!("  {} state: {} -> {}", novel.title, novel.derived_state.as_str(), report.new_state.as_str());
+                }
                 total_new += report.newly_fetched;
-                println!("  {}: +{} new chapters", novel.title, report.newly_fetched);
+                let mode = if report.delta_mode { "delta" } else { "full" };
+                println!("  {}: +{} new chapters [{mode}]", novel.title, report.newly_fetched);
             }
             Err(e) => eprintln!("  ! sync failed for \"{}\": {e}", novel.title),
         }
