@@ -335,23 +335,42 @@ Verified by probing during design:
 - **Status hints mapped**: novgo `og:novel:status` "1"=Ongoing/"2"=Completed and
   freewebnovel word forms; default `poll_interval_minutes` = 60.
 
+### Resolved (wrap-up pass)
+
+- **EPUB cover embedding.** `build_epub` embeds an optional cover; export
+  downloads it from `cover_url` best-effort (`download_cover`) and adds it via
+  `add_cover_image`. Missing/blocked covers are skipped. Verified live.
+- **Observability.** A `status` command (DB/log paths, per-novel state, last
+  completed sync, recent log tail) and a log file (config `log_path`) that the
+  background sync appends to — its stderr is discarded, so the log is the trail.
+  `util::format_unix_utc` gives readable timestamps with no date-crate dep.
+- **Reduced poll cadence.** Config `likely_complete_recheck_days` (default 7);
+  the all-subscriptions sync skips a LikelyComplete novel re-checked within that
+  window. Activity reverts it to Live and resumes normal cadence.
+- **auto_append.** Verified live: backfill -> Live (auto_export) -> delete a
+  stored chapter -> re-sync fetches it and auto-appends, with no state change.
+- **Linux/macOS `ServiceManager`.** systemd-user (`.service` + `.timer`) and
+  launchd (plist + `StartInterval`) impls added. **UNVERIFIED** — they can't be
+  compiled or run on the Windows dev box (cfg-gated code isn't type-checked here;
+  C deps don't cross-compile), only syntax-checked. Test on real Linux/macOS
+  before relying on them.
+- **Genre metadata.** Captured from `og:novel:genre` (novgo, freewebnovel),
+  stored on the novel, emitted as EPUB `dc:subject`. lightnovelworld leaves it
+  `None` (genre is only in its JSON-LD, which we don't parse).
+
+### Decided against (for now)
+
+- **zstd compression of stored text.** A chapter is ~5–8 KB compressed and a
+  whole library is a few GB; compression would add a dependency plus read/write
+  and migration complexity for marginal gain. Revisit only if image support or
+  very large libraries change the calculus.
+- **Disambiguating same-site duplicate source names.** Two sources on one site
+  show the same profile name in `subs`/progress, but the URL shown beside each
+  already disambiguates them and the real use case is cross-site (distinct
+  names). Not worth special-casing the contrived same-site scenario.
+
 ### Still open
 
-- **EPUB cover embedding.** `cover_url` is captured/stored but not downloaded or
-  embedded in the EPUB. Add via `epub-builder`'s `add_cover_image` (fetch the
-  image with the same politeness as chapters).
-- **Observability / logging.** No `status` command or log file yet; a windowless
-  scheduled run discards stderr, so a log is the main gap for debugging it.
-- **Reduced poll cadence for *Likely complete* novels.** The state exists, but
-  sync polls those at the normal interval regardless (the delta check is cheap
-  anyway); a genuinely reduced per-state cadence is deferred.
-- **auto_append not live-tested.** Exercised by logic and the auto_export path,
-  but observing an append on genuinely new chapters needs a novel that updates
-  during a test window. Verify opportunistically.
-- **Linux/macOS `ServiceManager`.** Only the Windows Task Scheduler impl exists;
-  other platforms are stubbed behind the trait.
-- **zstd compression of stored text.** Not needed yet at text sizes; revisit for
-  images or very large libraries.
-- **Genre metadata** (`og:novel:genre`) is available but not captured/stored.
-- **Same-site duplicate sources** show the same profile name in `subs`/progress
-  (cosmetic; only affects the contrived same-site case, not real cross-site use).
+- **Verify the Linux/macOS `ServiceManager` impls on real machines** (above).
+- Tune the hardcoded-ish defaults (`quiet_grace_days`, `likely_complete_recheck_days`)
+  if real-world usage suggests better values — all are config-exposed now.

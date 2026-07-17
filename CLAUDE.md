@@ -6,9 +6,11 @@ background sync that keeps subscribed novels current.
 
 **Status: implemented (v1).** All planned phases plus three sources (novgo
 profile; hand-written freewebnovel + lightnovelworld adapters), a second fetch
-tier (curl), a windowless scheduled task, fallback content upgrade, and external
-config-driven profiles are in place and tested (51 unit tests). See `DESIGN.md`
-for the full decisions and rationale; this file is the short rules-of-the-road.
+tier (curl), a windowless scheduled task, fallback content upgrade, external
+config-driven profiles, EPUB cover + genre embedding, and a status command +
+sync logging are in place and tested (53 unit tests). Linux/macOS service impls
+exist but are unverified. See `DESIGN.md` for the full decisions and rationale;
+this file is the short rules-of-the-road.
 
 ## Load-bearing constraints (don't re-litigate — see DESIGN.md for why)
 
@@ -104,6 +106,7 @@ From the repo root:
   - `crawler prune [--retention-days N]` — purge exported chapters of
     LikelyComplete novels (never un-exported chapters or ongoing novels).
   - `crawler config` — show the config.ini path and current settings.
+  - `crawler status` — DB/log paths, per-novel state, last sync, recent log tail.
   - `crawler profiles` — list loaded site profiles + the folder for custom ones.
   - `crawler service install|uninstall|status [--interval-minutes N]` — manage
     the Windows Task Scheduler job that runs `crawler sync`.
@@ -139,16 +142,18 @@ Cargo workspace, two crates under `crates/`:
     generated README; bad files skipped with a warning). `crate::build_source`
     (in lib.rs) resolves a URL to its adapter + fetch tier by host.
   - `model` — domain types (`NovelMeta`, `ChapterRef`, `Chapter`, `NovelStatus`).
-  - `epub` — EPUB packaging (reconstructed XHTML; atomic temp-file+rename).
+  - `epub` — EPUB packaging (reconstructed XHTML; atomic temp-file+rename;
+    embeds a downloaded cover image and the genre as `dc:subject`).
   - `paths` — library layout (`epub_path`, `novel_dir`): author/novel/epub tree.
   - `store` — SQLite persistence (`Store`, `StoredNovel`): novels/sources/chapters
     schema, WAL, resume-aware chapter insert, DB-backed load for export. rusqlite
     pinned to 0.31 (cfg_select workaround). Connection is not `Send`, so the CLI
     uses a current-thread runtime.
   - `config` — `Config`: flat `config.ini` (`<config_dir>/config.ini`),
-    self-generating with commented defaults; tolerant reads. Drives output_dir,
-    delays, retention/grace days, auto_export/auto_append, split_every_chapters,
-    poll interval.
+    self-generating with commented defaults; tolerant reads (escape-disabled so
+    Windows `C:\` paths round-trip). Drives output_dir, delays, retention/grace/
+    recheck days, auto_export/auto_append, split_every_chapters, poll interval,
+    log_path.
   - `sync` — `sync_novel`: the shared multi-source engine used by both `fetch`
     and the scheduled `sync`. Backfilling walks the full ToC; a caught-up (Live)
     novel does a cheap delta check (landing page) with a full-walk fallback on a
@@ -158,8 +163,8 @@ Cargo workspace, two crates under `crates/`:
   - `util` — filename sanitization, chapter number/title parsing, `now_unix`.
 - `cli` (bin `crawler`): clap subcommands on a current-thread Tokio runtime.
   subscribe / add-source / subs / fetch / export / unsubscribe / sync / prune /
-  service / config / profiles / list. `sync` takes a single-instance file lock
-  (Windows `share_mode(0)`).
+  service / config / status / profiles / list. `sync` takes a single-instance
+  file lock (Windows `share_mode(0)`) and appends to a log file.
   - `cli::service` — `ServiceManager` trait + Windows Task Scheduler impl (shells
     out to `schtasks`); other platforms stubbed for later. Install registers
     `wscript.exe <sync-hidden.vbs>` so the periodic run is windowless (no console
@@ -169,7 +174,9 @@ All planned phases are implemented (design docs -> EPUB pipeline -> storage ->
 multi-source + active fallback -> scheduled sync -> state machine/delta ->
 retention -> config/auto-export), two hand-written adapters (freewebnovel,
 lightnovelworld) validate the Source + Fetcher abstractions, and the polish items
-(windowless task, fallback content upgrade, external profiles) are done. No
-functional work is outstanding;
-DESIGN.md's "Still open" list is optional/future ideas (EPUB cover embedding, a
-`status` command + logging, a Linux/macOS ServiceManager, zstd compression).
+(windowless task, fallback content upgrade, external profiles) plus the wrap-up
+pass (cover + genre embedding, status command + logging, reduced poll cadence,
+verified auto_append, cross-platform service impls) are done. The only real
+remaining work in DESIGN.md's "Still open" is verifying the Linux/macOS service
+impls on real machines; zstd and same-site-name disambiguation are documented
+decisions against.
