@@ -23,9 +23,15 @@ the Build / Test / Run and module-map sections below once the workspace exists.
 - **Multi-source by design.** A `Source` trait abstracts each site; a generic
   config-driven adapter handles the common server-rendered + CSS + `?page=N`
   case, so most sites (novgo included) are just declarative profiles, no
-  recompile. Hand-written adapters only for weird sites. Data model keys by
-  (source, novel); URL-to-source resolves by host. novgo is the first source,
-  not the only one.
+  recompile. Hand-written adapters only for weird sites. novgo is the first
+  source, not the only one. URL-to-source resolves by host.
+- **One logical novel, multiple ranked sources** (not per-source subscriptions).
+  A novel (author+title) has a primary source plus optional fallbacks.
+  Subscribing to an already-followed novel from a new site adds an alternate
+  source (user-confirmed), never a duplicate — one novel => one EPUB at the
+  author/novel path. **Active fallback:** sync gap-fills chapters the primary
+  lacks from fallbacks by priority/chapter-number; primary is authoritative for
+  content. Schema: `novels` / `sources` / `chapters` (see DESIGN.md).
 - **Tiered fetcher behind a trait.** novgo needs only Tier 1 (plain `reqwest` +
   browser UA). Escalate to `rquest` fingerprinting or a headless browser only
   per-site as needed.

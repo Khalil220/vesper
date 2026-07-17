@@ -42,11 +42,25 @@ novgo is the *first* source, not the only one. The system is built around a
      weird for the generic one (JS-rendered, AJAX ToC, odd auth).
 - Start with the trait plus one generic config-driven adapter; **novgo is just a
   profile** for it. Reach for a bespoke adapter only when a site earns it.
-- **The data model keys by source.** A subscription is (source, novel identity);
-  the same novel on two sites is two independent subscriptions. Chapter URLs are
-  source-specific. URL-to-source resolution is by host.
-- Cross-source features (a fallback/mirror source for the same novel) are out of
-  scope for now, but the source-keyed model leaves room for them.
+- **The data model is a logical novel with one or more ranked sources**, not a
+  per-source subscription. A novel (identified by author + title) is fed by a
+  primary source plus optional fallbacks, ordered by preference. This revises an
+  earlier call (independent per-source subscriptions), which would have collided
+  on the author/title output path — two sources of the same novel resolve to the
+  same `<author>/<novel>/<novel>.epub`.
+- **Subscribing to an already-followed novel from a new site adds an alternate
+  source** to the existing novel rather than creating a duplicate. This is
+  **user-confirmed** — cross-site titles differ (romanizations, alternate
+  names), so duplicate detection is never silent. One logical novel => one EPUB
+  at the author/novel path, regardless of source count.
+- **Active fallback sync.** Sync pulls from the primary source; for chapters the
+  primary is missing, it gap-fills from fallbacks by priority, matched on chapter
+  number. The **primary is authoritative for content** — fallbacks only supply
+  chapters the primary lacks, never overwrite. Warn when sources' chapter counts
+  diverge substantially: cross-source numbering is only approximately aligned
+  (sites split, group, and number prologues/bonus chapters differently), so
+  gap-fill by number is best-effort, not a guaranteed 1:1 mapping.
+- Chapter URLs are source-specific; URL-to-source resolution is by host.
 
 ## Background sync: scheduled invocation, not a resident daemon
 
@@ -91,6 +105,16 @@ lives in the DB, not in RAM — so the main thing a resident daemon would buy
   of ads and boilerplate around ~15 KB of actual chapter, so extracting at fetch
   time is roughly a 3x space win before anything else. Optional zstd compression
   on the stored text.
+
+- **Schema sketch** (multi-source aware from day one, so fallbacks need no later
+  migration):
+  - `novels` — the logical book: id, title, author, cover_url, status_hint,
+    derived_state (backfilling / live / likely-complete), timestamps.
+  - `sources` — id, novel_id, source_name, url, priority (1 = primary),
+    last_seen_chapter, last_synced_at. A novel has one or more.
+  - `chapters` — novel_id, number, title, body, source_id (provenance which
+    source supplied it), fetched_at, exported flag. Keyed by (novel_id, number):
+    the primary's content wins; fallbacks only fill missing numbers.
 
 - **Right-sizing the storage fear:** a chapter is ~2,000–4,000 words ≈ 12–25 KB
   plaintext, ~5–8 KB compressed. A 2,500-chapter novel is ~15–25 MB compressed.
