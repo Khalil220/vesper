@@ -32,9 +32,12 @@ the Build / Test / Run and module-map sections below once the workspace exists.
   author/novel path. **Active fallback:** sync gap-fills chapters the primary
   lacks from fallbacks by priority/chapter-number; primary is authoritative for
   content. Schema: `novels` / `sources` / `chapters` (see DESIGN.md).
-- **Tiered fetcher behind a trait.** novgo needs only Tier 1 (plain `reqwest` +
-  browser UA). Escalate to `rquest` fingerprinting or a headless browser only
-  per-site as needed.
+- **Tiered fetcher behind a trait.** Tier 1 = `ReqwestFetcher` (browser UA +
+  headers); novgo needs only this. Tier 2 = `CurlFetcher` (shells out to system
+  `curl`, on Windows 10+), used for freewebnovel, whose Cloudflare challenges
+  reqwest's TLS fingerprint even though both use Schannel. `build_source` picks
+  the tier + adapter per host. Escalate further (`rquest`, headless browser)
+  only if a site needs it.
 - **Adaptive, per-host politeness:** modest delay + jitter, one request in
   flight per host, back off on 429/503, honor `Retry-After`, resume-on-disk.
   Parallelism only across distinct hosts. **No proxy-rotation / ban-evasion.**
@@ -60,13 +63,17 @@ the Build / Test / Run and module-map sections below once the workspace exists.
   folder. See `core::paths`.
 - Config: global flat `config.ini` (defaults) + per-novel overrides in the DB.
 
-## novgo.net quick reference
+## Site quick reference
 
-- Cloudflare CDN-only, no challenge. Server-rendered.
-- ToC paginated `?page=N` (~50/page). Chapter URLs
-  `/<slug>/chapter-<n>-<slug>.html`.
-- Content: `div#chapter-content.chapter-c` (strip `div.ads*`). Next chapter:
-  `a#next_chap`. Metadata/cover: `og:novel:*` + `og:image`.
+- **novgo.net** (generic profile): Cloudflare CDN-only, no challenge, Tier 1.
+  Server-rendered; ToC paginated `?page=N` (~50/page); chapter URLs
+  `/<slug>/chapter-<n>-<slug>.html`; content `div#chapter-content.chapter-c`
+  (strip `div.ads*`); metadata/cover `og:novel:*` + `og:image`; status "1"/"2".
+- **freewebnovel.com** (hand-written `freewebnovel` adapter, Tier 2 curl):
+  AJAX/JS ToC (no scrapable pagination), so discovery reads `data-total-chapters`
+  and generates sequential `/novel/<slug>/chapter-<n>` URLs from one request;
+  chapter title comes from the chapter page `<title>`; content `.txt`; metadata
+  `og:novel:*`; status word form ("Completed"/"Ongoing").
 
 ## Build / Test / Run
 
@@ -104,14 +111,18 @@ From the repo root:
 Cargo workspace, two crates under `crates/`:
 
 - `core` (lib `crawler-core`):
-  - `fetch` — `Fetcher` trait + Tier-1 `ReqwestFetcher` with adaptive per-host
-    backoff (grows on 429/503/`Retry-After`, relaxes on success), jitter, and
-    bounded retries. `FetchConfig` tunes base/max delay and retry count.
+  - `fetch` — `Fetcher` trait; Tier-1 `ReqwestFetcher` (adaptive per-host backoff
+    that grows on 429/503/`Retry-After` and relaxes on success, jitter, bounded
+    retries; browser UA + headers) and Tier-2 `CurlFetcher` (shells out to
+    `curl`). `FetchConfig` tunes base/max delay and retry count.
   - `source` — `Source` trait, declarative `SiteProfile`, `GenericSource`
-    adapter, and the HTML extraction (novel metadata, chapter links, chapter
-    body). Keep parsing synchronous so the non-`Send` `scraper::Html` never
-    crosses an `.await`.
-  - `profiles` — built-in `SiteProfile`s (novgo).
+    adapter, and shared HTML extraction (`parse_novel_meta`, `parse_chapter_body`,
+    status parsing) reused by hand-written adapters. Keep parsing synchronous so
+    the non-`Send` `scraper::Html` never crosses an `.await`.
+  - `freewebnovel` — hand-written `FreewebnovelSource` (AJAX-ToC site). Reuses
+    the shared extractors; discovery generates sequential chapter URLs.
+  - `profiles` — built-in `SiteProfile`s (novgo). `crate::build_source` (in
+    lib.rs) resolves a URL to its adapter + fetch tier by host.
   - `model` — domain types (`NovelMeta`, `ChapterRef`, `Chapter`, `NovelStatus`).
   - `epub` — EPUB packaging (reconstructed XHTML; atomic temp-file+rename).
   - `paths` — library layout (`epub_path`, `novel_dir`): author/novel/epub tree.
@@ -136,6 +147,6 @@ Cargo workspace, two crates under `crates/`:
 
 Core design phases (design docs -> EPUB pipeline -> storage -> multi-source ->
 scheduled sync -> state machine/delta -> retention -> config/auto-export) are all
-implemented. Remaining are the smaller deferred items in DESIGN.md's open list
-(e.g. windowless scheduled task, fallback content upgrade, a second site adapter
-to validate the profile abstraction).
+implemented, and a second site (freewebnovel) validates the Source + Fetcher
+abstractions. Remaining are the smaller deferred items in DESIGN.md's open list
+(e.g. windowless scheduled task, fallback content upgrade).

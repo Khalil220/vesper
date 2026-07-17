@@ -12,8 +12,8 @@ use std::time::Duration;
 use anyhow::{anyhow, ensure, Result};
 use clap::{Parser, Subcommand};
 use crawler_core::{
-    build_epub, epub_path, profiles, sync_novel, Config, DerivedState, GenericSource, ReqwestFetcher,
-    Source, Store, StoredNovel, StoredSource, SyncReport,
+    build_epub, build_source, epub_path, sync_novel, Config, DerivedState, Source, Store,
+    StoredNovel, StoredSource, SyncReport,
 };
 
 #[derive(Parser)]
@@ -127,11 +127,9 @@ async fn main() -> Result<()> {
     }
 }
 
-fn source_for(url: &str, delay_ms: u64) -> Result<GenericSource<ReqwestFetcher>> {
-    let profile =
-        profiles::for_url(url).ok_or_else(|| anyhow!("no known source handles this URL: {url}"))?;
-    let fetcher = ReqwestFetcher::new(Duration::from_millis(delay_ms))?;
-    Ok(GenericSource::new(profile, fetcher))
+fn source_for(url: &str, delay_ms: u64) -> Result<Box<dyn Source>> {
+    build_source(url, Duration::from_millis(delay_ms))
+        .ok_or_else(|| anyhow!("no known source handles this URL: {url}"))
 }
 
 /// Build a source adapter per stored source (priority order), skipping any whose
@@ -139,14 +137,8 @@ fn source_for(url: &str, delay_ms: u64) -> Result<GenericSource<ReqwestFetcher>>
 fn build_sources(novel: &StoredNovel, delay_ms: u64) -> Result<Vec<(StoredSource, Box<dyn Source>)>> {
     let mut sources = Vec::new();
     for s in &novel.sources {
-        match profiles::for_url(&s.url) {
-            Some(profile) => {
-                let fetcher = ReqwestFetcher::new(Duration::from_millis(delay_ms))?;
-                sources.push((
-                    s.clone(),
-                    Box::new(GenericSource::new(profile, fetcher)) as Box<dyn Source>,
-                ));
-            }
+        match build_source(&s.url, Duration::from_millis(delay_ms)) {
+            Some(src) => sources.push((s.clone(), src)),
             None => eprintln!("  (skipping source {} — no adapter for its host)", s.url),
         }
     }

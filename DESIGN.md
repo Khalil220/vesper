@@ -300,8 +300,18 @@ Verified by probing during design:
 - Decide the default `poll_interval`, and the reduced cadence + quiet grace
   window for *Likely complete* novels.
 - Decide whether to zstd-compress stored chapter text from day one or later.
-- Design the generic site-profile format (selectors, pagination pattern, tier,
-  rate limits) and the second source to validate the abstraction against novgo.
+- **Second source — done (freewebnovel):** validated the `Source` trait as a
+  hand-written adapter (AJAX ToC -> discovery generates sequential chapter URLs
+  from `data-total-chapters`; title from the chapter page; word-form status) and
+  the `Fetcher` trait as a second tier. freewebnovel's Cloudflare challenges
+  reqwest's TLS ClientHello even with browser headers/HTTP-1.1 and even though
+  both use Schannel; the system `curl` passes, so Tier 2 is `CurlFetcher`
+  (shell-out). `build_source` resolves adapter + tier by host. Shared extractors
+  (`parse_novel_meta`, `parse_chapter_body`, status parsing) are reused, so the
+  storage/sync/export pipeline needed no changes.
+- **Generic profile format for config-driven sites** (external files with
+  selectors/pagination/tier) is still open — the two current sources are in
+  code. Do this when a third, generic-shaped site appears.
 - **Windowless scheduled task:** the Task Scheduler job runs the console binary,
   so a brief console window may flash each run. A windowless launch (a hidden
   wrapper, or a GUI-subsystem shim) would make it truly unnoticed. Deferred.

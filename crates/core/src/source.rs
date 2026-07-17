@@ -138,7 +138,11 @@ impl<F: Fetcher> Source for GenericSource<F> {
 
     async fn fetch_chapter(&self, chapter: &ChapterRef) -> Result<Chapter> {
         let html = self.fetcher.get(&chapter.url).await?;
-        let paragraphs = parse_chapter_body(&html, &self.profile)?;
+        let paragraphs = parse_chapter_body(
+            &html,
+            self.profile.content_selector,
+            self.profile.paragraph_selector,
+        )?;
         Ok(Chapter {
             number: chapter.number,
             title: chapter.title.clone(),
@@ -159,6 +163,15 @@ fn sel(selector: &str) -> Result<Selector> {
     Selector::parse(selector).map_err(|e| anyhow!("invalid selector {selector:?}: {e:?}"))
 }
 
+/// Interpret an `og:novel:status` value across sites (numeric or word form).
+pub(crate) fn parse_status_hint(raw: &str) -> NovelStatus {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "1" | "ongoing" | "on going" | "serializing" | "active" => NovelStatus::Ongoing,
+        "2" | "completed" | "complete" | "finished" => NovelStatus::Completed,
+        _ => NovelStatus::Unknown,
+    }
+}
+
 fn meta_content(doc: &Html, property: &str) -> Option<String> {
     let selector = Selector::parse(&format!("meta[property=\"{property}\"]")).ok()?;
     doc.select(&selector)
@@ -169,7 +182,7 @@ fn meta_content(doc: &Html, property: &str) -> Option<String> {
 }
 
 /// Parse novel metadata from Open Graph tags, with sensible fallbacks.
-fn parse_novel_meta(html: &str, source_url: &str) -> Result<NovelMeta> {
+pub(crate) fn parse_novel_meta(html: &str, source_url: &str) -> Result<NovelMeta> {
     let doc = Html::parse_document(html);
 
     let title = meta_content(&doc, "og:novel:novel_name")
@@ -184,13 +197,11 @@ fn parse_novel_meta(html: &str, source_url: &str) -> Result<NovelMeta> {
     let author = meta_content(&doc, "og:novel:author").filter(|s| !s.is_empty());
     let cover_url = meta_content(&doc, "og:image").filter(|s| !s.is_empty());
 
-    // Status is only a hint. novgo uses content="1" for ongoing; treat anything
-    // else as unknown rather than guessing "completed".
-    let status_hint = match meta_content(&doc, "og:novel:status").as_deref() {
-        Some("1") => NovelStatus::Ongoing,
-        Some("2") => NovelStatus::Completed,
-        _ => NovelStatus::Unknown,
-    };
+    // Status is only a hint. Different sites encode it differently — novgo uses
+    // "1"/"2", freewebnovel uses "Ongoing"/"Completed" — so accept both.
+    let status_hint = meta_content(&doc, "og:novel:status")
+        .map(|s| parse_status_hint(&s))
+        .unwrap_or(NovelStatus::Unknown);
 
     Ok(NovelMeta {
         title,
@@ -229,16 +240,22 @@ fn parse_chapter_links(html: &str, base_url: &str) -> Result<Vec<ChapterRef>> {
     Ok(out)
 }
 
-/// Extract a chapter's prose paragraphs from its page.
-fn parse_chapter_body(html: &str, profile: &SiteProfile) -> Result<Vec<String>> {
+/// Extract a chapter's prose paragraphs from its page, given the content
+/// container and paragraph selectors. Shared by the generic and hand-written
+/// adapters.
+pub(crate) fn parse_chapter_body(
+    html: &str,
+    content_selector: &str,
+    paragraph_selector: &str,
+) -> Result<Vec<String>> {
     let doc = Html::parse_document(html);
-    let content_sel = sel(profile.content_selector)?;
-    let para_sel = sel(profile.paragraph_selector)?;
+    let content_sel = sel(content_selector)?;
+    let para_sel = sel(paragraph_selector)?;
 
     let content = doc
         .select(&content_sel)
         .next()
-        .ok_or_else(|| anyhow!("no content container matching {}", profile.content_selector))?;
+        .ok_or_else(|| anyhow!("no content container matching {content_selector}"))?;
 
     let mut paragraphs = Vec::new();
     for p in content.select(&para_sel) {
@@ -250,8 +267,7 @@ fn parse_chapter_body(html: &str, profile: &SiteProfile) -> Result<Vec<String>> 
 
     if paragraphs.is_empty() {
         return Err(anyhow!(
-            "content container had no non-empty paragraphs (selector {})",
-            profile.paragraph_selector
+            "content container had no non-empty paragraphs (selector {paragraph_selector})"
         ));
     }
     Ok(paragraphs)
@@ -260,7 +276,6 @@ fn parse_chapter_body(html: &str, profile: &SiteProfile) -> Result<Vec<String>> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::profiles;
 
     const CHAPTER_HTML: &str = r#"
         <html><head><title>Ch 1</title></head><body>
@@ -287,7 +302,7 @@ mod tests {
 
     #[test]
     fn extracts_paragraphs_and_skips_ads_and_blanks() {
-        let paras = parse_chapter_body(CHAPTER_HTML, &profiles::novgo()).unwrap();
+        let paras = parse_chapter_body(CHAPTER_HTML, "#chapter-content", "p").unwrap();
         assert_eq!(paras, vec!["First paragraph.", "Second paragraph."]);
     }
 

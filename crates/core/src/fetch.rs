@@ -16,7 +16,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context, Result};
 use async_trait::async_trait;
-use reqwest::header::RETRY_AFTER;
+use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, ACCEPT_LANGUAGE, RETRY_AFTER};
 use tokio::time::sleep;
 
 /// Anything that can fetch a URL's HTML body.
@@ -72,6 +72,7 @@ impl ReqwestFetcher {
     pub fn with_config(config: FetchConfig) -> Result<Self> {
         let client = reqwest::Client::builder()
             .user_agent(DEFAULT_UA)
+            .default_headers(browser_headers())
             .timeout(Duration::from_secs(30))
             .build()
             .context("building HTTP client")?;
@@ -167,6 +168,121 @@ impl Fetcher for ReqwestFetcher {
             }
         }
     }
+}
+
+/// Tier 2: shell out to the system `curl`.
+///
+/// Some Cloudflare-fronted sites (freewebnovel) challenge reqwest's TLS
+/// ClientHello fingerprint but accept curl's — even though both use Schannel on
+/// Windows. Rather than pull in a heavyweight TLS-impersonation stack, we defer
+/// to `curl`, which ships with Windows 10+ (and virtually everywhere else). Same
+/// politeness contract as Tier 1: base delay + jitter and bounded backoff
+/// retries on throttling / transient failures.
+pub struct CurlFetcher {
+    config: FetchConfig,
+}
+
+impl CurlFetcher {
+    pub fn new(base_delay: Duration) -> Self {
+        Self {
+            config: FetchConfig::new(base_delay),
+        }
+    }
+}
+
+#[async_trait]
+impl Fetcher for CurlFetcher {
+    async fn get(&self, url: &str) -> Result<String> {
+        let mut attempt = 0u32;
+        loop {
+            sleep(self.config.base_delay + jitter(self.config.base_delay)).await;
+
+            let out = tokio::process::Command::new("curl")
+                .args([
+                    "-sS",
+                    "--compressed",
+                    "--http1.1",
+                    "--max-time",
+                    "30",
+                    "-A",
+                    DEFAULT_UA,
+                    "-H",
+                    "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+                    "-H",
+                    "Accept-Language: en-US,en;q=0.9",
+                    "-w",
+                    "\n%{http_code}",
+                    url,
+                ])
+                .output()
+                .await
+                .context("running curl (is it installed and on PATH?)")?;
+
+            // stdout is the body followed by "\n<status>" (from -w).
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let (body, status) = stdout.rsplit_once('\n').unwrap_or((stdout.as_ref(), ""));
+            let code: u16 = status.trim().parse().unwrap_or(0);
+
+            if code / 100 == 2 {
+                return Ok(body.to_string());
+            }
+
+            // code == 0 means curl itself failed (network/timeout).
+            let retryable = code == 0 || is_retryable_status(code);
+            if retryable && attempt < self.config.max_retries {
+                let wait = backoff_delay(self.config.base_delay, attempt, self.config.max_delay);
+                attempt += 1;
+                let what = if code == 0 {
+                    format!("error: {}", String::from_utf8_lossy(&out.stderr).trim())
+                } else {
+                    format!("HTTP {code}")
+                };
+                eprintln!(
+                    "  (curl {what} on {url}; retry {}/{} in {:.1}s)",
+                    attempt,
+                    self.config.max_retries,
+                    wait.as_secs_f64()
+                );
+                sleep(wait).await;
+                continue;
+            }
+
+            if code == 0 {
+                bail!(
+                    "curl failed for {url}: {}",
+                    String::from_utf8_lossy(&out.stderr).trim()
+                );
+            }
+            bail!("GET {url} returned HTTP {code}");
+        }
+    }
+}
+
+/// A consistent, browser-like default header set. Some Cloudflare-fronted sites
+/// (e.g. freewebnovel) reject requests that carry a browser User-Agent but not
+/// the matching navigation and client-hint headers. Keep these consistent with
+/// `DEFAULT_UA` (Chrome 126 on Windows).
+fn browser_headers() -> HeaderMap {
+    let mut h = HeaderMap::new();
+    h.insert(
+        ACCEPT,
+        HeaderValue::from_static(
+            "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        ),
+    );
+    h.insert(ACCEPT_LANGUAGE, HeaderValue::from_static("en-US,en;q=0.9"));
+    h.insert("Upgrade-Insecure-Requests", HeaderValue::from_static("1"));
+    h.insert("Sec-Fetch-Dest", HeaderValue::from_static("document"));
+    h.insert("Sec-Fetch-Mode", HeaderValue::from_static("navigate"));
+    h.insert("Sec-Fetch-Site", HeaderValue::from_static("none"));
+    h.insert("Sec-Fetch-User", HeaderValue::from_static("?1"));
+    h.insert(
+        "sec-ch-ua",
+        HeaderValue::from_static("\"Chromium\";v=\"126\", \"Google Chrome\";v=\"126\", \"Not.A/Brand\";v=\"24\""),
+    );
+    h.insert("sec-ch-ua-mobile", HeaderValue::from_static("?0"));
+    h.insert("sec-ch-ua-platform", HeaderValue::from_static("\"Windows\""));
+    h
 }
 
 /// Host portion of a URL, for keying per-host rate state.
