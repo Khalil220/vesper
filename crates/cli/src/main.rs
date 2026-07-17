@@ -12,8 +12,8 @@ use std::time::Duration;
 use anyhow::{anyhow, ensure, Result};
 use clap::{Parser, Subcommand};
 use crawler_core::{
-    build_epub, build_source, epub_path, sync_novel, Config, DerivedState, Source, Store,
-    StoredNovel, StoredSource, SyncReport,
+    build_epub, build_source, download_cover, epub_path, sync_novel, Config, DerivedState, Source,
+    Store, StoredNovel, StoredSource, SyncReport,
 };
 
 #[derive(Parser)]
@@ -114,7 +114,7 @@ async fn main() -> Result<()> {
         Command::Subs => subs(),
         Command::Unsubscribe { novel } => unsubscribe(novel),
         Command::Fetch { novel, limit, delay_ms } => fetch(&config, novel, limit, delay_ms).await,
-        Command::Export { novel, out } => export(&config, novel, out),
+        Command::Export { novel, out } => export(&config, novel, out).await,
         Command::Prune { retention_days } => prune(&config, retention_days),
         Command::Sync { limit, delay_ms } => sync_all(&config, limit, delay_ms).await,
         Command::Service { action } => match action {
@@ -149,18 +149,23 @@ fn build_sources(novel: &StoredNovel, delay_ms: u64) -> Result<Vec<(StoredSource
 }
 
 /// Build a novel's EPUB(s) from stored chapters, honouring the split setting.
-/// Returns the written paths; marks all chapters exported.
-fn export_novel(store: &Store, novel: &StoredNovel, config: &Config) -> Result<Vec<PathBuf>> {
+/// Returns the written paths; marks all chapters exported. Embeds the cover if
+/// one can be downloaded (best-effort).
+async fn export_novel(store: &Store, novel: &StoredNovel, config: &Config) -> Result<Vec<PathBuf>> {
     let chapters = store.load_chapters(novel.id)?;
     if chapters.is_empty() {
         return Ok(Vec::new());
     }
     let meta = novel.to_meta();
+    let cover = match &meta.cover_url {
+        Some(url) => download_cover(url).await,
+        None => None,
+    };
     let mut paths = Vec::new();
 
     if config.split_every_chapters == 0 {
         let path = epub_path(&config.output_dir, meta.author.as_deref(), &meta.title, None);
-        build_epub(&meta, &chapters, &path)?;
+        build_epub(&meta, &chapters, &path, cover.as_ref())?;
         paths.push(path);
     } else {
         let size = config.split_every_chapters as usize;
@@ -171,7 +176,7 @@ fn export_novel(store: &Store, novel: &StoredNovel, config: &Config) -> Result<V
                 &meta.title,
                 Some((i + 1) as u32),
             );
-            build_epub(&meta, chunk, &path)?;
+            build_epub(&meta, chunk, &path, cover.as_ref())?;
             paths.push(path);
         }
     }
@@ -180,7 +185,7 @@ fn export_novel(store: &Store, novel: &StoredNovel, config: &Config) -> Result<V
 }
 
 /// After a sync/fetch: re-evaluate completion and run auto-export/append.
-fn post_sync(
+async fn post_sync(
     store: &Store,
     config: &Config,
     novel_id: i64,
@@ -208,7 +213,7 @@ fn post_sync(
         || novel.export_pending;
 
     if should_export {
-        match export_novel(store, &novel, config) {
+        match export_novel(store, &novel, config).await {
             Ok(paths) if !paths.is_empty() => {
                 store.set_export_pending(novel_id, false)?;
                 eprintln!("  auto-exported {} file(s) to {}", paths.len(), config.output_dir.display());
@@ -347,7 +352,7 @@ async fn fetch(config: &Config, novel: String, limit: usize, delay_ms: Option<u6
     for w in &report.warnings {
         eprintln!("  ! {w}");
     }
-    post_sync(&store, config, found.id, found.derived_state, &report)?;
+    post_sync(&store, config, found.id, found.derived_state, &report).await?;
 
     let fallback_note = if report.from_fallback > 0 {
         format!(" ({} from fallback sources)", report.from_fallback)
@@ -369,7 +374,7 @@ async fn fetch(config: &Config, novel: String, limit: usize, delay_ms: Option<u6
     Ok(())
 }
 
-fn export(config: &Config, novel: String, out: Option<PathBuf>) -> Result<()> {
+async fn export(config: &Config, novel: String, out: Option<PathBuf>) -> Result<()> {
     let store = Store::open_default()?;
     let found = store
         .find_novel(&novel)?
@@ -383,11 +388,16 @@ fn export(config: &Config, novel: String, out: Option<PathBuf>) -> Result<()> {
     );
 
     if let Some(out_path) = out {
-        build_epub(&found.to_meta(), &chapters, &out_path)?;
+        let meta = found.to_meta();
+        let cover = match &meta.cover_url {
+            Some(url) => download_cover(url).await,
+            None => None,
+        };
+        build_epub(&meta, &chapters, &out_path, cover.as_ref())?;
         store.mark_all_exported(found.id)?;
         println!("Exported {} chapters of \"{}\" to {}", chapters.len(), found.title, out_path.display());
     } else {
-        let paths = export_novel(&store, &found, config)?;
+        let paths = export_novel(&store, &found, config).await?;
         println!("Exported {} chapters of \"{}\" to {} file(s):", chapters.len(), found.title, paths.len());
         for p in &paths {
             println!("  {}", p.display());
@@ -444,7 +454,9 @@ async fn sync_all(config: &Config, limit: usize, delay_ms: Option<u64>) -> Resul
                 for w in &report.warnings {
                     eprintln!("  ! {w}");
                 }
-                if let Err(e) = post_sync(&store, config, novel.id, novel.derived_state, &report) {
+                if let Err(e) =
+                    post_sync(&store, config, novel.id, novel.derived_state, &report).await
+                {
                     eprintln!("  ! post-sync for \"{}\" failed: {e}", novel.title);
                 }
                 total_new += report.newly_fetched;

@@ -16,7 +16,7 @@ pub mod sync;
 pub mod util;
 
 pub use config::Config;
-pub use epub::build_epub;
+pub use epub::{build_epub, download_cover, Cover};
 pub use fetch::{CurlFetcher, FetchConfig, Fetcher, ReqwestFetcher};
 pub use freewebnovel::FreewebnovelSource;
 pub use lightnovelworld::LightNovelWorldSource;
