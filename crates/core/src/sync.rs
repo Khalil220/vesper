@@ -182,9 +182,11 @@ pub async fn sync_novel(
         }
     }
 
-    // Backfilling -> Live once every discovered chapter is stored. (Delta-mode
-    // novels are already Live; they stay Live here — LikelyComplete is handled
-    // by the retention slice.)
+    // State transitions:
+    // - Backfilling -> Live once every discovered chapter is stored.
+    // - A non-backfilling novel that fetched something is (still) Live — activity
+    //   overrides a prior LikelyComplete. With nothing new, its state is left
+    //   unchanged; Live -> LikelyComplete is decided by `reevaluate_completion`.
     let new_state = if is_backfilling {
         let now_have = store.stored_chapter_numbers(novel_id)?;
         if !target.is_empty() && target.difference(&now_have).next().is_none() {
@@ -192,8 +194,10 @@ pub async fn sync_novel(
         } else {
             DerivedState::Backfilling
         }
-    } else {
+    } else if report.newly_fetched > 0 {
         DerivedState::Live
+    } else {
+        state
     };
     if new_state != state {
         store.set_derived_state(novel_id, new_state)?;

@@ -302,14 +302,11 @@ Verified by probing during design:
 - Decide whether to zstd-compress stored chapter text from day one or later.
 - Design the generic site-profile format (selectors, pagination pattern, tier,
   rate limits) and the second source to validate the abstraction against novgo.
-- **Delta-aware discovery (efficiency, important):** each `sync` currently walks
-  the *entire* ToC (all ~51 pages / ~64s for a 2,500-chapter novel) even to find
-  a handful of new chapters, because discovery pulls the full list. For a
-  background poller this is heavy. The fix pairs naturally with the
-  Backfilling->Live state machine: a *Live* novel should do a cheap delta check
-  (novgo's landing page lists the latest chapters at the top, so page 1 alone
-  surfaces new chapters beyond `last_seen`), falling back to a full walk only for
-  backfill or on a detected gap. Build this with that slice.
+- **Auto-prune wiring (pending config):** `apply_retention` and the
+  LikelyComplete transition exist and are exercised by `crawler prune` and
+  `reevaluate_completion` after each sync, but the scheduled `sync` does not yet
+  auto-prune — `retention_days` and `quiet_grace_days` are hardcoded defaults
+  until config.ini lands. Wire auto-prune into `sync` with the config slice.
 - **Fallback content upgrade (deferred):** once a chapter is stored from a
   fallback, a later sync does not re-fetch it from the primary even if the
   primary gains that number. "Primary authoritative" currently governs *where a

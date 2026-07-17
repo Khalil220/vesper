@@ -84,7 +84,9 @@ From the repo root:
   - `crawler export <novel> [--out PATH]` — build an EPUB from stored chapters.
   - `crawler unsubscribe <novel>` — remove a subscription (cascades chapters).
   - `crawler sync [--limit N]` — sync ALL subscriptions (what the background task
-    runs). Single-instance lock: overlapping runs skip.
+    runs). Single-instance lock: overlapping runs skip. Re-evaluates completion.
+  - `crawler prune [--retention-days N]` — purge exported chapters of
+    LikelyComplete novels (never un-exported chapters or ongoing novels).
   - `crawler service install|uninstall|status [--interval-minutes N]` — manage
     the Windows Task Scheduler job that runs `crawler sync`.
   - `crawler list <novel-url>` — discovery check: walk the full ToC, report
@@ -127,6 +129,7 @@ Cargo workspace, two crates under `crates/`:
   - `cli::service` — `ServiceManager` trait + Windows Task Scheduler impl (shells
     out to `schtasks`); other platforms stubbed for later.
 
-Not yet built (see DESIGN.md): retention, the Backfilling->Live auto-export
-state machine, and **delta-aware discovery** (each `sync` currently re-walks the
-whole ToC — see the open item).
+Not yet built (see DESIGN.md): config.ini (making retention_days /
+quiet_grace_days / delay etc. configurable and auto-pruning in `sync`), and the
+auto-export state machine (auto_export on backfill-complete, auto_append on
+deltas).

@@ -130,17 +130,22 @@ impl Store {
             );
 
             CREATE TABLE IF NOT EXISTS chapters (
-                novel_id   INTEGER NOT NULL REFERENCES novels(id) ON DELETE CASCADE,
-                number     INTEGER NOT NULL,
-                title      TEXT NOT NULL,
-                body       TEXT NOT NULL,
-                source_id  INTEGER REFERENCES sources(id),
-                fetched_at INTEGER NOT NULL,
-                exported   INTEGER NOT NULL DEFAULT 0,
+                novel_id    INTEGER NOT NULL REFERENCES novels(id) ON DELETE CASCADE,
+                number      INTEGER NOT NULL,
+                title       TEXT NOT NULL,
+                body        TEXT NOT NULL,
+                source_id   INTEGER REFERENCES sources(id),
+                fetched_at  INTEGER NOT NULL,
+                exported    INTEGER NOT NULL DEFAULT 0,
+                exported_at INTEGER,
                 PRIMARY KEY (novel_id, number)
             );
             "#,
         )?;
+        // Upgrade DBs created before exported_at existed (harmless no-op otherwise).
+        let _ = self
+            .conn
+            .execute("ALTER TABLE chapters ADD COLUMN exported_at INTEGER", []);
         Ok(())
     }
 
@@ -379,13 +384,75 @@ impl Store {
         Ok(())
     }
 
-    /// Mark every stored chapter of a novel as exported (retention bookkeeping).
+    /// Mark every stored chapter of a novel as exported, stamping the time (for
+    /// the retention grace period).
     pub fn mark_all_exported(&self, novel_id: i64) -> Result<()> {
         self.conn.execute(
-            "UPDATE chapters SET exported = 1 WHERE novel_id = ?1",
-            params![novel_id],
+            "UPDATE chapters SET exported = 1, exported_at = ?2 WHERE novel_id = ?1",
+            params![novel_id, now_unix()],
         )?;
         Ok(())
+    }
+
+    /// The most recent `fetched_at` across a novel's chapters — i.e. when we last
+    /// stored a new chapter. Used to gauge how long a novel has been quiet.
+    pub fn latest_fetch_time(&self, novel_id: i64) -> Result<Option<i64>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT max(fetched_at) FROM chapters WHERE novel_id = ?1",
+                params![novel_id],
+                |r| r.get::<_, Option<i64>>(0),
+            )
+            .optional()?
+            .flatten())
+    }
+
+    /// Re-evaluate a novel's completion: a *Live* novel whose site status is
+    /// Completed and which has stored no new chapter for `quiet_grace_days`
+    /// becomes *LikelyComplete*. Returns the (possibly unchanged) state.
+    ///
+    /// The reverse (LikelyComplete -> Live on new activity) is handled by
+    /// `sync_novel`, which sets Live whenever it fetches something.
+    pub fn reevaluate_completion(
+        &self,
+        novel_id: i64,
+        quiet_grace_days: u32,
+    ) -> Result<DerivedState> {
+        let (status, state): (String, String) = self.conn.query_row(
+            "SELECT status_hint, derived_state FROM novels WHERE id = ?1",
+            params![novel_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        let status = NovelStatus::from_str(&status);
+        let state = DerivedState::from_str(&state);
+
+        if state != DerivedState::Live || status != NovelStatus::Completed {
+            return Ok(state);
+        }
+        let latest = self.latest_fetch_time(novel_id)?.unwrap_or(0);
+        let grace = quiet_grace_days as i64 * 86_400;
+        if now_unix() - latest >= grace {
+            self.set_derived_state(novel_id, DerivedState::LikelyComplete)?;
+            Ok(DerivedState::LikelyComplete)
+        } else {
+            Ok(state)
+        }
+    }
+
+    /// Purge exported chapters of *LikelyComplete* novels once they are at least
+    /// `retention_days` old (0 = as soon as exported). Never touches un-exported
+    /// chapters, nor novels in any other state (ongoing novels keep their working
+    /// set). Returns how many chapters were deleted.
+    pub fn apply_retention(&self, retention_days: u32) -> Result<usize> {
+        let cutoff = now_unix() - retention_days as i64 * 86_400;
+        let n = self.conn.execute(
+            "DELETE FROM chapters
+             WHERE exported = 1 AND exported_at IS NOT NULL AND exported_at <= ?1
+               AND novel_id IN (SELECT id FROM novels WHERE derived_state = 'likely_complete')",
+            params![cutoff],
+        )?;
+        Ok(n)
     }
 
     pub fn set_derived_state(&self, novel_id: i64, state: DerivedState) -> Result<()> {
@@ -485,6 +552,97 @@ mod tests {
         s.subscribe(&sample_meta("https://novgo.net/a.html"), "novgo").unwrap();
         assert!(s.find_novel("test novel").unwrap().is_some());
         assert!(s.find_novel("NONEXISTENT").unwrap().is_none());
+    }
+
+    fn completed_meta(url: &str) -> NovelMeta {
+        NovelMeta {
+            title: "Done Novel".into(),
+            author: Some("A".into()),
+            cover_url: None,
+            status_hint: NovelStatus::Completed,
+            source_url: url.into(),
+        }
+    }
+
+    fn primary_source_id(s: &Store, id: i64) -> i64 {
+        s.find_novel(&id.to_string())
+            .unwrap()
+            .unwrap()
+            .primary_source()
+            .unwrap()
+            .id
+    }
+
+    #[test]
+    fn retention_purges_only_exported_likely_complete_chapters() {
+        let s = mem_store();
+        let id = s.subscribe(&sample_meta("https://novgo.net/a.html"), "novgo").unwrap();
+        let src = primary_source_id(&s, id);
+        s.insert_chapter_if_absent(id, src, &chapter(1)).unwrap();
+        s.insert_chapter_if_absent(id, src, &chapter(2)).unwrap();
+
+        // Not exported, not LikelyComplete: nothing purged.
+        assert_eq!(s.apply_retention(0).unwrap(), 0);
+
+        s.mark_all_exported(id).unwrap();
+        // Exported but still Backfilling: nothing purged.
+        assert_eq!(s.apply_retention(0).unwrap(), 0);
+
+        s.set_derived_state(id, DerivedState::LikelyComplete).unwrap();
+        // Exported + LikelyComplete + grace 0: purged.
+        assert_eq!(s.apply_retention(0).unwrap(), 2);
+        assert!(s.stored_chapter_numbers(id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn retention_never_purges_unexported_chapters() {
+        let s = mem_store();
+        let id = s.subscribe(&sample_meta("https://novgo.net/a.html"), "novgo").unwrap();
+        let src = primary_source_id(&s, id);
+        s.insert_chapter_if_absent(id, src, &chapter(1)).unwrap();
+        s.set_derived_state(id, DerivedState::LikelyComplete).unwrap();
+        assert_eq!(s.apply_retention(0).unwrap(), 0);
+        assert_eq!(s.stored_chapter_numbers(id).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn retention_respects_grace_days() {
+        let s = mem_store();
+        let id = s.subscribe(&sample_meta("https://novgo.net/a.html"), "novgo").unwrap();
+        let src = primary_source_id(&s, id);
+        s.insert_chapter_if_absent(id, src, &chapter(1)).unwrap();
+        s.mark_all_exported(id).unwrap();
+        s.set_derived_state(id, DerivedState::LikelyComplete).unwrap();
+        // Just exported; a 30-day grace keeps it.
+        assert_eq!(s.apply_retention(30).unwrap(), 0);
+        assert_eq!(s.stored_chapter_numbers(id).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn reevaluate_marks_quiet_completed_novel() {
+        let s = mem_store();
+        let id = s.subscribe(&completed_meta("https://novgo.net/done.html"), "novgo").unwrap();
+        s.set_derived_state(id, DerivedState::Live).unwrap();
+        assert_eq!(
+            s.reevaluate_completion(id, 0).unwrap(),
+            DerivedState::LikelyComplete
+        );
+    }
+
+    #[test]
+    fn reevaluate_keeps_ongoing_or_recent_novels_live() {
+        let s = mem_store();
+        // Ongoing status never becomes LikelyComplete.
+        let ongoing = s.subscribe(&sample_meta("https://novgo.net/a.html"), "novgo").unwrap();
+        s.set_derived_state(ongoing, DerivedState::Live).unwrap();
+        assert_eq!(s.reevaluate_completion(ongoing, 0).unwrap(), DerivedState::Live);
+
+        // Completed but recently active with a huge grace stays Live.
+        let done = s.subscribe(&completed_meta("https://novgo.net/done.html"), "novgo").unwrap();
+        let src = primary_source_id(&s, done);
+        s.insert_chapter_if_absent(done, src, &chapter(1)).unwrap();
+        s.set_derived_state(done, DerivedState::Live).unwrap();
+        assert_eq!(s.reevaluate_completion(done, 3650).unwrap(), DerivedState::Live);
     }
 
     #[test]

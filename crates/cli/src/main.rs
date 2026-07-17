@@ -16,6 +16,10 @@ use crawler_core::{
     Source, Store, StoredNovel, StoredSource,
 };
 
+/// Days a Live+Completed novel must be quiet before it's judged LikelyComplete.
+/// Will become configurable via config.ini in a later slice.
+const DEFAULT_QUIET_GRACE_DAYS: u32 = 30;
+
 #[derive(Parser)]
 #[command(name = "crawler", about = "Webnovel crawler -> EPUB", version)]
 struct Cli {
@@ -75,6 +79,13 @@ enum Command {
         #[arg(long, default_value_t = 1500)]
         delay_ms: u64,
     },
+    /// Purge exported chapters of completed novels to free space (never touches
+    /// un-exported chapters or ongoing novels).
+    Prune {
+        /// Keep exported chapters this many days before purging (0 = purge now).
+        #[arg(long, default_value_t = 30)]
+        retention_days: u32,
+    },
     /// Manage the background sync task (install/uninstall/status).
     Service {
         #[command(subcommand)]
@@ -120,6 +131,7 @@ async fn main() -> Result<()> {
             delay_ms,
         } => fetch(novel, limit, delay_ms).await,
         Command::Export { novel, out } => export(novel, out),
+        Command::Prune { retention_days } => prune(retention_days),
         Command::Sync { limit, delay_ms } => sync_all(limit, delay_ms).await,
         Command::Service { action } => match action {
             ServiceAction::Install { interval_minutes } => service_install(interval_minutes),
@@ -318,8 +330,9 @@ async fn fetch(novel: String, limit: usize, delay_ms: u64) -> Result<()> {
     )
     .await?;
 
-    if report.new_state != found.derived_state {
-        eprintln!("  state: {} -> {}", found.derived_state.as_str(), report.new_state.as_str());
+    let final_state = store.reevaluate_completion(found.id, DEFAULT_QUIET_GRACE_DAYS)?;
+    if final_state != found.derived_state {
+        eprintln!("  state: {} -> {}", found.derived_state.as_str(), final_state.as_str());
     }
 
     for w in &report.warnings {
@@ -424,8 +437,11 @@ async fn sync_all(limit: usize, delay_ms: u64) -> Result<()> {
                 for w in &report.warnings {
                     eprintln!("  ! {w}");
                 }
-                if report.new_state != novel.derived_state {
-                    eprintln!("  {} state: {} -> {}", novel.title, novel.derived_state.as_str(), report.new_state.as_str());
+                let final_state = store
+                    .reevaluate_completion(novel.id, DEFAULT_QUIET_GRACE_DAYS)
+                    .unwrap_or(report.new_state);
+                if final_state != novel.derived_state {
+                    eprintln!("  {} state: {} -> {}", novel.title, novel.derived_state.as_str(), final_state.as_str());
                 }
                 total_new += report.newly_fetched;
                 let mode = if report.delta_mode { "delta" } else { "full" };
@@ -438,6 +454,13 @@ async fn sync_all(limit: usize, delay_ms: u64) -> Result<()> {
         "Sync complete: {total_new} new chapter(s) across {} novel(s).",
         novels.len()
     );
+    Ok(())
+}
+
+fn prune(retention_days: u32) -> Result<()> {
+    let store = Store::open_default()?;
+    let n = store.apply_retention(retention_days)?;
+    println!("Pruned {n} exported chapter(s) from completed novels (retention {retention_days}d).");
     Ok(())
 }
 
