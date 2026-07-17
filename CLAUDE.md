@@ -20,17 +20,27 @@ the Build / Test / Run and module-map sections below once the workspace exists.
 - **SQLite (WAL) is the single source of truth**, in `%LOCALAPPDATA%` (via
   `directories::data_local_dir`) — **never roaming `%APPDATA%`**. Store cleaned
   text/XHTML, not raw HTML.
+- **Multi-source by design.** A `Source` trait abstracts each site; a generic
+  config-driven adapter handles the common server-rendered + CSS + `?page=N`
+  case, so most sites (novgo included) are just declarative profiles, no
+  recompile. Hand-written adapters only for weird sites. Data model keys by
+  (source, novel); URL-to-source resolves by host. novgo is the first source,
+  not the only one.
 - **Tiered fetcher behind a trait.** novgo needs only Tier 1 (plain `reqwest` +
   browser UA). Escalate to `rquest` fingerprinting or a headless browser only
   per-site as needed.
 - **Adaptive, per-host politeness:** modest delay + jitter, one request in
   flight per host, back off on 429/503, honor `Retry-After`, resume-on-disk.
   Parallelism only across distinct hosts. **No proxy-rotation / ban-evasion.**
-- **Completion detection:** prefer the site's status field (novgo:
-  `og:novel:status`); fall back to a staleness heuristic. Hiatus != completed.
+- **Completion detection — don't trust the label.** The site status field is a
+  *hint*; observed activity is authoritative. New chapters observed => Ongoing,
+  overriding any "completed" label. The label only lowers poll cadence; never
+  stop polling until unsubscribed. Hiatus != completed.
 - **Retention resolves delete-vs-append:** ongoing novels keep chapters in the
-  DB (so append = regenerate-from-DB); only completed/dormant novels get purged,
-  after final export. Retention **never** deletes an un-exported chapter.
+  DB (so append = regenerate-from-DB); only *Likely complete* novels (labeled
+  complete AND observably quiet for the grace window AND finally exported) get
+  purged. Never fires on the label alone. Retention **never** deletes an
+  un-exported chapter. Revival after purge re-hydrates the working set.
 - **Auto-export via a Backfilling -> Caught-up/Live state machine**, not a
   "majority of chapters" heuristic. `auto_export` and `auto_append` are separate
   toggles.

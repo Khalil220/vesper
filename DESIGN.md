@@ -24,6 +24,30 @@ for depth.
   chapters, fetch the deltas, store them, and (conditionally) trigger export. It
   never makes policy decisions the CLI hasn't configured.
 
+## Sources (multi-site)
+
+novgo is the *first* source, not the only one. The system is built around a
+**source adapter** abstraction so new sites are added without rewriting the core.
+
+- A `Source` trait defines what any site must provide: match a URL to this
+  source (by host), discover the chapter list, extract chapter content, extract
+  metadata (title / author / cover / status), and declare its fetch tier.
+- **Two ways to implement a source:**
+  1. A **generic, config-driven adapter** for the common case — server-rendered
+     pages, CSS-selectable content, `?page=N`-style ToC pagination. Most novel
+     aggregators (including novgo) fit this, so they become a declarative site
+     *profile* (selectors + pagination pattern + tier + rate limits), addable
+     without recompiling.
+  2. A **hand-written Rust adapter** implementing the same trait, for sites too
+     weird for the generic one (JS-rendered, AJAX ToC, odd auth).
+- Start with the trait plus one generic config-driven adapter; **novgo is just a
+  profile** for it. Reach for a bespoke adapter only when a site earns it.
+- **The data model keys by source.** A subscription is (source, novel identity);
+  the same novel on two sites is two independent subscriptions. Chapter URLs are
+  source-specific. URL-to-source resolution is by host.
+- Cross-source features (a fallback/mirror source for the same novel) are out of
+  scope for now, but the source-keyed model leaves room for them.
+
 ## Background sync: scheduled invocation, not a resident daemon
 
 We run the sync as a **scheduled invocation**, not a long-lived process. The OS
@@ -100,17 +124,30 @@ lives in the DB, not in RAM — so the main thing a resident daemon would buy
   operators it is the harmful case, not personal archival. Adaptive
   fast-with-backoff is both the polite and the optimal strategy — they coincide.
 
-## Completion detection
+## Completion detection (don't trust the label)
 
-- **Prefer the site's own status field.** novgo exposes
-  `og:novel:status` (meta tag) plus a visible "Status: Ongoing/Completed" label,
-  so completion is machine-readable there. Confirm which value means "completed"
-  against a known-finished novel before trusting it.
-- **Fallback heuristic:** if a site exposes no status, treat "no new chapters
-  across many poll cycles for 30+ days" as *dormant*, not *completed*. A hiatus
-  is not completion; never mark a novel finished on silence alone.
-- Completion status is not just a label — it is the switch that decides when it
-  is safe to reclaim space (see retention).
+Site status labels are unreliable — a novel is sometimes marked "Completed"
+while still receiving updates (and occasionally the reverse). So the label is a
+**hint, never ground truth.** The authoritative signal is **observed activity.**
+
+- **Observed new chapters always win.** If the poller sees new chapters appear,
+  the novel is ongoing whatever the label says. New chapters immediately set the
+  state to *Ongoing* and reset the quiet timer.
+- **The label only modulates poll cadence.** A "Completed" label plus a long
+  quiet period lets us poll *less often* — it never makes us stop.
+- **Never stop polling until the user unsubscribes.** A novel believed complete
+  is still polled at a reduced cadence, so a surprise revival (bonus chapters,
+  the author returns) is caught. This handles mislabeling in both directions.
+- **Derived state**, roughly:
+  - *Ongoing* — recent new chapters observed, or labeled ongoing.
+  - *Likely complete* — labeled complete AND no new chapters for a long grace
+    window. Polled at reduced cadence, not abandoned.
+- Where a site exposes no status at all, "no new chapters for 30+ days" means
+  *dormant*, not *complete* — a hiatus is not completion; never mark a novel
+  finished on silence alone.
+- The site's status field (novgo: `og:novel:status`) still feeds this as a hint
+  — knowing which value means "completed" is useful, but it is never the sole
+  basis for the *Likely complete* state or for purging (see retention).
 
 ## Retention (resolves the delete-vs-append collision)
 
@@ -122,9 +159,15 @@ export, regeneration is impossible. Resolution:
 
 - **Ongoing novels keep their chapters in the DB** (the working set). Text is
   cheap, and this keeps appends as simple regenerate-from-DB operations.
-- **Retention/deletion applies to completed or long-dormant novels** — once a
-  novel is finished and has had its final export, its DB rows are safe to purge
-  because nothing will append again. The EPUB becomes the archive of record.
+- **Retention/deletion applies only to *Likely complete* novels** (see
+  Completion detection) — labeled complete AND observably quiet for the grace
+  window AND a final export done. It deliberately does **not** fire on the label
+  alone, so a mislabeled-but-still-updating novel is never purged: its observed
+  activity keeps it *Ongoing*. Once purged, the EPUB is the archive of record.
+- **Revival after purge:** if a purged novel later gets new chapters, it reverts
+  to *Ongoing* and its working set is re-hydrated (re-fetch the tail from source,
+  or read existing chapters back from the EPUB) before appending. The generous
+  quiet grace window makes this rare.
 
 - **Safe retention semantics:** delete a raw chapter only after it has been
   successfully exported AND `retention_days` have passed. `0` = purge on export;
@@ -222,7 +265,10 @@ Verified by probing during design:
 
 ## Open items
 
-- Confirm the `og:novel:status` value that means "completed" against a known
-  finished novel on novgo.
-- Decide the default `poll_interval`.
+- Map the `og:novel:status` values on novgo (which means completed) against a
+  known finished novel — as a *hint* feeding completion detection, not a trigger.
+- Decide the default `poll_interval`, and the reduced cadence + quiet grace
+  window for *Likely complete* novels.
 - Decide whether to zstd-compress stored chapter text from day one or later.
+- Design the generic site-profile format (selectors, pagination pattern, tier,
+  rate limits) and the second source to validate the abstraction against novgo.
