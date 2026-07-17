@@ -12,7 +12,7 @@ use std::path::PathBuf;
 
 use anyhow::{anyhow, Result};
 use directories::ProjectDirs;
-use ini::Ini;
+use ini::{Ini, ParseOption};
 use url::Url;
 
 use crate::source::SiteProfile;
@@ -76,7 +76,11 @@ pub fn external() -> Vec<SiteProfile> {
 }
 
 fn load_profile(path: &std::path::Path) -> Result<SiteProfile> {
-    let ini = Ini::load_from_file(path)?;
+    let opt = ParseOption {
+        enabled_escape: false,
+        ..ParseOption::default()
+    };
+    let ini = Ini::load_from_file_opt(path, opt)?;
     let s = ini
         .section(Some("profile"))
         .ok_or_else(|| anyhow!("missing [profile] section"))?;

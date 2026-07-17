@@ -76,6 +76,8 @@ enum Command {
     },
     /// Show the config file path and current settings.
     Config,
+    /// Show library status: subscriptions, last sync, and recent log lines.
+    Status,
     /// List loaded site profiles and where to add custom ones.
     Profiles,
     /// List a novel's discovered chapters (walks the full ToC; no DB, no bodies).
@@ -125,6 +127,7 @@ async fn main() -> Result<()> {
             ServiceAction::Status => service_status(),
         },
         Command::Config => config_show(&config),
+        Command::Status => status(&config),
         Command::Profiles => profiles_show(),
         Command::List { url, delay_ms } => list(&config, url, delay_ms).await,
     }
@@ -227,6 +230,19 @@ async fn post_sync(
         }
     }
     Ok(())
+}
+
+/// Append a timestamped line to the log file (best-effort). Used by `sync` so
+/// windowless background runs leave a trail (their stderr is discarded).
+fn log_line(config: &Config, msg: &str) {
+    use std::io::Write;
+    if let Some(parent) = config.log_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(&config.log_path) {
+        let ts = crawler_core::util::format_unix_utc(crawler_core::util::now_unix());
+        let _ = writeln!(f, "[{ts}] {msg}");
+    }
 }
 
 fn acquire_sync_lock() -> Result<Option<File>> {
@@ -426,8 +442,10 @@ async fn sync_all(config: &Config, limit: usize, delay_ms: Option<u64>) -> Resul
 
     let store = Store::open_default()?;
     let novels = store.list_subscriptions()?;
+    log_line(config, &format!("sync started ({} novels)", novels.len()));
     if novels.is_empty() {
         println!("No subscriptions to sync.");
+        log_line(config, "sync complete: no subscriptions");
         return Ok(());
     }
 
@@ -461,20 +479,36 @@ async fn sync_all(config: &Config, limit: usize, delay_ms: Option<u64>) -> Resul
                 }
                 total_new += report.newly_fetched;
                 let mode = if report.delta_mode { "delta" } else { "full" };
+                let extra = if report.upgraded > 0 {
+                    format!(", {} upgraded", report.upgraded)
+                } else {
+                    String::new()
+                };
                 println!("  {}: +{} new chapters [{mode}]", novel.title, report.newly_fetched);
+                log_line(
+                    config,
+                    &format!("  {}: +{} new [{mode}]{extra}", novel.title, report.newly_fetched),
+                );
             }
-            Err(e) => eprintln!("  ! sync failed for \"{}\": {e}", novel.title),
+            Err(e) => {
+                eprintln!("  ! sync failed for \"{}\": {e}", novel.title);
+                log_line(config, &format!("  ERROR {}: {e}", novel.title));
+            }
         }
     }
 
     // Auto-prune per config after the pass.
     match store.apply_retention(config.retention_days) {
-        Ok(n) if n > 0 => println!("Pruned {n} exported chapter(s) from completed novels."),
+        Ok(n) if n > 0 => {
+            println!("Pruned {n} exported chapter(s) from completed novels.");
+            log_line(config, &format!("pruned {n} exported chapters"));
+        }
         Ok(_) => {}
         Err(e) => eprintln!("! prune failed: {e}"),
     }
 
     println!("Sync complete: {total_new} new chapter(s) across {} novel(s).", novels.len());
+    log_line(config, &format!("sync complete: {total_new} new across {} novels", novels.len()));
     Ok(())
 }
 
@@ -517,6 +551,41 @@ fn config_show(config: &Config) -> Result<()> {
     println!("  auto_export           = {}", config.auto_export);
     println!("  auto_append           = {}", config.auto_append);
     println!("  split_every_chapters  = {}", config.split_every_chapters);
+    println!("  log_path              = {}", config.log_path.display());
+    Ok(())
+}
+
+fn status(config: &Config) -> Result<()> {
+    let store = Store::open_default()?;
+    println!("Library DB: {}", crawler_core::default_db_path()?.display());
+    println!("Log file:   {}", config.log_path.display());
+
+    let novels = store.list_subscriptions()?;
+    println!("\nSubscriptions: {}", novels.len());
+    for n in &novels {
+        let pending = if n.export_pending { ", export pending" } else { "" };
+        println!(
+            "  #{} {} — {} chapters [{}{pending}]",
+            n.id, n.title, n.chapter_count, n.derived_state.as_str()
+        );
+    }
+
+    match std::fs::read_to_string(&config.log_path) {
+        Ok(content) => {
+            let lines: Vec<&str> = content.lines().collect();
+            if let Some(last) = lines.iter().rev().find(|l| l.contains("sync complete")) {
+                println!("\nLast completed sync: {last}");
+            }
+            let tail: Vec<&&str> = lines.iter().rev().take(8).collect();
+            if !tail.is_empty() {
+                println!("Recent log:");
+                for l in tail.into_iter().rev() {
+                    println!("  {l}");
+                }
+            }
+        }
+        Err(_) => println!("\nNo log yet (the background sync hasn't run)."),
+    }
     Ok(())
 }
 

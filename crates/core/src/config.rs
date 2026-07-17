@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
 use directories::{ProjectDirs, UserDirs};
-use ini::Ini;
+use ini::{Ini, ParseOption};
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -29,6 +29,15 @@ pub struct Config {
     pub auto_append: bool,
     /// Split EPUBs into volumes of this many chapters (0 = single file).
     pub split_every_chapters: u32,
+    /// Where the background sync appends its log (its stderr is discarded).
+    pub log_path: PathBuf,
+}
+
+/// Default log path: `<data_local>/crawler.log`.
+pub fn default_log_path() -> PathBuf {
+    ProjectDirs::from("", "", "webnovel-crawler")
+        .map(|d| d.data_local_dir().join("crawler.log"))
+        .unwrap_or_else(|| PathBuf::from("crawler.log"))
 }
 
 /// Default EPUB output directory: `<Documents>/lightnovels`, or `./lightnovels`.
@@ -49,6 +58,7 @@ impl Default for Config {
             auto_export: false,
             auto_append: false,
             split_every_chapters: 0,
+            log_path: default_log_path(),
         }
     }
 }
@@ -74,7 +84,13 @@ impl Config {
     }
 
     fn read(path: &Path) -> Result<Self> {
-        let ini = Ini::load_from_file(path)
+        // Disable backslash escaping so Windows paths (C:\Users\...) round-trip
+        // literally instead of the parser eating the separators.
+        let opt = ParseOption {
+            enabled_escape: false,
+            ..ParseOption::default()
+        };
+        let ini = Ini::load_from_file_opt(path, opt)
             .with_context(|| format!("reading config {}", path.display()))?;
         let g = ini.section(Some("general"));
         let d = Config::default();
@@ -100,6 +116,10 @@ impl Config {
             auto_export: parse_bool("auto_export", d.auto_export),
             auto_append: parse_bool("auto_append", d.auto_append),
             split_every_chapters: parse_u32("split_every_chapters", d.split_every_chapters),
+            log_path: get("log_path")
+                .filter(|s| !s.is_empty())
+                .map(PathBuf::from)
+                .unwrap_or(d.log_path),
         })
     }
 
@@ -129,7 +149,9 @@ impl Config {
              ; Automatically re-export when a caught-up novel gains new chapters.\n\
              auto_append = {}\n\n\
              ; Split EPUBs into volumes of this many chapters (0 = one file per novel).\n\
-             split_every_chapters = {}\n",
+             split_every_chapters = {}\n\n\
+             ; Where the background sync writes its log (its console output is hidden).\n\
+             log_path = {}\n",
             self.output_dir.display(),
             self.request_delay_ms,
             self.poll_interval_minutes,
@@ -138,6 +160,7 @@ impl Config {
             self.auto_export,
             self.auto_append,
             self.split_every_chapters,
+            self.log_path.display(),
         );
         std::fs::write(path, content)
             .with_context(|| format!("writing config {}", path.display()))?;
@@ -168,6 +191,24 @@ mod tests {
         assert!(!read.auto_append);
         assert_eq!(read.split_every_chapters, 100);
         assert_eq!(read.retention_days, 7);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn windows_paths_roundtrip_without_escaping() {
+        let dir = std::env::temp_dir().join(format!("crawler-cfg-win-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.ini");
+
+        let mut cfg = Config::default();
+        cfg.output_dir = PathBuf::from(r"C:\Users\test\Documents\lightnovels");
+        cfg.log_path = PathBuf::from(r"C:\Users\test\AppData\Local\wc\crawler.log");
+        cfg.write(&path).unwrap();
+
+        let read = Config::read(&path).unwrap();
+        assert_eq!(read.output_dir, PathBuf::from(r"C:\Users\test\Documents\lightnovels"));
+        assert_eq!(read.log_path, PathBuf::from(r"C:\Users\test\AppData\Local\wc\crawler.log"));
 
         std::fs::remove_dir_all(&dir).ok();
     }
