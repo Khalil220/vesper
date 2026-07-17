@@ -74,10 +74,16 @@ From the repo root:
 
 - Build: `cargo build`
 - Test: `cargo test` (unit tests live inline in `core`'s modules)
-- Run: `cargo run -p crawler -- export <novel-url> [--limit N] [--out PATH] [--delay-ms MS]`
-  (`--limit 0` = all chapters; default delay 1500ms)
-- Discovery check: `cargo run -p crawler -- list <novel-url>` walks the full ToC
-  and reports chapter count + first/last (no bodies fetched).
+- Run (subscription workflow, all DB-backed):
+  - `crawler subscribe <novel-url>` — register a novel + its primary source.
+  - `crawler subs` — list subscriptions.
+  - `crawler fetch <novel> [--limit N]` — download missing chapters into the DB
+    (resume-aware; `<novel>` is an id or title; `--limit 0` = all missing).
+  - `crawler export <novel> [--out PATH]` — build an EPUB from stored chapters.
+  - `crawler unsubscribe <novel>` — remove a subscription (cascades chapters).
+  - `crawler list <novel-url>` — discovery check: walk the full ToC, report
+    count + first/last (no DB, no bodies fetched).
+- DB lives at `%LOCALAPPDATA%/webnovel-crawler/data/library.db`.
 - Built binary: `target/debug/crawler.exe`
 - Live smoke test: export a few chapters from a novgo novel and validate the
   EPUB (unzip; check `mimetype` == `application/epub+zip`, `content.opf`, and
@@ -100,9 +106,14 @@ Cargo workspace, two crates under `crates/`:
   - `model` — domain types (`NovelMeta`, `ChapterRef`, `Chapter`, `NovelStatus`).
   - `epub` — EPUB packaging (reconstructed XHTML; atomic temp-file+rename).
   - `paths` — library layout (`epub_path`, `novel_dir`): author/novel/epub tree.
-  - `util` — filename sanitization, chapter number/title parsing.
-- `cli` (bin `crawler`): clap subcommands. Currently just `export`, which drives
-  fetch -> discover -> extract -> package end to end.
+  - `store` — SQLite persistence (`Store`, `StoredNovel`): novels/sources/chapters
+    schema, WAL, resume-aware chapter insert, DB-backed load for export. rusqlite
+    pinned to 0.31 (cfg_select workaround). Connection is not `Send`, so the CLI
+    uses a current-thread runtime.
+  - `util` — filename sanitization, chapter number/title parsing, `now_unix`.
+- `cli` (bin `crawler`): clap subcommands on a current-thread Tokio runtime.
+  subscribe / subs / fetch / export / unsubscribe / list.
 
-Not yet built (see DESIGN.md): SQLite persistence, subscriptions, the sync
-command + Task Scheduler install, retention, and the auto-export state machine.
+Not yet built (see DESIGN.md): multi-source `add-source` + active fallback
+gap-fill (Step 2), the sync command + Task Scheduler install, retention, and the
+Backfilling->Live auto-export state machine.
