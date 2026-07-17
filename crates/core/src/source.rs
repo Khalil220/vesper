@@ -100,6 +100,12 @@ impl<F: Fetcher> Source for GenericSource<F> {
             let html = self.fetcher.get(&page_url).await?;
             let links = parse_chapter_links(&html, url)?;
 
+            // A page with no chapter links means we've walked past the last ToC
+            // page (or discovery is misconfigured); either way, stop.
+            if links.is_empty() {
+                break;
+            }
+
             let before = found.len();
             for c in links {
                 found.entry(c.number).or_insert(c);

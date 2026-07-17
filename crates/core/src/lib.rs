@@ -5,12 +5,14 @@
 pub mod epub;
 pub mod fetch;
 pub mod model;
+pub mod paths;
 pub mod profiles;
 pub mod source;
 pub mod util;
 
 pub use epub::build_epub;
-pub use fetch::{Fetcher, ReqwestFetcher};
+pub use fetch::{FetchConfig, Fetcher, ReqwestFetcher};
 pub use model::{Chapter, ChapterRef, NovelMeta, NovelStatus};
+pub use paths::{epub_path, novel_dir};
 pub use source::{GenericSource, SiteProfile, Source};
 pub use util::sanitize_filename;

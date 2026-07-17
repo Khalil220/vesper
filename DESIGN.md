@@ -203,11 +203,20 @@ export, regeneration is impossible. Resolution:
   - **Filename sanitization is mandatory:** strip Windows-illegal
     `<>:"/\|?*`, trailing dots/spaces, and reserved names (`CON`, `PRN`,
     `NUL`, …), or exports fail on real titles.
-  - One EPUB per novel, filename = sanitized title.
+  - **Folder layout: `<library>/<author>/<novel>/<file>.epub`.** The library
+    root defaults to `Documents\lightnovels`. Each author is a folder; each of
+    their novels is a folder beneath it (an author with several novels gets
+    sibling novel folders); the EPUB(s) live inside the novel folder. A missing
+    author maps to an `Unknown Author` folder. Every path component is
+    sanitized. This is author-first *by deliberate choice* — note it differs
+    from lightnovel-crawler's source-first layout
+    (`<source>/<novel>/{json,epub,...}`), which may already exist in the same
+    `lightnovels` folder; the two trees coexist without colliding.
+  - One EPUB per novel by default: `<novel>.epub` inside the novel folder.
   - **Optional volume-splitting** (`split_every_chapters`): a single
     2,500-chapter EPUB is large and can bog down e-readers. Splitting produces
-    `Title - Vol 01.epub`, etc.; on append only the last, in-progress volume is
-    rewritten.
+    `<novel> - Vol 01.epub`, `Vol 02`, ... inside the same novel folder; on
+    append only the last, in-progress volume is rewritten.
 
 - **Metadata/cover come free from novgo:** `og:novel:author`,
   `og:novel:genre`, `og:novel:novel_name`, and `og:image` (cover thumbnail).

@@ -49,6 +49,10 @@ the Build / Test / Run and module-map sections below once the workspace exists.
   `pending`, retry next cycle.
 - **Filename sanitization is mandatory** on Windows (strip `<>:"/\|?*`, trailing
   dots/spaces, reserved names).
+- **Output layout: `<library>/<author>/<novel>/<novel>.epub`** (library defaults
+  to `Documents/lightnovels`); volumes are `<novel> - Vol NN.epub` in the novel
+  folder. Author-first by choice — differs from lightnovel-crawler's source-first
+  tree that may already exist in the same folder. See `core::paths`.
 - Config: global flat `config.ini` (defaults) + per-novel overrides in the DB.
 
 ## novgo.net quick reference
@@ -67,6 +71,8 @@ From the repo root:
 - Test: `cargo test` (unit tests live inline in `core`'s modules)
 - Run: `cargo run -p crawler -- export <novel-url> [--limit N] [--out PATH] [--delay-ms MS]`
   (`--limit 0` = all chapters; default delay 1500ms)
+- Discovery check: `cargo run -p crawler -- list <novel-url>` walks the full ToC
+  and reports chapter count + first/last (no bodies fetched).
 - Built binary: `target/debug/crawler.exe`
 - Live smoke test: export a few chapters from a novgo novel and validate the
   EPUB (unzip; check `mimetype` == `application/epub+zip`, `content.opf`, and
@@ -78,7 +84,9 @@ From the repo root:
 Cargo workspace, two crates under `crates/`:
 
 - `core` (lib `crawler-core`):
-  - `fetch` — `Fetcher` trait + Tier-1 `ReqwestFetcher` (fixed politeness delay).
+  - `fetch` — `Fetcher` trait + Tier-1 `ReqwestFetcher` with adaptive per-host
+    backoff (grows on 429/503/`Retry-After`, relaxes on success), jitter, and
+    bounded retries. `FetchConfig` tunes base/max delay and retry count.
   - `source` — `Source` trait, declarative `SiteProfile`, `GenericSource`
     adapter, and the HTML extraction (novel metadata, chapter links, chapter
     body). Keep parsing synchronous so the non-`Send` `scraper::Html` never
@@ -86,6 +94,7 @@ Cargo workspace, two crates under `crates/`:
   - `profiles` — built-in `SiteProfile`s (novgo).
   - `model` — domain types (`NovelMeta`, `ChapterRef`, `Chapter`, `NovelStatus`).
   - `epub` — EPUB packaging (reconstructed XHTML; atomic temp-file+rename).
+  - `paths` — library layout (`epub_path`, `novel_dir`): author/novel/epub tree.
   - `util` — filename sanitization, chapter number/title parsing.
 - `cli` (bin `crawler`): clap subcommands. Currently just `export`, which drives
   fetch -> discover -> extract -> package end to end.
