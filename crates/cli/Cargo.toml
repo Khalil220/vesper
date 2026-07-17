@@ -1,0 +1,15 @@
+[package]
+name = "crawler"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "crawler"
+path = "src/main.rs"
+
+[dependencies]
+crawler-core = { path = "../core" }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"

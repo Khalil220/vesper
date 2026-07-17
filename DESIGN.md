@@ -272,3 +272,8 @@ Verified by probing during design:
 - Decide whether to zstd-compress stored chapter text from day one or later.
 - Design the generic site-profile format (selectors, pagination pattern, tier,
   rate limits) and the second source to validate the abstraction against novgo.
+- **Storage crate caveat:** on the current toolchain (Rust 1.92), the latest
+  `rusqlite` pulls `libsqlite3-sys 0.38.1`, whose build script uses the unstable
+  `cfg_select!` and fails to compile on stable. When adding persistence, pin an
+  older `rusqlite`/`libsqlite3-sys` (or reconsider the crate). The C toolchain
+  itself was not the blocker.

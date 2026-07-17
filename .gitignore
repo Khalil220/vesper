@@ -1,7 +1,8 @@
 # Rust
 /target
 **/*.rs.bk
-Cargo.lock
+# Cargo.lock IS committed: this ships as a binary application, so we want
+# reproducible builds.
 
 # Probe / scratch artifacts
 *.html

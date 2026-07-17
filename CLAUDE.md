@@ -61,8 +61,34 @@ the Build / Test / Run and module-map sections below once the workspace exists.
 
 ## Build / Test / Run
 
-TBD once scaffolded.
+From the repo root:
+
+- Build: `cargo build`
+- Test: `cargo test` (unit tests live inline in `core`'s modules)
+- Run: `cargo run -p crawler -- export <novel-url> [--limit N] [--out PATH] [--delay-ms MS]`
+  (`--limit 0` = all chapters; default delay 1500ms)
+- Built binary: `target/debug/crawler.exe`
+- Live smoke test: export a few chapters from a novgo novel and validate the
+  EPUB (unzip; check `mimetype` == `application/epub+zip`, `content.opf`, and
+  that chapter XHTML holds real prose). `cargo test` does NOT rebuild the
+  binary — run `cargo build` before invoking `target/debug/crawler.exe`.
 
 ## Module map
 
-TBD once scaffolded.
+Cargo workspace, two crates under `crates/`:
+
+- `core` (lib `crawler-core`):
+  - `fetch` — `Fetcher` trait + Tier-1 `ReqwestFetcher` (fixed politeness delay).
+  - `source` — `Source` trait, declarative `SiteProfile`, `GenericSource`
+    adapter, and the HTML extraction (novel metadata, chapter links, chapter
+    body). Keep parsing synchronous so the non-`Send` `scraper::Html` never
+    crosses an `.await`.
+  - `profiles` — built-in `SiteProfile`s (novgo).
+  - `model` — domain types (`NovelMeta`, `ChapterRef`, `Chapter`, `NovelStatus`).
+  - `epub` — EPUB packaging (reconstructed XHTML; atomic temp-file+rename).
+  - `util` — filename sanitization, chapter number/title parsing.
+- `cli` (bin `crawler`): clap subcommands. Currently just `export`, which drives
+  fetch -> discover -> extract -> package end to end.
+
+Not yet built (see DESIGN.md): SQLite persistence, subscriptions, the sync
+command + Task Scheduler install, retention, and the auto-export state machine.
