@@ -83,9 +83,13 @@ From the repo root:
     (resume-aware; `<novel>` is an id or title; `--limit 0` = all missing).
   - `crawler export <novel> [--out PATH]` — build an EPUB from stored chapters.
   - `crawler unsubscribe <novel>` — remove a subscription (cascades chapters).
+  - `crawler sync [--limit N]` — sync ALL subscriptions (what the background task
+    runs). Single-instance lock: overlapping runs skip.
+  - `crawler service install|uninstall|status [--interval-minutes N]` — manage
+    the Windows Task Scheduler job that runs `crawler sync`.
   - `crawler list <novel-url>` — discovery check: walk the full ToC, report
     count + first/last (no DB, no bodies fetched).
-- DB lives at `%LOCALAPPDATA%/webnovel-crawler/data/library.db`.
+- DB + `sync.lock` live at `%LOCALAPPDATA%/webnovel-crawler/data/`.
 - Built binary: `target/debug/crawler.exe`
 - Live smoke test: export a few chapters from a novgo novel and validate the
   EPUB (unzip; check `mimetype` == `application/epub+zip`, `content.opf`, and
@@ -118,7 +122,11 @@ Cargo workspace, two crates under `crates/`:
     `SyncReport`. Used by `fetch` now and the future scheduled `sync`.
   - `util` — filename sanitization, chapter number/title parsing, `now_unix`.
 - `cli` (bin `crawler`): clap subcommands on a current-thread Tokio runtime.
-  subscribe / add-source / subs / fetch / export / unsubscribe / list.
+  subscribe / add-source / subs / fetch / export / unsubscribe / sync / service /
+  list. `sync` takes a single-instance file lock (Windows `share_mode(0)`).
+  - `cli::service` — `ServiceManager` trait + Windows Task Scheduler impl (shells
+    out to `schtasks`); other platforms stubbed for later.
 
-Not yet built (see DESIGN.md): the scheduled `sync` command + Task Scheduler
-install, retention, and the Backfilling->Live auto-export state machine.
+Not yet built (see DESIGN.md): retention, the Backfilling->Live auto-export
+state machine, and **delta-aware discovery** (each `sync` currently re-walks the
+whole ToC — see the open item).

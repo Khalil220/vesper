@@ -3,14 +3,17 @@
 //! Runs on a current-thread Tokio runtime: the SQLite connection is not `Send`,
 //! and a poller has no need for a multi-threaded work-stealing runtime anyway.
 
+mod service;
+
+use std::fs::{File, OpenOptions};
 use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{anyhow, ensure, Result};
 use clap::{Parser, Subcommand};
 use crawler_core::{
-    build_epub, epub_path, profiles, sync_novel, GenericSource, ReqwestFetcher, Source, Store,
-    StoredSource,
+    build_epub, default_db_path, epub_path, profiles, sync_novel, GenericSource, ReqwestFetcher,
+    Source, Store, StoredNovel, StoredSource,
 };
 
 #[derive(Parser)]
@@ -63,12 +66,40 @@ enum Command {
         #[arg(long)]
         out: Option<PathBuf>,
     },
+    /// Sync all subscriptions (download new chapters). This is what the
+    /// background task runs.
+    Sync {
+        /// Max new chapters per novel this run (0 = all missing).
+        #[arg(long, default_value_t = 0)]
+        limit: usize,
+        #[arg(long, default_value_t = 1500)]
+        delay_ms: u64,
+    },
+    /// Manage the background sync task (install/uninstall/status).
+    Service {
+        #[command(subcommand)]
+        action: ServiceAction,
+    },
     /// List a novel's discovered chapters (walks the full ToC; no DB, no bodies).
     List {
         url: String,
         #[arg(long, default_value_t = 1500)]
         delay_ms: u64,
     },
+}
+
+#[derive(Subcommand)]
+enum ServiceAction {
+    /// Install the background sync task (Windows Task Scheduler).
+    Install {
+        /// How often to run the sync, in minutes.
+        #[arg(long, default_value_t = 60)]
+        interval_minutes: u32,
+    },
+    /// Remove the background sync task.
+    Uninstall,
+    /// Show whether the background sync task is installed.
+    Status,
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -89,7 +120,73 @@ async fn main() -> Result<()> {
             delay_ms,
         } => fetch(novel, limit, delay_ms).await,
         Command::Export { novel, out } => export(novel, out),
+        Command::Sync { limit, delay_ms } => sync_all(limit, delay_ms).await,
+        Command::Service { action } => match action {
+            ServiceAction::Install { interval_minutes } => service_install(interval_minutes),
+            ServiceAction::Uninstall => service_uninstall(),
+            ServiceAction::Status => service_status(),
+        },
         Command::List { url, delay_ms } => list(url, delay_ms).await,
+    }
+}
+
+/// Build a source adapter per stored source, in priority order (primary first),
+/// skipping any source whose host we have no adapter for.
+fn build_sources(
+    novel: &StoredNovel,
+    delay_ms: u64,
+) -> Result<Vec<(StoredSource, Box<dyn Source>)>> {
+    let mut sources = Vec::new();
+    for s in &novel.sources {
+        match profiles::for_url(&s.url) {
+            Some(profile) => {
+                let fetcher = ReqwestFetcher::new(Duration::from_millis(delay_ms))?;
+                sources.push((
+                    s.clone(),
+                    Box::new(GenericSource::new(profile, fetcher)) as Box<dyn Source>,
+                ));
+            }
+            None => eprintln!("  (skipping source {} — no adapter for its host)", s.url),
+        }
+    }
+    Ok(sources)
+}
+
+/// Acquire the single-instance sync lock. Returns `None` if another sync holds
+/// it (the caller should then skip, not error). The lock releases when the
+/// returned file handle is dropped / the process exits.
+fn acquire_sync_lock() -> Result<Option<File>> {
+    let lock_path = default_db_path()?
+        .parent()
+        .map(|p| p.join("sync.lock"))
+        .ok_or_else(|| anyhow!("cannot resolve lock path"))?;
+    if let Some(parent) = lock_path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        // share_mode(0) => exclusive: a second opener gets a sharing violation.
+        match OpenOptions::new()
+            .write(true)
+            .create(true)
+            .share_mode(0)
+            .open(&lock_path)
+        {
+            Ok(f) => Ok(Some(f)),
+            Err(e) if e.raw_os_error() == Some(32) => Ok(None), // ERROR_SHARING_VIOLATION
+            Err(e) => Err(e.into()),
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        // Best-effort placeholder until a real advisory lock is added.
+        let f = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .open(&lock_path)?;
+        Ok(Some(f))
     }
 }
 
@@ -205,18 +302,7 @@ async fn fetch(novel: String, limit: usize, delay_ms: u64) -> Result<()> {
         .find_novel(&novel)?
         .ok_or_else(|| anyhow!("no subscription matches \"{novel}\""))?;
 
-    // Build a source adapter per stored source, in priority order (primary
-    // first). Skip any source whose host we don't have an adapter for.
-    let mut sources: Vec<(StoredSource, Box<dyn Source>)> = Vec::new();
-    for s in &found.sources {
-        match profiles::for_url(&s.url) {
-            Some(profile) => {
-                let fetcher = ReqwestFetcher::new(Duration::from_millis(delay_ms))?;
-                sources.push((s.clone(), Box::new(GenericSource::new(profile, fetcher))));
-            }
-            None => eprintln!("  (skipping source {} — no adapter for its host)", s.url),
-        }
-    }
+    let sources = build_sources(&found, delay_ms)?;
     ensure!(!sources.is_empty(), "no usable sources for \"{}\"", found.title);
 
     let before = store.stored_chapter_numbers(found.id)?.len();
@@ -276,6 +362,84 @@ fn export(novel: String, out: Option<PathBuf>) -> Result<()> {
         found.title,
         out_path.display()
     );
+    Ok(())
+}
+
+async fn sync_all(limit: usize, delay_ms: u64) -> Result<()> {
+    // Single-instance guard: overlapping scheduled runs should skip, not stack.
+    let _lock = match acquire_sync_lock()? {
+        Some(f) => f,
+        None => {
+            eprintln!("Another sync is already running; skipping.");
+            return Ok(());
+        }
+    };
+
+    let store = Store::open_default()?;
+    let novels = store.list_subscriptions()?;
+    if novels.is_empty() {
+        println!("No subscriptions to sync.");
+        return Ok(());
+    }
+
+    let mut total_new = 0u32;
+    for novel in &novels {
+        let sources = match build_sources(novel, delay_ms) {
+            Ok(s) if !s.is_empty() => s,
+            Ok(_) => {
+                eprintln!("[{}] no usable sources; skipping", novel.title);
+                continue;
+            }
+            Err(e) => {
+                eprintln!("[{}] {e}; skipping", novel.title);
+                continue;
+            }
+        };
+        eprintln!("Syncing \"{}\"...", novel.title);
+        // One novel's failure must not abort the whole run.
+        match sync_novel(&store, novel.id, &sources, limit, |line| eprintln!("  {line}")).await {
+            Ok(report) => {
+                for w in &report.warnings {
+                    eprintln!("  ! {w}");
+                }
+                total_new += report.newly_fetched;
+                println!("  {}: +{} new chapters", novel.title, report.newly_fetched);
+            }
+            Err(e) => eprintln!("  ! sync failed for \"{}\": {e}", novel.title),
+        }
+    }
+    println!(
+        "Sync complete: {total_new} new chapter(s) across {} novel(s).",
+        novels.len()
+    );
+    Ok(())
+}
+
+fn service_install(interval_minutes: u32) -> Result<()> {
+    let exe = std::env::current_exe()?;
+    service::manager()?.install(&exe, interval_minutes)?;
+    println!(
+        "Installed background sync: \"{}\" runs `\"{}\" sync` every {interval_minutes} min.",
+        service::TASK_NAME,
+        exe.display()
+    );
+    println!("Note: it runs in your user session; a brief console window may appear each run.");
+    Ok(())
+}
+
+fn service_uninstall() -> Result<()> {
+    service::manager()?.uninstall()?;
+    println!("Removed the background sync task.");
+    Ok(())
+}
+
+fn service_status() -> Result<()> {
+    let st = service::manager()?.status()?;
+    if st.installed {
+        println!("Background sync is INSTALLED.\n{}", st.detail);
+    } else {
+        println!("Background sync is not installed. Install with `crawler service install`.");
+    }
     Ok(())
 }
 
