@@ -208,9 +208,7 @@ export, regeneration is impossible. Resolution:
     their novels is a folder beneath it (an author with several novels gets
     sibling novel folders); the EPUB(s) live inside the novel folder. A missing
     author maps to an `Unknown Author` folder. Every path component is
-    sanitized. Author-first is the chosen layout. Unrelated folders from other
-    tools may already sit in the same `lightnovels` root; we neither read nor
-    touch them — our tree coexists alongside without colliding.
+    sanitized.
   - One EPUB per novel by default: `<novel>.epub` inside the novel folder.
   - **Optional volume-splitting** (`split_every_chapters`): a single
     2,500-chapter EPUB is large and can bog down e-readers. Splitting produces

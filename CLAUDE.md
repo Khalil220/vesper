@@ -51,8 +51,7 @@ the Build / Test / Run and module-map sections below once the workspace exists.
   dots/spaces, reserved names).
 - **Output layout: `<library>/<author>/<novel>/<novel>.epub`** (library defaults
   to `Documents/lightnovels`); volumes are `<novel> - Vol NN.epub` in the novel
-  folder. Author-first is the chosen layout; unrelated folders from other tools
-  in the same root are left untouched. See `core::paths`.
+  folder. See `core::paths`.
 - Config: global flat `config.ini` (defaults) + per-novel overrides in the DB.
 
 ## novgo.net quick reference
