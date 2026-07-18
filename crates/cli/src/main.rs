@@ -6,6 +6,7 @@
 mod service;
 
 use std::fs::{File, OpenOptions};
+use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -13,7 +14,7 @@ use anyhow::{anyhow, ensure, Result};
 use clap::{Parser, Subcommand};
 use vesper_core::{
     build_epub, build_source, download_cover, epub_path, sync_novel, Config, DerivedState, Source,
-    Store, StoredNovel, StoredSource, SyncReport,
+    Store, StoredNovel, StoredSource, SyncProgress, SyncReport,
 };
 
 #[derive(Parser)]
@@ -252,13 +253,60 @@ async fn post_sync(
 /// Append a timestamped line to the log file (best-effort). Used by `sync` so
 /// windowless background runs leave a trail (their stderr is discarded).
 fn log_line(config: &Config, msg: &str) {
-    use std::io::Write;
     if let Some(parent) = config.log_path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
     if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(&config.log_path) {
         let ts = vesper_core::util::format_unix_utc(vesper_core::util::now_unix());
         let _ = writeln!(f, "[{ts}] {msg}");
+    }
+}
+
+/// A single-line, self-overwriting `n/m` progress indicator on stderr. It draws
+/// only when stderr is a terminal, so piped, redirected, and windowless
+/// background runs stay clean (they get the final summary line instead). The
+/// line updates in place with a carriage return and is erased on `finish`, so
+/// the summary that follows starts on a clean line.
+struct ProgressBar {
+    enabled: bool,
+    last_len: usize,
+}
+
+impl ProgressBar {
+    fn new() -> Self {
+        // Draw when stderr is a terminal; `VESPER_FORCE_PROGRESS` forces it on
+        // for cases where detection is wrong (some multiplexers / CI) or to make
+        // the raw output observable when capturing.
+        let forced = std::env::var_os("VESPER_FORCE_PROGRESS").is_some();
+        Self {
+            enabled: forced || std::io::stderr().is_terminal(),
+            last_len: 0,
+        }
+    }
+
+    fn update(&mut self, p: SyncProgress) {
+        if !self.enabled {
+            return;
+        }
+        let msg = match p {
+            SyncProgress::Fetching { done, total } => format!("  Fetching {done}/{total}..."),
+            SyncProgress::Upgrading { done, total } => format!("  Upgrading {done}/{total}..."),
+        };
+        // Pad over any leftover from a previously longer line, then reset to col 0.
+        let pad = " ".repeat(self.last_len.saturating_sub(msg.len()));
+        let mut err = std::io::stderr();
+        let _ = write!(err, "\r{msg}{pad}");
+        let _ = err.flush();
+        self.last_len = msg.len();
+    }
+
+    fn finish(&mut self) {
+        if self.enabled && self.last_len > 0 {
+            let mut err = std::io::stderr();
+            let _ = write!(err, "\r{}\r", " ".repeat(self.last_len));
+            let _ = err.flush();
+        }
+        self.last_len = 0;
     }
 }
 
@@ -377,10 +425,11 @@ async fn fetch(config: &Config, novel: String, limit: usize, delay_ms: Option<u6
     let before = store.stored_chapter_numbers(found.id)?.len();
     eprintln!("Syncing \"{}\" from {} source(s)...", found.title, sources.len());
 
-    let report = sync_novel(&store, found.id, found.derived_state, &sources, limit, |line| {
-        eprintln!("  {line}")
-    })
-    .await?;
+    let mut bar = ProgressBar::new();
+    let report =
+        sync_novel(&store, found.id, found.derived_state, &sources, limit, |p| bar.update(p))
+            .await?;
+    bar.finish();
 
     for w in &report.warnings {
         eprintln!("  ! {w}");
@@ -491,11 +540,12 @@ async fn sync_all(config: &Config, limit: usize, delay_ms: Option<u64>) -> Resul
             }
         };
         eprintln!("Syncing \"{}\"...", novel.title);
-        match sync_novel(&store, novel.id, novel.derived_state, &sources, limit, |line| {
-            eprintln!("  {line}")
-        })
-        .await
-        {
+        let mut bar = ProgressBar::new();
+        let result =
+            sync_novel(&store, novel.id, novel.derived_state, &sources, limit, |p| bar.update(p))
+                .await;
+        bar.finish();
+        match result {
             Ok(report) => {
                 for w in &report.warnings {
                     eprintln!("  ! {w}");

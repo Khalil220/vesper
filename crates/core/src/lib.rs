@@ -28,7 +28,7 @@ pub use model::{Chapter, ChapterRef, DerivedState, NovelMeta, NovelStatus};
 pub use paths::{epub_path, novel_dir};
 pub use source::{GenericSource, SiteProfile, Source};
 pub use store::{default_db_path, Store, StoredNovel, StoredSource};
-pub use sync::{sync_novel, SyncReport};
+pub use sync::{sync_novel, SyncProgress, SyncReport};
 pub use util::sanitize_filename;
 
 /// Resolve a URL to the right source adapter, constructing the fetch *tier* that

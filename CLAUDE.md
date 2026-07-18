@@ -9,7 +9,7 @@ profile; hand-written freewebnovel, lightnovelworld, royalroad + scribblehub
 adapters), a second fetch tier (curl, with POST support), a windowless scheduled
 task, fallback content upgrade, external config-driven profiles, EPUB cover +
 genre embedding, and a status command + sync logging are in place and tested
-(59 unit + 2 CLI tests). Linux/macOS service
+(60 unit + 2 CLI tests). Linux/macOS service
 impls are verified in CI (GitHub Actions builds/tests on ubuntu/macos/windows and
 round-trips the service install). See `DESIGN.md` for the full decisions and
 rationale; this file is the short rules-of-the-road.
@@ -189,12 +189,18 @@ Cargo workspace, two crates under `crates/`:
     novel does a cheap delta check (landing page) with a full-walk fallback on a
     gap. Gap-fills missing chapters from the highest-priority source (primary
     authoritative), upgrades fallback-sourced chapters once the primary catches
-    up, drives the Backfilling->Live transition, returns a `SyncReport`.
+    up, drives the Backfilling->Live transition, returns a `SyncReport`. Reports
+    progress via a structured `SyncProgress` callback (per-chapter `done/total`),
+    which the CLI renders as a single in-place `n/m` line rather than a line per
+    chapter.
   - `util` — filename sanitization, chapter number/title parsing, `now_unix`.
 - `cli` (bin `vesper`): clap subcommands on a current-thread Tokio runtime.
   subscribe / add-source / subs / fetch / export / unsubscribe / sync / prune /
   service / config / status / profiles / list. `sync` takes a single-instance
-  file lock (Windows `share_mode(0)`) and appends to a log file.
+  file lock (Windows `share_mode(0)`) and appends to a log file. A `ProgressBar`
+  helper draws the in-place `n/m` fetch counter on stderr, but only when stderr
+  is a terminal (piped/redirected/windowless runs stay clean); set
+  `VESPER_FORCE_PROGRESS` to force it on.
   - `cli::service` — `ServiceManager` trait + Windows Task Scheduler impl (shells
     out to `schtasks`); other platforms stubbed for later. Install registers
     `wscript.exe <sync-hidden.vbs>` so the periodic run is windowless (no console
