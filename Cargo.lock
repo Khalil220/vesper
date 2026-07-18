@@ -2207,6 +2207,7 @@ dependencies = [
  "rusqlite",
  "rust-ini",
  "scraper",
+ "serde_json",
  "tokio",
  "url",
 ]

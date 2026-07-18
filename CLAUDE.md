@@ -4,11 +4,11 @@
 packages them into EPUBs. One binary, two faces: a CLI (control + export) and a
 lightweight background sync that keeps subscribed novels current.
 
-**Status: implemented (v1).** All planned phases plus three sources (novgo
-profile; hand-written freewebnovel + lightnovelworld adapters), a second fetch
-tier (curl), a windowless scheduled task, fallback content upgrade, external
-config-driven profiles, EPUB cover + genre embedding, and a status command +
-sync logging are in place and tested (53 unit + 2 CLI tests). Linux/macOS service
+**Status: implemented (v1).** All planned phases plus four sources (novgo
+profile; hand-written freewebnovel, lightnovelworld + royalroad adapters), a
+second fetch tier (curl), a windowless scheduled task, fallback content upgrade,
+external config-driven profiles, EPUB cover + genre embedding, and a status
+command + sync logging are in place and tested (56 unit + 2 CLI tests). Linux/macOS service
 impls are verified in CI (GitHub Actions builds/tests on ubuntu/macos/windows and
 round-trips the service install). See `DESIGN.md` for the full decisions and
 rationale; this file is the short rules-of-the-road.
@@ -86,6 +86,14 @@ rationale; this file is the short rules-of-the-road.
   `.status-badge`) + `og:image` — NOT `og:novel:*`. Content `#chapterText`;
   `data-protected` is JS copy-blocking only (prose is plain `<p>` text, no
   decoys observed).
+- **royalroad.com** (hand-written `royalroad` adapter, Tier 1): whole chapter
+  list is a `window.chapters = [...]` JSON array in the fiction page (parsed with
+  serde_json) — 1-request discovery, but chapter URLs use non-sequential DB ids
+  so the list must be read, not generated. Metadata: `<title>` (minus
+  "| Royal Road"), `twitter:creator`, `og:image`, status from a `span.label`.
+  Content `.chapter-inner`; **decoy paragraphs** are filtered — a `<style>` marks
+  a randomized class `display:none` and decoy `<p>`s use it, so collect those
+  classes and skip matching paragraphs.
 
 ## Build / Test / Run
 
@@ -138,6 +146,9 @@ Cargo workspace, two crates under `crates/`:
   - `lightnovelworld` — hand-written `LightNovelWorldSource` (JS-ToC site).
     Element-based metadata (no `og:novel:*`); discovery generates sequential
     `/chapter/<n>/` URLs from the count in `og:title`; content `#chapterText`.
+  - `royalroad` — hand-written `RoyalRoadSource`. Discovery parses the
+    `window.chapters` JSON array (serde_json); content `.chapter-inner` with
+    `display:none` decoy `<p>`s filtered out.
   - `profiles` — `SiteProfile`s: built-in (novgo) plus user `.ini` files loaded
     from `<config_dir>/profiles/` (`all()` merges them; self-documents via a
     generated README; bad files skipped with a warning). `crate::build_source`

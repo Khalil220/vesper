@@ -318,6 +318,15 @@ Verified by probing during design:
   copy-blocking, not server-side obfuscation; prose is plain `<p>` text with no
   decoys observed (checked several chapters). Reuses `parse_chapter_body`,
   `parse_status_hint`, and `clean_chapter_title`.
+- **Fourth source (royalroad).** A third hand-written adapter. Discovery parses
+  the `window.chapters` JSON array embedded in the fiction page (serde_json —
+  1-request, whole list), since chapter URLs use non-sequential DB ids. Metadata
+  from `<title>`/`twitter:creator`/`og:image` and a status `span.label`. The
+  notable bit is **decoy-paragraph filtering**: RoyalRoad marks a
+  randomized-per-request class `display:none` in a `<style>` block and gives the
+  decoy `<p>`s that class, so the adapter collects the hidden classes and skips
+  matching paragraphs (unit-tested; live pages sometimes define the class without
+  injecting a decoy). Tier 1 (reqwest) — it doesn't fingerprint-block.
 - **External config-driven profiles.** `SiteProfile` holds owned strings and
   exposes `chapter_marker` + `page_param`; generic sites are added via `.ini`
   files in `<config_dir>/profiles/` (required: name, host, content_selector).
