@@ -130,10 +130,13 @@ lives in the DB, not in RAM — so the main thing a resident daemon would buy
   1. `ReqwestFetcher` — plain `reqwest` with a browser UA + consistent browser
      headers (novgo needs only this).
   2. `CurlFetcher` — shells out to the system `curl` (built into Windows 10+).
-     Used for freewebnovel, whose Cloudflare challenges reqwest's TLS ClientHello
-     even with browser headers/HTTP-1.1 and even though both use Schannel; curl's
-     ClientHello passes. Chosen over pulling in a heavyweight TLS-impersonation
-     stack (originally sketched as `rquest`).
+     Used for freewebnovel and scribblehub, whose Cloudflare challenges reqwest's
+     TLS ClientHello even with browser headers/HTTP-1.1 and even though both use
+     Schannel; curl's ClientHello passes. Chosen over pulling in a heavyweight
+     TLS-impersonation stack (originally sketched as `rquest`). `get` sends a full
+     browser header set plus a `Referer`, and a `post` method (added to the
+     `Fetcher` trait, default-erroring elsewhere) sends form-encoded AJAX POSTs —
+     both required by scribblehub's header-strict Cloudflare and admin-ajax ToC.
   3. Further escalation, if a site ever needs it: `rquest` fingerprint
      impersonation, or a headless browser / FlareSolverr used once to obtain a
      `cf_clearance` cookie handed to a fast client — never a browser per chapter.
