@@ -66,13 +66,23 @@ fn meta_prop(doc: &Html, property: &str) -> Option<String> {
         .map(|s| s.trim().to_string())
 }
 
+/// Author from `p.novel-author` ("Author: <name>"). The name is usually a link
+/// (`a.author-link`), but authors without a profile page appear as plain text
+/// (e.g. `Author: 陷阵营营长`) — so read the element's whole text and strip the
+/// leading "Author:" label, which handles both.
+fn parse_author(doc: &Html) -> Option<String> {
+    let raw = text_of(doc, "p.novel-author")?;
+    let name = raw.split_once(':').map(|(_, rest)| rest).unwrap_or(&raw).trim();
+    (!name.is_empty()).then(|| name.to_string())
+}
+
 fn parse_novel(html: &str, source_url: &str) -> Result<NovelMeta> {
     let doc = Html::parse_document(html);
     let title = text_of(&doc, "h1.novel-title")
         .ok_or_else(|| anyhow!("could not find a novel title on {source_url}"))?;
     Ok(NovelMeta {
         title,
-        author: text_of(&doc, "a.author-link"),
+        author: parse_author(&doc),
         cover_url: meta_prop(&doc, "og:image"),
         // Genre lives in the page's JSON-LD; not extracted (no JSON dep). None.
         genre: None,
@@ -170,7 +180,7 @@ mod tests {
           <meta property="og:image" content="https://lightnovelworld.org/cover.jpg">
         </head><body>
           <h1 class="novel-title">Shadow Slave</h1>
-          <a href="/author/guiltythree/" class="author-link">Guiltythree</a>
+          <p class="novel-author">Author: <a href="/author/guiltythree/" class="author-link">Guiltythree</a></p>
           <span class="status-badge ongoing">Ongoing</span>
         </body></html>"#;
 
@@ -181,6 +191,19 @@ mod tests {
         assert_eq!(meta.author.as_deref(), Some("Guiltythree"));
         assert_eq!(meta.cover_url.as_deref(), Some("https://lightnovelworld.org/cover.jpg"));
         assert_eq!(meta.status_hint, NovelStatus::Ongoing);
+    }
+
+    #[test]
+    fn parses_author_without_a_profile_link() {
+        // Some authors have no profile page, so the name is plain text (no <a>).
+        let html = r#"<html><head>
+              <meta property="og:title" content="X by 陷阵营营长 - 908 Chapters">
+            </head><body>
+              <h1 class="novel-title">X</h1>
+              <p class="novel-author">Author: 陷阵营营长</p>
+            </body></html>"#;
+        let meta = parse_novel(html, "https://lightnovelworld.org/novel/x/").unwrap();
+        assert_eq!(meta.author.as_deref(), Some("陷阵营营长"));
     }
 
     #[test]

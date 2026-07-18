@@ -50,6 +50,15 @@ enum Command {
     },
     /// List all subscriptions.
     Subs,
+    /// Re-fetch a subscription's metadata (author, cover, genre, status) from its
+    /// primary source; stored chapters are left untouched.
+    Refresh {
+        /// Novel to refresh (id or title).
+        novel: String,
+        /// Override the request delay, in milliseconds (default: config value).
+        #[arg(long)]
+        delay_ms: Option<u64>,
+    },
     /// Remove a subscription and its downloaded chapters.
     Unsubscribe {
         /// Novel to remove (id or title).
@@ -136,6 +145,7 @@ async fn main() -> Result<()> {
             add_source(&config, novel, url, delay_ms).await
         }
         Command::Subs => subs(),
+        Command::Refresh { novel, delay_ms } => refresh(&config, novel, delay_ms).await,
         Command::Unsubscribe { novel } => unsubscribe(novel),
         Command::Fetch { novel, limit, delay_ms } => fetch(&config, novel, limit, delay_ms).await,
         Command::Export { novel, out } => export(&config, novel, out).await,
@@ -417,6 +427,36 @@ async fn add_source(config: &Config, novel: String, url: String, delay_ms: Optio
     if !store.gaps(found.id)?.is_empty() {
         store.set_derived_state(found.id, DerivedState::Backfilling)?;
         println!("  It has unavailable chapters; the next sync will try to fill them from this source.");
+    }
+    Ok(())
+}
+
+async fn refresh(config: &Config, novel: String, delay_ms: Option<u64>) -> Result<()> {
+    let store = Store::open_default()?;
+    let found = store
+        .find_novel(&novel)?
+        .ok_or_else(|| anyhow!("no subscription matches \"{novel}\""))?;
+    let primary = found
+        .primary_source()
+        .ok_or_else(|| anyhow!("\"{}\" has no source to refresh from", found.title))?;
+    let source = source_for(&primary.url, delay_ms.unwrap_or(config.request_delay_ms))?;
+
+    eprintln!("Refreshing metadata for \"{}\" from {}...", found.title, source.name());
+    let meta = source.fetch_novel(&primary.url).await?;
+    store.update_novel_meta(found.id, &meta)?;
+
+    println!("Refreshed \"{}\".", found.title);
+    let old_author = found.author.as_deref().unwrap_or("Unknown Author");
+    let new_author = meta.author.as_deref().unwrap_or("Unknown Author");
+    if old_author != new_author {
+        println!("  author: {old_author} -> {new_author}");
+        println!(
+            "  (the author changed — run `vesper export {}` to rebuild the EPUB \
+             under the new author folder)",
+            found.id
+        );
+    } else {
+        println!("  author: {new_author} (unchanged)");
     }
     Ok(())
 }

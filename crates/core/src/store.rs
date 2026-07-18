@@ -484,6 +484,25 @@ impl Store {
         Ok(())
     }
 
+    /// Refresh a novel's mutable metadata (author, cover, genre, status hint) from
+    /// a freshly-fetched `NovelMeta`. Leaves the title (the identity) and chapters
+    /// untouched.
+    pub fn update_novel_meta(&self, novel_id: i64, meta: &NovelMeta) -> Result<()> {
+        self.conn.execute(
+            "UPDATE novels SET author = ?2, cover_url = ?3, genre = ?4, status_hint = ?5, updated_at = ?6
+             WHERE id = ?1",
+            params![
+                novel_id,
+                meta.author,
+                meta.cover_url,
+                meta.genre,
+                meta.status_hint.as_str(),
+                now_unix(),
+            ],
+        )?;
+        Ok(())
+    }
+
     /// Mark every stored chapter of a novel as exported, stamping the time (for
     /// the retention grace period).
     pub fn mark_all_exported(&self, novel_id: i64) -> Result<()> {

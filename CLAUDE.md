@@ -9,7 +9,7 @@ profile; hand-written freewebnovel, lightnovelworld, royalroad + scribblehub
 adapters), a second fetch tier (curl, with POST support), a windowless scheduled
 task, fallback content upgrade, external config-driven profiles, EPUB cover +
 genre embedding, and a status command + sync logging are in place and tested
-(65 unit + 4 CLI tests). Linux/macOS service
+(66 unit + 4 CLI tests). Linux/macOS service
 impls are verified in CI (GitHub Actions builds/tests on ubuntu/macos/windows and
 round-trips the service install). See `DESIGN.md` for the full decisions and
 rationale; this file is the short rules-of-the-road.
@@ -95,7 +95,8 @@ rationale; this file is the short rules-of-the-road.
 - **lightnovelworld.org** (hand-written `lightnovelworld` adapter, Tier 1):
   JS-rendered ToC, so discovery reads the total from `og:title` ("… - N
   Chapters") and generates sequential `/novel/<slug>/chapter/<n>/` URLs.
-  Metadata from page elements (`h1.novel-title`, `a.author-link`,
+  Metadata from page elements (`h1.novel-title`, `p.novel-author` — text after
+  the "Author:" label, so authors without a profile link still parse,
   `.status-badge`) + `og:image` — NOT `og:novel:*`. Content `#chapterText`;
   `data-protected` is JS copy-blocking only (prose is plain `<p>` text, no
   decoys observed). **Its `/chapter/N/` id sequence has 404 holes** (deleted/
@@ -130,7 +131,11 @@ From the repo root:
   - `vesper subscribe <novel-url>` — register a novel + its primary source.
   - `vesper add-source <novel> <novel-url>` — add a fallback source to an
     existing novel (warns if the source's title differs; proceeds anyway).
-  - `vesper subs` — list subscriptions (shows primary + fallback sources).
+  - `vesper subs` — list subscriptions (shows primary + fallback sources, and any
+    404 gaps).
+  - `vesper refresh <novel>` — re-fetch a subscription's metadata (author, cover,
+    genre, status) from its primary source; chapters untouched. (Fixes e.g. an
+    author that was missing at subscribe time.)
   - `vesper fetch <novel> [--limit N]` — download missing chapters into the DB
     (resume-aware; `<novel>` is an id or title; `--limit 0` = all missing).
     Ctrl+C pauses gracefully: it stops after the current (already-saved) chapter,
@@ -175,8 +180,10 @@ Cargo workspace, two crates under `crates/`:
   - `freewebnovel` — hand-written `FreewebnovelSource` (AJAX-ToC site). Reuses
     the shared extractors; discovery generates sequential chapter URLs.
   - `lightnovelworld` — hand-written `LightNovelWorldSource` (JS-ToC site).
-    Element-based metadata (no `og:novel:*`); discovery generates sequential
-    `/chapter/<n>/` URLs from the count in `og:title`; content `#chapterText`.
+    Element-based metadata (no `og:novel:*`); author from `p.novel-author` (strips
+    the "Author:" label so link-less authors parse too); discovery generates
+    sequential `/chapter/<n>/` URLs from the count in `og:title`; content
+    `#chapterText`.
   - `royalroad` — hand-written `RoyalRoadSource`. Discovery parses the
     `window.chapters` JSON array (serde_json); content `.chapter-inner` with
     `display:none` decoy `<p>`s filtered out.
@@ -219,8 +226,8 @@ Cargo workspace, two crates under `crates/`:
     not transition to Live).
   - `util` — filename sanitization, chapter number/title parsing, `now_unix`.
 - `cli` (bin `vesper`): clap subcommands on a current-thread Tokio runtime.
-  subscribe / add-source / subs / fetch / export / unsubscribe / sync / prune /
-  service / config / status / profiles / list. `sync` takes a single-instance
+  subscribe / add-source / subs / refresh / fetch / export / unsubscribe / sync /
+  prune / service / config / status / profiles / list. `sync` takes a single-instance
   advisory file lock (`fs2` — `LockFileEx` on Windows, `flock` on Unix, so
   overlapping runs skip on every platform) and appends to a log file. A `ProgressBar`
   helper draws the in-place `n/m` fetch counter on stderr, but only when stderr
