@@ -1,0 +1,80 @@
+name: Release
+
+# Runs when a version tag (v1.0.0, v1.1.0, ...) is pushed. Builds release
+# binaries for Windows, Linux and macOS (both Apple Silicon and Intel),
+# packages each with the README, and attaches them all to the GitHub release
+# for the tag. The upload happens in a single final job so the matrix builds
+# don't race each other creating the release.
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: macos-latest
+            target: x86_64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Linux TLS deps
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
+      - name: Build
+        run: cargo build --release -p vesper --target ${{ matrix.target }}
+      - name: Package (tar.gz)
+        if: runner.os != 'Windows'
+        run: |
+          STAGE=vesper-${{ github.ref_name }}-${{ matrix.target }}
+          mkdir "$STAGE"
+          cp "target/${{ matrix.target }}/release/vesper" README.md "$STAGE"/
+          tar czf "$STAGE.tar.gz" "$STAGE"
+      - name: Package (zip)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $stage = "vesper-${{ github.ref_name }}-${{ matrix.target }}"
+          New-Item -ItemType Directory $stage | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/vesper.exe", README.md $stage/
+          Compress-Archive -Path $stage -DestinationPath "$stage.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package-${{ matrix.target }}
+          path: |
+            vesper-*.tar.gz
+            vesper-*.zip
+          if-no-files-found: error
+
+  release:
+    name: create release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: package-*
+          merge-multiple: true
+          path: dist
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true

@@ -119,6 +119,16 @@ rules-of-the-road.
   EPUB (unzip; check `mimetype` == `application/epub+zip`, `content.opf`, and
   that chapter XHTML holds real prose).
 
+## Releasing
+
+- **Versioning is minor-only:** 1.0.0 -> 1.1.0 -> 1.2.0. Never bump the patch
+  component; it stays 0.
+- The version lives once, in `[workspace.package]` in the root `Cargo.toml`
+  (both crates inherit it). To release: bump it, run `cargo update -w` to
+  refresh the lockfile, commit, then tag `vX.Y.0` and push the tag —
+  `.github/workflows/release.yml` builds Windows/Linux/macOS binaries and
+  attaches them to the GitHub release.
+
 ## Module map
 
 Cargo workspace, two crates under `crates/`:
