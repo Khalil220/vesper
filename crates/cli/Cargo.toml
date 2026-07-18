@@ -10,7 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 vesper-core = { path = "../core" }
-tokio = { version = "1", features = ["macros", "rt"] }
+tokio = { version = "1", features = ["macros", "rt", "signal"] }
 clap = { version = "4", features = ["derive"] }
 directories = "5"
 anyhow = "1"

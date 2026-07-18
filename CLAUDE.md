@@ -9,7 +9,7 @@ profile; hand-written freewebnovel, lightnovelworld, royalroad + scribblehub
 adapters), a second fetch tier (curl, with POST support), a windowless scheduled
 task, fallback content upgrade, external config-driven profiles, EPUB cover +
 genre embedding, and a status command + sync logging are in place and tested
-(60 unit + 2 CLI tests). Linux/macOS service
+(61 unit + 2 CLI tests). Linux/macOS service
 impls are verified in CI (GitHub Actions builds/tests on ubuntu/macos/windows and
 round-trips the service install). See `DESIGN.md` for the full decisions and
 rationale; this file is the short rules-of-the-road.
@@ -120,6 +120,8 @@ From the repo root:
   - `vesper subs` — list subscriptions (shows primary + fallback sources).
   - `vesper fetch <novel> [--limit N]` — download missing chapters into the DB
     (resume-aware; `<novel>` is an id or title; `--limit 0` = all missing).
+    Ctrl+C pauses gracefully: it stops after the current (already-saved) chapter,
+    prints a "Paused… resume with…" line, and exits 0. A second Ctrl+C hard-aborts.
   - `vesper export <novel> [--out PATH]` — build an EPUB from stored chapters.
   - `vesper unsubscribe <novel>` — remove a subscription (cascades chapters).
   - `vesper sync [--limit N]` — sync ALL subscriptions (what the background task
@@ -192,7 +194,10 @@ Cargo workspace, two crates under `crates/`:
     up, drives the Backfilling->Live transition, returns a `SyncReport`. Reports
     progress via a structured `SyncProgress` callback (per-chapter `done/total`),
     which the CLI renders as a single in-place `n/m` line rather than a line per
-    chapter.
+    chapter. The callback returns a `ControlFlow`; `Break` stops the pass cleanly
+    after the current (already-committed) chapter and sets `SyncReport.interrupted`
+    (how the CLI turns Ctrl+C into a resumable pause; an interrupted backfill does
+    not transition to Live).
   - `util` — filename sanitization, chapter number/title parsing, `now_unix`.
 - `cli` (bin `vesper`): clap subcommands on a current-thread Tokio runtime.
   subscribe / add-source / subs / fetch / export / unsubscribe / sync / prune /
@@ -200,7 +205,9 @@ Cargo workspace, two crates under `crates/`:
   file lock (Windows `share_mode(0)`) and appends to a log file. A `ProgressBar`
   helper draws the in-place `n/m` fetch counter on stderr, but only when stderr
   is a terminal (piped/redirected/windowless runs stay clean); set
-  `VESPER_FORCE_PROGRESS` to force it on.
+  `VESPER_FORCE_PROGRESS` to force it on. `fetch` also spawns a `tokio::signal::
+  ctrl_c` watcher that flips a shared flag so the progress callback returns
+  `Break` on Ctrl+C — a graceful, resumable pause.
   - `cli::service` — `ServiceManager` trait + Windows Task Scheduler impl (shells
     out to `schtasks`); other platforms stubbed for later. Install registers
     `wscript.exe <sync-hidden.vbs>` so the periodic run is windowless (no console

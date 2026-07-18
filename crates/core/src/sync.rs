@@ -14,6 +14,7 @@
 //! gaps). See DESIGN.md.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::ops::ControlFlow;
 
 use anyhow::Result;
 
@@ -50,6 +51,9 @@ pub struct SyncReport {
     pub warnings: Vec<String>,
     /// Chapter numbers no source could provide.
     pub failures: Vec<u32>,
+    /// The caller asked to stop early (e.g. Ctrl+C); fetched chapters are saved
+    /// and the run can be resumed. The state machine stays put (no transition).
+    pub interrupted: bool,
 }
 
 type Discovered<'a> = Vec<(&'a StoredSource, &'a dyn Source, BTreeMap<u32, ChapterRef>)>;
@@ -84,13 +88,18 @@ async fn discover<'a>(
 
 /// Sync `novel_id` (currently in `state`) from `sources` (priority order,
 /// primary first). `limit` caps chapters fetched this pass (0 = all missing).
+///
+/// `on_progress` is called once per chapter with a [`SyncProgress`] and returns
+/// a [`ControlFlow`]: returning `Break` stops the pass cleanly after the current
+/// chapter (which is already saved), leaving the run resumable — this is how the
+/// CLI turns Ctrl+C into a graceful pause.
 pub async fn sync_novel(
     store: &Store,
     novel_id: i64,
     state: DerivedState,
     sources: &[(StoredSource, Box<dyn Source>)],
     limit: usize,
-    mut on_progress: impl FnMut(SyncProgress),
+    mut on_progress: impl FnMut(SyncProgress) -> ControlFlow<()>,
 ) -> Result<SyncReport> {
     let is_backfilling = matches!(state, DerivedState::Backfilling);
     let have = store.stored_chapter_numbers(novel_id)?;
@@ -104,6 +113,7 @@ pub async fn sync_novel(
         delta_mode: !is_backfilling,
         warnings: Vec::new(),
         failures: Vec::new(),
+        interrupted: false,
     };
 
     // Backfilling walks the full ToC; a caught-up novel does a cheap delta check.
@@ -191,28 +201,39 @@ pub async fn sync_novel(
         if !done {
             report.failures.push(num);
         }
-        on_progress(SyncProgress::Fetching { done: i + 1, total });
+        // The chapter just fetched is already committed, so stopping here is safe
+        // and resumable.
+        if on_progress(SyncProgress::Fetching { done: i + 1, total }).is_break() {
+            report.interrupted = true;
+            break;
+        }
     }
 
     // Content upgrade: the primary is authoritative, so any chapter we're
     // currently holding from a fallback that the primary now offers gets
     // re-fetched from the primary and replaced. Normally there are none (steady
     // state is all-primary); this fires once after a lagging primary catches up.
-    if let Some((pmeta, psrc, pmap)) = discovered.iter().find(|(m, _, _)| m.priority == 1) {
-        let upgradable = store.chapters_from_other_sources(novel_id, pmeta.id)?;
-        let up_total = upgradable.len();
-        for (i, num) in upgradable.into_iter().enumerate() {
-            let Some(cref) = pmap.get(&num) else { continue };
-            on_progress(SyncProgress::Upgrading { done: i + 1, total: up_total });
-            match psrc.fetch_chapter(cref).await {
-                Ok(chapter) => {
-                    store.update_chapter_content(novel_id, pmeta.id, &chapter)?;
-                    report.upgraded += 1;
+    // Skipped when the fetch was interrupted — the user asked to stop.
+    if !report.interrupted {
+        if let Some((pmeta, psrc, pmap)) = discovered.iter().find(|(m, _, _)| m.priority == 1) {
+            let upgradable = store.chapters_from_other_sources(novel_id, pmeta.id)?;
+            let up_total = upgradable.len();
+            for (i, num) in upgradable.into_iter().enumerate() {
+                let Some(cref) = pmap.get(&num) else { continue };
+                if on_progress(SyncProgress::Upgrading { done: i + 1, total: up_total }).is_break() {
+                    report.interrupted = true;
+                    break;
                 }
-                Err(e) => report.warnings.push(format!(
-                    "upgrade of ch.{num} from {} failed: {e}",
-                    pmeta.name
-                )),
+                match psrc.fetch_chapter(cref).await {
+                    Ok(chapter) => {
+                        store.update_chapter_content(novel_id, pmeta.id, &chapter)?;
+                        report.upgraded += 1;
+                    }
+                    Err(e) => report.warnings.push(format!(
+                        "upgrade of ch.{num} from {} failed: {e}",
+                        pmeta.name
+                    )),
+                }
             }
         }
     }
@@ -385,7 +406,7 @@ mod tests {
             ],
         );
 
-        let report = sync_novel(&store, id, DerivedState::Backfilling, &sources, 0, |_| {})
+        let report = sync_novel(&store, id, DerivedState::Backfilling, &sources, 0, |_| ControlFlow::Continue(()))
             .await
             .unwrap();
 
@@ -409,7 +430,8 @@ mod tests {
 
         let mut events: Vec<SyncProgress> = Vec::new();
         let report = sync_novel(&store, id, DerivedState::Backfilling, &sources, 0, |p| {
-            events.push(p)
+            events.push(p);
+            ControlFlow::Continue(())
         })
         .await
         .unwrap();
@@ -433,12 +455,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn break_from_callback_stops_early_and_preserves_chapters() {
+        let store = Store::open_in_memory().unwrap();
+        let id = subscribe(&store);
+        let numbers: Vec<u32> = (1..=60).collect();
+        let sources = pair(&store, id, vec![Box::new(MockSource::new("primary", &numbers))]);
+
+        // Ask to stop once 10 chapters are in (as the CLI does on Ctrl+C).
+        let report = sync_novel(&store, id, DerivedState::Backfilling, &sources, 0, |p| match p {
+            SyncProgress::Fetching { done, .. } if done >= 10 => ControlFlow::Break(()),
+            _ => ControlFlow::Continue(()),
+        })
+        .await
+        .unwrap();
+
+        assert!(report.interrupted, "the pass reports it was interrupted");
+        assert_eq!(report.newly_fetched, 10, "stopped after the 10th chapter");
+        assert_eq!(store.stored_chapter_numbers(id).unwrap().len(), 10, "fetched chapters persisted");
+        assert_eq!(
+            report.new_state,
+            DerivedState::Backfilling,
+            "an interrupted backfill does not transition to Live"
+        );
+    }
+
+    #[tokio::test]
     async fn backfill_completes_then_transitions_to_live() {
         let store = Store::open_in_memory().unwrap();
         let id = subscribe(&store);
         let sources = pair(&store, id, vec![Box::new(MockSource::new("primary", &[1, 2, 3]))]);
 
-        let report = sync_novel(&store, id, DerivedState::Backfilling, &sources, 0, |_| {})
+        let report = sync_novel(&store, id, DerivedState::Backfilling, &sources, 0, |_| ControlFlow::Continue(()))
             .await
             .unwrap();
         assert_eq!(report.newly_fetched, 3);
@@ -452,7 +499,7 @@ mod tests {
         let id = subscribe(&store);
         let sources = pair(&store, id, vec![Box::new(MockSource::new("primary", &[1, 2, 3, 4, 5]))]);
 
-        let report = sync_novel(&store, id, DerivedState::Backfilling, &sources, 2, |_| {})
+        let report = sync_novel(&store, id, DerivedState::Backfilling, &sources, 2, |_| ControlFlow::Continue(()))
             .await
             .unwrap();
         assert_eq!(report.newly_fetched, 2);
@@ -465,7 +512,7 @@ mod tests {
         let id = subscribe(&store);
         // Backfill 1-3.
         let backfill = pair(&store, id, vec![Box::new(MockSource::new("primary", &[1, 2, 3]))]);
-        sync_novel(&store, id, DerivedState::Backfilling, &backfill, 0, |_| {}).await.unwrap();
+        sync_novel(&store, id, DerivedState::Backfilling, &backfill, 0, |_| ControlFlow::Continue(())).await.unwrap();
 
         // Now Live; the source has 1-5 but its landing page only lists the last 3.
         let live = pair(
@@ -473,7 +520,7 @@ mod tests {
             id,
             vec![Box::new(MockSource::new("primary", &[1, 2, 3, 4, 5]).with_latest_window(3))],
         );
-        let report = sync_novel(&store, id, DerivedState::Live, &live, 0, |_| {}).await.unwrap();
+        let report = sync_novel(&store, id, DerivedState::Live, &live, 0, |_| ControlFlow::Continue(())).await.unwrap();
 
         assert!(report.delta_mode, "Live novel uses delta discovery");
         assert_eq!(report.newly_fetched, 2, "only ch.4 and ch.5 are new");
@@ -485,7 +532,7 @@ mod tests {
         let store = Store::open_in_memory().unwrap();
         let id = subscribe(&store);
         let backfill = pair(&store, id, vec![Box::new(MockSource::new("primary", &[1, 2, 3]))]);
-        sync_novel(&store, id, DerivedState::Backfilling, &backfill, 0, |_| {}).await.unwrap();
+        sync_novel(&store, id, DerivedState::Backfilling, &backfill, 0, |_| ControlFlow::Continue(())).await.unwrap();
 
         // Source jumped to 1-6, but the landing page only shows the single latest
         // chapter (6) — a gap over 4 and 5 the delta check can't see directly.
@@ -494,7 +541,7 @@ mod tests {
             id,
             vec![Box::new(MockSource::new("primary", &[1, 2, 3, 4, 5, 6]).with_latest_window(1))],
         );
-        let report = sync_novel(&store, id, DerivedState::Live, &live, 0, |_| {}).await.unwrap();
+        let report = sync_novel(&store, id, DerivedState::Live, &live, 0, |_| ControlFlow::Continue(())).await.unwrap();
 
         assert!(!report.delta_mode, "gap forced a full-walk fallback");
         assert!(report.warnings.iter().any(|w| w.contains("falling back to a full walk")));
@@ -517,7 +564,7 @@ mod tests {
                 Box::new(MockSource::new("fallback", &[1, 2, 3, 4, 5])),
             ],
         );
-        let r1 = sync_novel(&store, id, DerivedState::Backfilling, &backfill, 0, |_| {})
+        let r1 = sync_novel(&store, id, DerivedState::Backfilling, &backfill, 0, |_| ControlFlow::Continue(()))
             .await
             .unwrap();
         assert_eq!(r1.from_fallback, 2);
@@ -534,7 +581,7 @@ mod tests {
                 Box::new(MockSource::new("fallback", &[1, 2, 3, 4, 5])),
             ],
         );
-        let r2 = sync_novel(&store, id, DerivedState::Live, &caught_up, 0, |_| {})
+        let r2 = sync_novel(&store, id, DerivedState::Live, &caught_up, 0, |_| ControlFlow::Continue(()))
             .await
             .unwrap();
         assert_eq!(r2.newly_fetched, 0, "nothing new");
@@ -552,7 +599,7 @@ mod tests {
                 Box::new(MockSource::new("fallback", &[1, 2, 3, 4, 5])),
             ],
         );
-        let r3 = sync_novel(&store, id, DerivedState::Live, &again, 0, |_| {})
+        let r3 = sync_novel(&store, id, DerivedState::Live, &again, 0, |_| ControlFlow::Continue(()))
             .await
             .unwrap();
         assert_eq!(r3.upgraded, 0);
@@ -563,10 +610,10 @@ mod tests {
         let store = Store::open_in_memory().unwrap();
         let id = subscribe(&store);
         let sources = pair(&store, id, vec![Box::new(MockSource::new("primary", &[1, 2, 3]))]);
-        sync_novel(&store, id, DerivedState::Backfilling, &sources, 0, |_| {}).await.unwrap();
+        sync_novel(&store, id, DerivedState::Backfilling, &sources, 0, |_| ControlFlow::Continue(())).await.unwrap();
 
         let again = pair(&store, id, vec![Box::new(MockSource::new("primary", &[1, 2, 3]))]);
-        let report = sync_novel(&store, id, DerivedState::Live, &again, 0, |_| {}).await.unwrap();
+        let report = sync_novel(&store, id, DerivedState::Live, &again, 0, |_| ControlFlow::Continue(())).await.unwrap();
         assert_eq!(report.newly_fetched, 0);
     }
 
@@ -584,7 +631,7 @@ mod tests {
             ],
         );
 
-        let report = sync_novel(&store, id, DerivedState::Backfilling, &sources, 0, |_| {})
+        let report = sync_novel(&store, id, DerivedState::Backfilling, &sources, 0, |_| ControlFlow::Continue(()))
             .await
             .unwrap();
         assert_eq!(report.newly_fetched, 3, "primary still fully synced");

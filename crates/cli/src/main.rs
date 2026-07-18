@@ -7,7 +7,10 @@ mod service;
 
 use std::fs::{File, OpenOptions};
 use std::io::{IsTerminal, Write};
+use std::ops::ControlFlow;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, ensure, Result};
@@ -425,15 +428,48 @@ async fn fetch(config: &Config, novel: String, limit: usize, delay_ms: Option<u6
     let before = store.stored_chapter_numbers(found.id)?.len();
     eprintln!("Syncing \"{}\" from {} source(s)...", found.title, sources.len());
 
+    // Ctrl+C during a manual fetch pauses gracefully: a watcher flips this flag,
+    // the progress callback returns Break, and sync_novel stops after the current
+    // (already-saved) chapter. A second Ctrl+C hits the default handler and hard-
+    // aborts. Downloaded chapters are durable regardless, so the run resumes.
+    let cancel = Arc::new(AtomicBool::new(false));
+    let watcher = {
+        let cancel = cancel.clone();
+        tokio::spawn(async move {
+            if tokio::signal::ctrl_c().await.is_ok() {
+                cancel.store(true, Ordering::SeqCst);
+            }
+        })
+    };
+
     let mut bar = ProgressBar::new();
-    let report =
-        sync_novel(&store, found.id, found.derived_state, &sources, limit, |p| bar.update(p))
-            .await?;
+    let report = sync_novel(&store, found.id, found.derived_state, &sources, limit, |p| {
+        bar.update(p);
+        if cancel.load(Ordering::SeqCst) {
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    })
+    .await?;
     bar.finish();
+    watcher.abort();
 
     for w in &report.warnings {
         eprintln!("  ! {w}");
     }
+
+    if report.interrupted {
+        println!(
+            "Paused \"{}\": {} new chapter(s) saved (now {} stored). Resume with `vesper fetch {}`.",
+            found.title,
+            report.newly_fetched,
+            before + report.newly_fetched as usize,
+            found.id
+        );
+        return Ok(());
+    }
+
     post_sync(&store, config, found.id, found.derived_state, &report).await?;
 
     let fallback_note = if report.from_fallback > 0 {
@@ -541,9 +577,11 @@ async fn sync_all(config: &Config, limit: usize, delay_ms: Option<u64>) -> Resul
         };
         eprintln!("Syncing \"{}\"...", novel.title);
         let mut bar = ProgressBar::new();
-        let result =
-            sync_novel(&store, novel.id, novel.derived_state, &sources, limit, |p| bar.update(p))
-                .await;
+        let result = sync_novel(&store, novel.id, novel.derived_state, &sources, limit, |p| {
+            bar.update(p);
+            ControlFlow::Continue(())
+        })
+        .await;
         bar.finish();
         match result {
             Ok(report) => {
