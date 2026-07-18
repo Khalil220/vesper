@@ -403,6 +403,26 @@ Verified by probing during design:
   be absent; a missing binary now surfaces an actionable "install curl" error
   instead of a bare spawn failure. Only the two curl-tier sources (freewebnovel,
   scribblehub) need it; the other three run on Tier-1 reqwest.
+- **404 gaps no longer wedge a novel (and are surfaced, not hidden).** Adapters
+  that *generate* chapter URLs from a count (lightnovelworld, freewebnovel) assume
+  a contiguous `1..N`, but real id sequences have holes: lightnovelworld's
+  `/chapter/N/` 404s where chapters were deleted/merged (observed live — e.g. one
+  novel's URL 190 is a hard 404 between healthy 189 and 191). The old completion
+  rule required *every* `1..N` stored, so a single dead URL kept the novel
+  Backfilling forever, which meant it never hit the Backfilling→Live transition
+  that triggers `auto_export` — the real symptom was "8 novels backfilled but only
+  5 produced EPUBs." Fix: the fetchers return a typed `NotFound` on 404/410
+  (distinct from transient 5xx/timeout, which still retry); a number that 404s
+  from every source is recorded in a `chapter_gaps` table and counts as
+  "accounted for" (`target ⊆ have ∪ gaps`), so the novel completes and exports.
+  Crucially the gap is **made visible**, not silently skipped (logs are debug-only
+  and most users never read them): `subs`/`status` list the gap count + numbers, a
+  manual `fetch`/`sync` prints a note, the sync log records it, and the EPUB gains
+  a front "Missing Chapters" page naming the absent numbers. Gaps are re-probed on
+  later full walks and can be gap-filled from a fallback — adding a source to a
+  gapped novel re-opens its backfill for exactly that. Verified end-to-end on a
+  real library: three wedged novels (1, 2, and 10 holes) went Live and exported,
+  each EPUB carrying its notice page.
 - **Genre metadata.** Captured from `og:novel:genre` (novgo, freewebnovel),
   stored on the novel, emitted as EPUB `dc:subject`. lightnovelworld leaves it
   `None` (genre is only in its JSON-LD, which we don't parse).

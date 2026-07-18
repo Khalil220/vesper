@@ -9,7 +9,7 @@ profile; hand-written freewebnovel, lightnovelworld, royalroad + scribblehub
 adapters), a second fetch tier (curl, with POST support), a windowless scheduled
 task, fallback content upgrade, external config-driven profiles, EPUB cover +
 genre embedding, and a status command + sync logging are in place and tested
-(61 unit + 4 CLI tests). Linux/macOS service
+(65 unit + 4 CLI tests). Linux/macOS service
 impls are verified in CI (GitHub Actions builds/tests on ubuntu/macos/windows and
 round-trips the service install). See `DESIGN.md` for the full decisions and
 rationale; this file is the short rules-of-the-road.
@@ -54,6 +54,15 @@ rationale; this file is the short rules-of-the-road.
   *hint*; observed activity is authoritative. New chapters observed => Ongoing,
   overriding any "completed" label. The label only lowers poll cadence; never
   stop polling until unsubscribed. Hiatus != completed.
+- **404 gaps don't wedge completion.** A chapter that returns a permanent 404
+  (distinguished from transient 5xx/timeout via `fetch::NotFound`) is recorded in
+  `chapter_gaps` and treated as "accounted for" so a novel still reaches
+  Live/auto-exports instead of backfilling forever on a dead URL. Gaps are
+  **surfaced**, not hidden: `subs`/`status` list them, a manual run prints a note,
+  the log records them, and the EPUB gets a front "Missing Chapters" page. They're
+  re-probed on later full walks and gap-filled from a fallback (adding a source to
+  a gapped novel re-opens its backfill). This matters most for URL-generating
+  adapters (lightnovelworld, freewebnovel) whose id sequences can have holes.
 - **Retention resolves delete-vs-append:** ongoing novels keep chapters in the
   DB (so append = regenerate-from-DB); only *Likely complete* novels (labeled
   complete AND observably quiet for the grace window AND finally exported) get
@@ -89,7 +98,9 @@ rationale; this file is the short rules-of-the-road.
   Metadata from page elements (`h1.novel-title`, `a.author-link`,
   `.status-badge`) + `og:image` — NOT `og:novel:*`. Content `#chapterText`;
   `data-protected` is JS copy-blocking only (prose is plain `<p>` text, no
-  decoys observed).
+  decoys observed). **Its `/chapter/N/` id sequence has 404 holes** (deleted/
+  merged chapters), so the generated 1..N range hits dead URLs — handled by the
+  404-gap logic above, not a bug.
 - **royalroad.com** (hand-written `royalroad` adapter, Tier 1): whole chapter
   list is a `window.chapters = [...]` JSON array in the fiction page (parsed with
   serde_json) — 1-request discovery, but chapter URLs use non-sequential DB ids
@@ -154,7 +165,9 @@ Cargo workspace, two crates under `crates/`:
     retries; browser UA + headers) and Tier-2 `CurlFetcher` (shells out to
     `curl`; `get` sends a full browser header set + `Referer`, and `post` sends a
     form-encoded AJAX POST — both needed by scribblehub). `FetchConfig` tunes
-    base/max delay and retry count.
+    base/max delay and retry count. Both tiers return a typed `NotFound` on
+    HTTP 404/410 (`is_not_found` is chain-aware) so sync can tell a permanent
+    hole from a transient failure. A missing `curl` yields an actionable error.
   - `source` — `Source` trait, declarative `SiteProfile`, `GenericSource`
     adapter, and shared HTML extraction (`parse_novel_meta`, `parse_chapter_body`,
     status parsing) reused by hand-written adapters. Keep parsing synchronous so
@@ -177,12 +190,13 @@ Cargo workspace, two crates under `crates/`:
     (in lib.rs) resolves a URL to its adapter + fetch tier by host.
   - `model` — domain types (`NovelMeta`, `ChapterRef`, `Chapter`, `NovelStatus`).
   - `epub` — EPUB packaging (reconstructed XHTML; atomic temp-file+rename;
-    embeds a downloaded cover image and the genre as `dc:subject`).
+    embeds a downloaded cover image and the genre as `dc:subject`; adds a front
+    "Missing Chapters" page when the novel has 404 gaps).
   - `paths` — library layout (`epub_path`, `novel_dir`): author/novel/epub tree.
   - `store` — SQLite persistence (`Store`, `StoredNovel`): novels/sources/chapters
-    schema, WAL, resume-aware chapter insert, DB-backed load for export. rusqlite
-    pinned to 0.31 (cfg_select workaround). Connection is not `Send`, so the CLI
-    uses a current-thread runtime.
+    /chapter_gaps schema, WAL, resume-aware chapter insert, DB-backed load for
+    export, gap record/clear/list. rusqlite pinned to 0.31 (cfg_select
+    workaround). Connection is not `Send`, so the CLI uses a current-thread runtime.
   - `config` — `Config`: flat `config.ini` (`<config_dir>/config.ini`),
     self-generating with commented defaults; tolerant reads (escape-disabled so
     Windows `C:\` paths round-trip). Drives output_dir, delays, retention/grace/
@@ -193,8 +207,11 @@ Cargo workspace, two crates under `crates/`:
     novel does a cheap delta check (landing page) with a full-walk fallback on a
     gap. Gap-fills missing chapters from the highest-priority source (primary
     authoritative), upgrades fallback-sourced chapters once the primary catches
-    up, drives the Backfilling->Live transition, returns a `SyncReport`. Reports
-    progress via a structured `SyncProgress` callback (per-chapter `done/total`),
+    up, drives the Backfilling->Live transition, returns a `SyncReport`. A chapter
+    that 404s from every source is recorded as a gap (`SyncReport.gaps`) and no
+    longer blocks the Backfilling->Live transition (`target ⊆ have ∪ gaps`), so a
+    dead URL can't wedge a novel; a filled/reappeared chapter clears its gap.
+    Reports progress via a structured `SyncProgress` callback (per-chapter `done/total`),
     which the CLI renders as a single in-place `n/m` line rather than a line per
     chapter. The callback returns a `ControlFlow`; `Break` stops the pass cleanly
     after the current (already-committed) chapter and sets `SyncReport.interrupted`

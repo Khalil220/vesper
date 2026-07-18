@@ -18,6 +18,7 @@ use std::ops::ControlFlow;
 
 use anyhow::Result;
 
+use crate::fetch::is_not_found;
 use crate::model::{ChapterRef, DerivedState};
 use crate::source::Source;
 use crate::store::{Store, StoredSource};
@@ -49,8 +50,12 @@ pub struct SyncReport {
     pub delta_mode: bool,
     /// Non-fatal notices (source divergence, per-chapter failures, gap fallback).
     pub warnings: Vec<String>,
-    /// Chapter numbers no source could provide.
+    /// Chapter numbers that failed *transiently* this pass (timeout/5xx) and will
+    /// be retried next time — not permanent gaps.
     pub failures: Vec<u32>,
+    /// Chapter numbers confirmed absent at the source (permanent 404 holes). These
+    /// no longer block completion; they are surfaced so the gap stays visible.
+    pub gaps: Vec<u32>,
     /// The caller asked to stop early (e.g. Ctrl+C); fetched chapters are saved
     /// and the run can be resumed. The state machine stays put (no transition).
     pub interrupted: bool,
@@ -104,6 +109,9 @@ pub async fn sync_novel(
     let is_backfilling = matches!(state, DerivedState::Backfilling);
     let have = store.stored_chapter_numbers(novel_id)?;
     let max_have = have.iter().copied().max().unwrap_or(0);
+    // Previously-recorded permanent gaps (404 holes). Re-probed automatically
+    // when they reappear in a full walk's target below.
+    let mut gaps = store.gaps(novel_id)?;
 
     let mut report = SyncReport {
         newly_fetched: 0,
@@ -113,6 +121,7 @@ pub async fn sync_novel(
         delta_mode: !is_backfilling,
         warnings: Vec::new(),
         failures: Vec::new(),
+        gaps: Vec::new(),
         interrupted: false,
     };
 
@@ -179,8 +188,11 @@ pub async fn sync_novel(
     let total = to_fetch.len();
     for (i, num) in to_fetch.into_iter().enumerate() {
         let mut done = false;
+        let mut attempted = false;
+        let mut only_not_found = true;
         for (idx, (meta, src, map)) in discovered.iter().enumerate() {
             let Some(cref) = map.get(&num) else { continue };
+            attempted = true;
             match src.fetch_chapter(cref).await {
                 Ok(chapter) => {
                     if store.insert_chapter_if_absent(novel_id, meta.id, &chapter)? {
@@ -192,13 +204,31 @@ pub async fn sync_novel(
                     done = true;
                     break;
                 }
-                Err(e) => report.warnings.push(format!(
-                    "ch.{num} from {} failed: {e}; trying next source",
-                    meta.name
-                )),
+                Err(e) => {
+                    // A 404 is a permanent hole; anything else is transient.
+                    if !is_not_found(&e) {
+                        only_not_found = false;
+                    }
+                    report.warnings.push(format!(
+                        "ch.{num} from {} failed: {e}; trying next source",
+                        meta.name
+                    ));
+                }
             }
         }
-        if !done {
+        if done {
+            // Filled — clear any prior gap (site restored it, or a fallback had it).
+            if gaps.remove(&num) {
+                store.clear_gap(novel_id, num)?;
+            }
+        } else if attempted && only_not_found {
+            // Every source that lists this number returned 404: a real gap. This
+            // no longer wedges completion, but it's recorded so it stays visible.
+            if gaps.insert(num) {
+                store.record_gap(novel_id, num)?;
+            }
+        } else if attempted {
+            // Transient failure — leave it to retry next pass.
             report.failures.push(num);
         }
         // The chapter just fetched is already committed, so stopping here is safe
@@ -252,7 +282,13 @@ pub async fn sync_novel(
     //   unchanged; Live -> LikelyComplete is decided by `reevaluate_completion`.
     let new_state = if is_backfilling {
         let now_have = store.stored_chapter_numbers(novel_id)?;
-        if !target.is_empty() && target.difference(&now_have).next().is_none() {
+        // Complete once every target chapter is either stored or a known gap. A
+        // permanent 404 hole would otherwise wedge the novel in Backfilling
+        // forever (and so never auto-export).
+        let outstanding = target
+            .difference(&now_have)
+            .any(|n| !gaps.contains(n));
+        if !target.is_empty() && !outstanding {
             DerivedState::Live
         } else {
             DerivedState::Backfilling
@@ -266,6 +302,7 @@ pub async fn sync_novel(
         store.set_derived_state(novel_id, new_state)?;
     }
     report.new_state = new_state;
+    report.gaps = gaps.into_iter().collect();
 
     Ok(report)
 }
@@ -285,6 +322,8 @@ mod tests {
         /// If set, `discover_latest` returns only the highest N numbers
         /// (simulates a landing page's short "latest" list).
         latest_window: Option<usize>,
+        /// Numbers that discovery lists but that 404 on fetch (site holes).
+        holes: BTreeSet<u32>,
     }
 
     impl MockSource {
@@ -298,7 +337,14 @@ mod tests {
                 bodies,
                 broken: false,
                 latest_window: None,
+                holes: BTreeSet::new(),
             }
+        }
+
+        /// Discovered chapters that 404 on fetch (permanent site holes).
+        fn with_holes(mut self, holes: &[u32]) -> Self {
+            self.holes = holes.iter().copied().collect();
+            self
         }
 
         fn with_latest_window(mut self, n: usize) -> Self {
@@ -312,7 +358,13 @@ mod tests {
                 bodies: BTreeMap::new(),
                 broken: true,
                 latest_window: None,
+                holes: BTreeSet::new(),
             }
+        }
+
+        /// Numbers this source lists in discovery: real bodies plus holes.
+        fn discovered_numbers(&self) -> BTreeSet<u32> {
+            self.bodies.keys().copied().chain(self.holes.iter().copied()).collect()
         }
 
         fn refs_for<'a>(&self, numbers: impl Iterator<Item = &'a u32>) -> Vec<ChapterRef> {
@@ -352,15 +404,26 @@ mod tests {
             if self.broken {
                 return Err(anyhow::anyhow!("{} is unreachable", self.name));
             }
-            Ok(self.refs_for(self.bodies.keys()))
+            let nums = self.discovered_numbers();
+            Ok(self.refs_for(nums.iter()))
         }
         async fn discover_latest(&self, url: &str) -> Result<Vec<ChapterRef>> {
             match self.latest_window {
-                Some(k) => Ok(self.refs_for(self.bodies.keys().rev().take(k).collect::<Vec<_>>().into_iter().rev())),
+                Some(k) => {
+                    let nums = self.discovered_numbers();
+                    let tail: Vec<&u32> = nums.iter().rev().take(k).collect();
+                    Ok(self.refs_for(tail.into_iter().rev()))
+                }
                 None => self.discover_chapters(url, None).await,
             }
         }
         async fn fetch_chapter(&self, chapter: &ChapterRef) -> Result<Chapter> {
+            if self.holes.contains(&chapter.number) {
+                return Err(anyhow::anyhow!(crate::fetch::NotFound {
+                    url: chapter.url.clone(),
+                    status: 404,
+                }));
+            }
             let body = self
                 .bodies
                 .get(&chapter.number)
@@ -477,6 +540,91 @@ mod tests {
             DerivedState::Backfilling,
             "an interrupted backfill does not transition to Live"
         );
+    }
+
+    #[tokio::test]
+    async fn permanent_gap_does_not_wedge_backfill() {
+        let store = Store::open_in_memory().unwrap();
+        let id = subscribe(&store);
+        // Primary lists 1..=5 but ch.3 is a 404 hole (like lightnovelworld).
+        let sources = pair(
+            &store,
+            id,
+            vec![Box::new(MockSource::new("primary", &[1, 2, 4, 5]).with_holes(&[3]))],
+        );
+        let report = sync_novel(&store, id, DerivedState::Backfilling, &sources, 0, |_| {
+            ControlFlow::Continue(())
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(report.newly_fetched, 4, "the 4 real chapters are fetched");
+        assert_eq!(report.gaps, vec![3], "ch.3 recorded as a permanent gap");
+        assert!(report.failures.is_empty(), "a 404 is a gap, not a transient failure");
+        assert_eq!(
+            report.new_state,
+            DerivedState::Live,
+            "completes despite the hole instead of wedging in Backfilling"
+        );
+        assert_eq!(store.gaps(id).unwrap().into_iter().collect::<Vec<_>>(), vec![3]);
+    }
+
+    #[tokio::test]
+    async fn gap_is_filled_from_fallback_not_recorded() {
+        let store = Store::open_in_memory().unwrap();
+        let id = subscribe(&store);
+        store.add_source(id, "fallback", "https://fallback.example/n").unwrap();
+        // Primary's ch.3 is a hole, but the fallback has it.
+        let sources = pair(
+            &store,
+            id,
+            vec![
+                Box::new(MockSource::new("primary", &[1, 2, 4, 5]).with_holes(&[3])),
+                Box::new(MockSource::new("fallback", &[3])),
+            ],
+        );
+        let report = sync_novel(&store, id, DerivedState::Backfilling, &sources, 0, |_| {
+            ControlFlow::Continue(())
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(report.newly_fetched, 5);
+        assert_eq!(report.from_fallback, 1, "ch.3 came from the fallback");
+        assert!(report.gaps.is_empty(), "the hole was filled, so it's not a gap");
+        assert!(store.gaps(id).unwrap().is_empty());
+        assert_eq!(report.new_state, DerivedState::Live);
+    }
+
+    #[tokio::test]
+    async fn gap_clears_when_chapter_reappears() {
+        let store = Store::open_in_memory().unwrap();
+        let id = subscribe(&store);
+        // First pass: ch.3 is a hole -> recorded, novel still goes Live.
+        let s1 = pair(
+            &store,
+            id,
+            vec![Box::new(MockSource::new("primary", &[1, 2, 4, 5]).with_holes(&[3]))],
+        );
+        let r1 = sync_novel(&store, id, DerivedState::Backfilling, &s1, 0, |_| {
+            ControlFlow::Continue(())
+        })
+        .await
+        .unwrap();
+        assert_eq!(r1.gaps, vec![3]);
+        assert_eq!(store.gaps(id).unwrap().len(), 1);
+
+        // The site restores ch.3; a full re-walk re-probes and fills it, clearing
+        // the gap (this is also the path a newly-added fallback source takes).
+        let s2 = pair(&store, id, vec![Box::new(MockSource::new("primary", &[1, 2, 3, 4, 5]))]);
+        let r2 = sync_novel(&store, id, DerivedState::Backfilling, &s2, 0, |_| {
+            ControlFlow::Continue(())
+        })
+        .await
+        .unwrap();
+        assert_eq!(r2.newly_fetched, 1, "ch.3 now fetched");
+        assert!(r2.gaps.is_empty(), "gap cleared once the chapter reappears");
+        assert!(store.gaps(id).unwrap().is_empty());
     }
 
     #[tokio::test]

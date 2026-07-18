@@ -35,6 +35,31 @@ pub trait Fetcher: Send + Sync {
     }
 }
 
+/// A fetch that failed because the server said the resource does not exist
+/// (HTTP 404/410) — a *permanent* absence, distinct from a transient failure
+/// (timeout, 5xx) that should be retried. The sync engine uses this to tell a
+/// real "this chapter URL is a hole in the site" apart from "try again later".
+#[derive(Debug, Clone)]
+pub struct NotFound {
+    pub url: String,
+    pub status: u16,
+}
+
+impl std::fmt::Display for NotFound {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} returned HTTP {} (not found)", self.url, self.status)
+    }
+}
+
+impl std::error::Error for NotFound {}
+
+/// Whether `err` (or anything in its chain) is a [`NotFound`] — i.e. the server
+/// reported the resource absent (404/410). Chain-aware so it still detects the
+/// case when a caller added `.context(...)` on top.
+pub fn is_not_found(err: &anyhow::Error) -> bool {
+    err.chain().any(|c| c.is::<NotFound>())
+}
+
 /// Default browser-like User-Agent. novgo serves us fine even without this, but
 /// sending a real one is basic politeness and avoids trivial UA filters.
 pub(crate) const DEFAULT_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) \
@@ -152,6 +177,10 @@ impl Fetcher for ReqwestFetcher {
                         );
                         sleep(wait).await;
                         continue;
+                    }
+                    let code = status.as_u16();
+                    if code == 404 || code == 410 {
+                        return Err(anyhow!(NotFound { url: url.to_string(), status: code }));
                     }
                     bail!("GET {url} returned HTTP {status}");
                 }
@@ -296,6 +325,9 @@ impl Fetcher for CurlFetcher {
                     "curl failed for {url}: {}",
                     String::from_utf8_lossy(&out.stderr).trim()
                 );
+            }
+            if code == 404 || code == 410 {
+                return Err(anyhow!(NotFound { url: url.to_string(), status: code }));
             }
             bail!("GET {url} returned HTTP {code}");
         }
@@ -443,6 +475,17 @@ mod tests {
             Some("novgo.net")
         );
         assert_eq!(host_of("not a url"), None);
+    }
+
+    #[test]
+    fn detects_not_found_through_context() {
+        let bare: anyhow::Error = anyhow!(NotFound { url: "https://x/c/190".into(), status: 404 });
+        assert!(is_not_found(&bare));
+        // Still detected when a caller wraps it with context.
+        let wrapped = bare.context("fetching chapter 190");
+        assert!(is_not_found(&wrapped));
+        // A plain error is not a NotFound.
+        assert!(!is_not_found(&anyhow!("GET x returned HTTP 503")));
     }
 
     #[tokio::test]

@@ -5,6 +5,7 @@
 
 mod service;
 
+use std::collections::BTreeSet;
 use std::fs::{File, OpenOptions};
 use std::io::{IsTerminal, Write};
 use std::ops::ControlFlow;
@@ -185,11 +186,12 @@ async fn export_novel(store: &Store, novel: &StoredNovel, config: &Config) -> Re
         Some(url) => download_cover(url).await,
         None => None,
     };
+    let gaps: Vec<u32> = store.gaps(novel.id)?.into_iter().collect();
     let mut paths = Vec::new();
 
     if config.split_every_chapters == 0 {
         let path = epub_path(&config.output_dir, meta.author.as_deref(), &meta.title, None);
-        build_epub(&meta, &chapters, &path, cover.as_ref())?;
+        build_epub(&meta, &chapters, &path, cover.as_ref(), &gaps)?;
         paths.push(path);
     } else {
         let size = config.split_every_chapters as usize;
@@ -200,7 +202,14 @@ async fn export_novel(store: &Store, novel: &StoredNovel, config: &Config) -> Re
                 &meta.title,
                 Some((i + 1) as u32),
             );
-            build_epub(&meta, chunk, &path, cover.as_ref())?;
+            // Only list gaps that fall within this volume's chapter range.
+            let vol_gaps: Vec<u32> = match (chunk.first(), chunk.last()) {
+                (Some(f), Some(l)) => {
+                    gaps.iter().copied().filter(|g| *g >= f.number && *g <= l.number).collect()
+                }
+                _ => Vec::new(),
+            };
+            build_epub(&meta, chunk, &path, cover.as_ref(), &vol_gaps)?;
             paths.push(path);
         }
     }
@@ -268,6 +277,19 @@ fn log_line(config: &Config, msg: &str) {
 /// the log reads naturally; DST is handled by the OS via `chrono::Local`.
 fn local_timestamp() -> String {
     chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string()
+}
+
+/// One-line summary of a novel's unavailable (404-gap) chapters, or "" if none.
+fn describe_gaps(gaps: &BTreeSet<u32>) -> String {
+    if gaps.is_empty() {
+        return String::new();
+    }
+    const CAP: usize = 15;
+    let mut list = gaps.iter().take(CAP).map(|n| n.to_string()).collect::<Vec<_>>().join(", ");
+    if gaps.len() > CAP {
+        list.push_str(&format!(", … (+{} more)", gaps.len() - CAP));
+    }
+    format!("{} unavailable at source (404): ch. {}", gaps.len(), list)
 }
 
 /// A single-line, self-overwriting `n/m` progress indicator on stderr. It draws
@@ -389,6 +411,13 @@ async fn add_source(config: &Config, novel: String, url: String, delay_ms: Optio
 
     let sid = store.add_source(found.id, source.name(), &url)?;
     println!("Added {} as a fallback source (#{sid}) for \"{}\".", source.name(), found.title);
+
+    // If the novel has gaps, re-open its backfill so the next sync does a full
+    // walk and tries to fill those holes from the new source.
+    if !store.gaps(found.id)?.is_empty() {
+        store.set_derived_state(found.id, DerivedState::Backfilling)?;
+        println!("  It has unavailable chapters; the next sync will try to fill them from this source.");
+    }
     Ok(())
 }
 
@@ -406,6 +435,10 @@ fn subs() -> Result<()> {
             "#{}  {} — {}  [{} chapters, {}{pending}]",
             n.id, n.title, author, n.chapter_count, n.derived_state.as_str()
         );
+        let gaps = store.gaps(n.id)?;
+        if !gaps.is_empty() {
+            println!("    gaps: {}", describe_gaps(&gaps));
+        }
         for s in &n.sources {
             let seen = s
                 .last_seen_chapter
@@ -504,6 +537,15 @@ async fn fetch(config: &Config, novel: String, limit: usize, delay_ms: Option<u6
         found.title,
         before + report.newly_fetched as usize
     );
+    if !report.gaps.is_empty() {
+        let gaps: BTreeSet<u32> = report.gaps.iter().copied().collect();
+        println!(
+            "Note: {} — the source has no page for these. They're marked in the EPUB; \
+             add an alternate source (`vesper add-source {}`) to try to fill them.",
+            describe_gaps(&gaps),
+            found.id
+        );
+    }
     Ok(())
 }
 
@@ -526,7 +568,8 @@ async fn export(config: &Config, novel: String, out: Option<PathBuf>) -> Result<
             Some(url) => download_cover(url).await,
             None => None,
         };
-        build_epub(&meta, &chapters, &out_path, cover.as_ref())?;
+        let gaps: Vec<u32> = store.gaps(found.id)?.into_iter().collect();
+        build_epub(&meta, &chapters, &out_path, cover.as_ref(), &gaps)?;
         store.mark_all_exported(found.id)?;
         println!("Exported {} chapters of \"{}\" to {}", chapters.len(), found.title, out_path.display());
     } else {
@@ -610,11 +653,18 @@ async fn sync_all(config: &Config, limit: usize, delay_ms: Option<u64>) -> Resul
                 }
                 total_new += report.newly_fetched;
                 let mode = if report.delta_mode { "delta" } else { "full" };
-                let extra = if report.upgraded > 0 {
+                let mut extra = if report.upgraded > 0 {
                     format!(", {} upgraded", report.upgraded)
                 } else {
                     String::new()
                 };
+                // Surface gaps in the log (background stderr is discarded) and on
+                // screen for a manual/visible run.
+                if !report.gaps.is_empty() {
+                    let gaps: BTreeSet<u32> = report.gaps.iter().copied().collect();
+                    extra.push_str(&format!(", {}", describe_gaps(&gaps)));
+                    eprintln!("  ! {}: {}", novel.title, describe_gaps(&gaps));
+                }
                 println!("  {}: +{} new chapters [{mode}]", novel.title, report.newly_fetched);
                 log_line(
                     config,
@@ -700,6 +750,10 @@ fn status(config: &Config) -> Result<()> {
             "  #{} {} — {} chapters [{}{pending}]",
             n.id, n.title, n.chapter_count, n.derived_state.as_str()
         );
+        let gaps = store.gaps(n.id)?;
+        if !gaps.is_empty() {
+            println!("      gaps: {}", describe_gaps(&gaps));
+        }
     }
 
     match std::fs::read_to_string(&config.log_path) {

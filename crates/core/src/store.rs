@@ -146,6 +146,16 @@ impl Store {
                 exported_at INTEGER,
                 PRIMARY KEY (novel_id, number)
             );
+
+            -- Chapter numbers that discovery expects but no source can provide
+            -- (a permanent 404 hole in the site). Tracked so a novel with such
+            -- holes can still complete/export, and so the gap is visible.
+            CREATE TABLE IF NOT EXISTS chapter_gaps (
+                novel_id    INTEGER NOT NULL REFERENCES novels(id) ON DELETE CASCADE,
+                number      INTEGER NOT NULL,
+                detected_at INTEGER NOT NULL,
+                PRIMARY KEY (novel_id, number)
+            );
             "#,
         )?;
         // Upgrade older DBs (harmless no-ops if the columns already exist).
@@ -357,6 +367,38 @@ impl Store {
             set.insert(n? as u32);
         }
         Ok(set)
+    }
+
+    /// Chapter numbers recorded as permanent gaps (source 404 holes) for a novel.
+    pub fn gaps(&self, novel_id: i64) -> Result<BTreeSet<u32>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT number FROM chapter_gaps WHERE novel_id = ?1")?;
+        let rows = stmt.query_map(params![novel_id], |r| r.get::<_, i64>(0))?;
+        let mut set = BTreeSet::new();
+        for n in rows {
+            set.insert(n? as u32);
+        }
+        Ok(set)
+    }
+
+    /// Mark a chapter number as a permanent gap (no-op if already recorded).
+    pub fn record_gap(&self, novel_id: i64, number: u32) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO chapter_gaps (novel_id, number, detected_at)
+             VALUES (?1, ?2, ?3)",
+            params![novel_id, number, now_unix()],
+        )?;
+        Ok(())
+    }
+
+    /// Clear a recorded gap (e.g. the chapter became available or was filled).
+    pub fn clear_gap(&self, novel_id: i64, number: u32) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM chapter_gaps WHERE novel_id = ?1 AND number = ?2",
+            params![novel_id, number],
+        )?;
+        Ok(())
     }
 
     /// Insert a chapter if that number isn't already stored. Returns whether it
