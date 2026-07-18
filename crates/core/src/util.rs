@@ -1,5 +1,16 @@
 //! Small cross-cutting helpers.
 
+/// Normalize a novel title for cross-source identity: lowercase, keep only
+/// alphanumerics (dropping spaces and punctuation). Lets the *same* novel titled
+/// slightly differently across sites ("Shadow Slave", "shadow-slave") compare
+/// equal, so a re-`subscribe` can be recognized as a duplicate.
+pub fn normalize_title(s: &str) -> String {
+    s.chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(|c| c.to_lowercase())
+        .collect()
+}
+
 /// Make a string safe to use as a Windows filename.
 ///
 /// Strips the characters Windows forbids (`<>:"/\|?*` and control chars),
@@ -114,6 +125,17 @@ mod tests {
     #[test]
     fn sanitizes_illegal_characters() {
         assert_eq!(sanitize_filename("A/B:C?D"), "A_B_C_D");
+    }
+
+    #[test]
+    fn normalizes_titles_for_matching() {
+        // Same novel, different site formatting -> equal.
+        assert_eq!(normalize_title("Shadow Slave"), normalize_title("shadow-slave"));
+        assert_eq!(normalize_title("Pain Immunity: X!"), "painimmunityx");
+        // Distinct titles stay distinct.
+        assert_ne!(normalize_title("Slime Evolution"), normalize_title("Slime Rancher"));
+        // Non-Latin titles survive (Chinese chars are alphanumeric).
+        assert_eq!(normalize_title("陷阵营营长"), "陷阵营营长");
     }
 
     #[test]

@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{anyhow, ensure, Result};
+use anyhow::{anyhow, bail, ensure, Result};
 use clap::{Parser, Subcommand};
 use vesper_core::{
     build_epub, build_source, download_cover, epub_path, sync_novel, Config, DerivedState, Source,
@@ -34,13 +34,18 @@ enum Command {
     Subscribe {
         /// Novel landing-page URL.
         url: String,
+        /// Subscribe even if this looks like a novel you already follow (creates a
+        /// separate entry instead of stopping to suggest `add-source`).
+        #[arg(long)]
+        force: bool,
         /// Override the request delay, in milliseconds (default: config value).
         #[arg(long)]
         delay_ms: Option<u64>,
     },
     /// Add an alternate (fallback) source to an existing subscription.
     AddSource {
-        /// Existing novel to attach the source to (id or title).
+        /// Existing novel: its id (from `vesper subs`), or the exact title
+        /// (quote it if it contains spaces).
         novel: String,
         /// New source URL for the same novel.
         url: String,
@@ -53,7 +58,8 @@ enum Command {
     /// Re-fetch a subscription's metadata (author, cover, genre, status) from its
     /// primary source; stored chapters are left untouched.
     Refresh {
-        /// Novel to refresh (id or title), or `all` for every subscription.
+        /// Novel to refresh: its id (from `vesper subs`) or exact title (quote if
+        /// it has spaces), or `all` for every subscription.
         novel: String,
         /// Override the request delay, in milliseconds (default: config value).
         #[arg(long)]
@@ -61,12 +67,14 @@ enum Command {
     },
     /// Remove a subscription and its downloaded chapters.
     Unsubscribe {
-        /// Novel to remove (id or title).
+        /// Novel to remove: its id (from `vesper subs`), or the exact title
+        /// (quote it if it contains spaces).
         novel: String,
     },
     /// Download missing chapters for a subscribed novel (resume-aware).
     Fetch {
-        /// Novel to fetch (id or title).
+        /// Novel to fetch: its id (from `vesper subs`), or the exact title
+        /// (quote it if it contains spaces).
         novel: String,
         /// Max new chapters to fetch this run (0 = all missing).
         #[arg(long, default_value_t = 0)]
@@ -77,7 +85,8 @@ enum Command {
     },
     /// Build an EPUB from a subscribed novel's stored chapters.
     Export {
-        /// Novel to export (id or title).
+        /// Novel to export: its id (from `vesper subs`), or the exact title
+        /// (quote it if it contains spaces).
         novel: String,
         /// Output path override (single file, ignores output_dir/splitting).
         #[arg(long)]
@@ -140,7 +149,9 @@ async fn main() -> Result<()> {
     let config = Config::load_or_create()?;
 
     match cli.cmd {
-        Command::Subscribe { url, delay_ms } => subscribe(&config, url, delay_ms).await,
+        Command::Subscribe { url, force, delay_ms } => {
+            subscribe(&config, url, force, delay_ms).await
+        }
         Command::AddSource { novel, url, delay_ms } => {
             add_source(&config, novel, url, delay_ms).await
         }
@@ -384,12 +395,35 @@ fn lock_would_block(e: &std::io::Error) -> bool {
     e.kind() == std::io::ErrorKind::WouldBlock || (cfg!(windows) && e.raw_os_error() == Some(33))
 }
 
-async fn subscribe(config: &Config, url: String, delay_ms: Option<u64>) -> Result<()> {
+async fn subscribe(config: &Config, url: String, force: bool, delay_ms: Option<u64>) -> Result<()> {
     let source = source_for(&url, delay_ms.unwrap_or(config.request_delay_ms))?;
     eprintln!("Fetching novel metadata...");
     let meta = source.fetch_novel(&url).await?;
 
     let store = Store::open_default()?;
+
+    // Guard against forking a novel you already follow (the same story is titled
+    // differently across sites, so this matches on a normalized title). To add
+    // another source use `add-source`; `--force` overrides for a genuine distinct
+    // novel.
+    if !force {
+        if let Some(existing) = store.find_novel_by_normalized_title(&meta.title)? {
+            let from = existing
+                .primary_source()
+                .map(|s| format!(" (from {})", s.name))
+                .unwrap_or_default();
+            bail!(
+                "\"{}\" looks like #{} \"{}\"{from}, which you already follow.\n\
+                 - To add this URL as an alternate source:  vesper add-source {} {url}\n\
+                 - To subscribe as a separate novel anyway:  re-run with --force",
+                meta.title,
+                existing.id,
+                existing.title,
+                existing.id,
+            );
+        }
+    }
+
     let id = store.subscribe(&meta, source.name())?;
 
     println!("Subscribed to \"{}\" (novel #{id}).", meta.title);

@@ -438,6 +438,19 @@ Verified by probing during design:
   changes, a re-export moves the EPUB under the corrected author folder. `refresh
   all` walks every subscription (one metadata request each) and reports which
   authors changed.
+- **Subscribe won't fork a novel you already follow.** The design is one logical
+  novel with ranked sources, added via `add-source` — but nothing stopped a user
+  from `subscribe`-ing the same story from a second site, creating a duplicate
+  novel row (the old guard only matched an *exact* case-insensitive title+author,
+  which cross-site formatting differences slip past). `subscribe` now compares the
+  fetched title against existing novels under a *normalized* key (lowercase,
+  punctuation/whitespace stripped, via `util::normalize_title`) and, on a match,
+  stops with a message pointing at `vesper add-source <id> <url>`; `--force`
+  overrides for a genuinely distinct novel. Normalized matching catches the same
+  title across sites, not a different translation — no universal cross-site id
+  exists — but it removes the common accidental fork. Also: the `<novel>` selector
+  for id-or-title commands is an id *or the exact title* (quoted if it has spaces,
+  since it's one arg); the help now says so and steers toward the id from `subs`.
 - **Genre metadata.** Captured from `og:novel:genre` (novgo, freewebnovel),
   stored on the novel, emitted as EPUB `dc:subject`. lightnovelworld leaves it
   `None` (genre is only in its JSON-LD, which we don't parse).

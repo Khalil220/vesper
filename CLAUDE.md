@@ -9,7 +9,7 @@ profile; hand-written freewebnovel, lightnovelworld, royalroad + scribblehub
 adapters), a second fetch tier (curl, with POST support), a windowless scheduled
 task, fallback content upgrade, external config-driven profiles, EPUB cover +
 genre embedding, and a status command + sync logging are in place and tested
-(66 unit + 4 CLI tests). Linux/macOS service
+(68 unit + 4 CLI tests). Linux/macOS service
 impls are verified in CI (GitHub Actions builds/tests on ubuntu/macos/windows and
 round-trips the service install). See `DESIGN.md` for the full decisions and
 rationale; this file is the short rules-of-the-road.
@@ -34,8 +34,12 @@ rationale; this file is the short rules-of-the-road.
 - **One logical novel, multiple ranked sources** (not per-source subscriptions).
   A novel (author+title) has a primary source plus optional fallbacks.
   Subscribing to an already-followed novel from a new site adds an alternate
-  source (user-confirmed), never a duplicate — one novel => one EPUB at the
-  author/novel path. **Active fallback:** sync gap-fills chapters the primary
+  source (via `add-source`), never a duplicate — one novel => one EPUB at the
+  author/novel path. **`subscribe` enforces this:** it blocks when the new URL's
+  title matches an existing novel under a *normalized* comparison (case/spacing/
+  punctuation-insensitive, so cross-site formatting differences still match) and
+  points the user at `add-source`; `--force` overrides for a genuinely distinct
+  novel. **Active fallback:** sync gap-fills chapters the primary
   lacks from fallbacks by priority/chapter-number; primary is authoritative for
   content. Schema: `novels` / `sources` / `chapters` (see DESIGN.md).
 - **Tiered fetcher behind a trait.** Tier 1 = `ReqwestFetcher` (browser UA +
@@ -203,8 +207,10 @@ Cargo workspace, two crates under `crates/`:
   - `paths` — library layout (`epub_path`, `novel_dir`): author/novel/epub tree.
   - `store` — SQLite persistence (`Store`, `StoredNovel`): novels/sources/chapters
     /chapter_gaps schema, WAL, resume-aware chapter insert, DB-backed load for
-    export, gap record/clear/list. rusqlite pinned to 0.31 (cfg_select
-    workaround). Connection is not `Send`, so the CLI uses a current-thread runtime.
+    export, gap record/clear/list, novel-meta refresh, and normalized-title lookup
+    (`find_novel_by_normalized_title`, for subscribe dedup). rusqlite pinned to 0.31
+    (cfg_select workaround). Connection is not `Send`, so the CLI uses a
+    current-thread runtime.
   - `config` — `Config`: flat `config.ini` (`<config_dir>/config.ini`),
     self-generating with commented defaults; tolerant reads (escape-disabled so
     Windows `C:\` paths round-trip). Drives output_dir, delays, retention/grace/

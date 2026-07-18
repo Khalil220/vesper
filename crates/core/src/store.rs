@@ -181,8 +181,8 @@ impl Store {
         }
         if let Some(existing) = self.novel_id_for(&meta.title, meta.author.as_deref())? {
             bail!(
-                "already following \"{}\" (novel #{existing}) from another source; \
-                 adding alternate sources will land in a later step",
+                "already following \"{}\" (novel #{existing}); use \
+                 `vesper add-source {existing} <url>` to attach another source",
                 meta.title
             );
         }
@@ -250,6 +250,30 @@ impl Store {
                 |r| r.get::<_, i64>(0),
             )
             .optional()?)
+    }
+
+    /// Find a novel whose title matches `title` ignoring case, spacing, and
+    /// punctuation (via `util::normalize_title`). Catches the same novel
+    /// re-subscribed from a differently-formatted source so we can point the user
+    /// at `add-source` instead of forking a duplicate. Normalization is done in
+    /// Rust (SQLite can't strip punctuation), so this scans the novels table —
+    /// fine for a personal library.
+    pub fn find_novel_by_normalized_title(&self, title: &str) -> Result<Option<StoredNovel>> {
+        let target = crate::util::normalize_title(title);
+        if target.is_empty() {
+            return Ok(None);
+        }
+        let candidates: Vec<(i64, String)> = {
+            let mut stmt = self.conn.prepare("SELECT id, title FROM novels")?;
+            let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        for (id, t) in candidates {
+            if crate::util::normalize_title(&t) == target {
+                return self.load_novel_by_id(id);
+            }
+        }
+        Ok(None)
     }
 
     /// All subscriptions, ordered by title.
@@ -650,6 +674,17 @@ mod tests {
         s.subscribe(&sample_meta("https://novgo.net/a.html"), "novgo").unwrap();
         let err = s.subscribe(&sample_meta("https://novgo.net/a.html"), "novgo").unwrap_err();
         assert!(err.to_string().contains("already subscribed"));
+    }
+
+    #[test]
+    fn normalized_title_matches_across_formatting() {
+        let s = mem_store();
+        let id = s.subscribe(&sample_meta("https://novgo.net/a.html"), "novgo").unwrap();
+        // "Test Novel" subscribed; a differently-formatted same title matches.
+        let found = s.find_novel_by_normalized_title("test-novel!").unwrap();
+        assert_eq!(found.map(|n| n.id), Some(id));
+        // A genuinely different title does not.
+        assert!(s.find_novel_by_normalized_title("Other Story").unwrap().is_none());
     }
 
     #[test]
