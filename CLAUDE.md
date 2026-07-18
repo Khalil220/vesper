@@ -1,56 +1,39 @@
 # CLAUDE.md
 
 **Vesper** — a Rust tool that crawls webnovel sites, downloads chapters, and
-packages them into EPUBs. One binary, two faces: a CLI (control + export) and a
-lightweight background sync that keeps subscribed novels current.
-
-**Status: implemented (v1).** All planned phases plus five sources (novgo
-profile; hand-written freewebnovel, lightnovelworld, royalroad + scribblehub
-adapters), a second fetch tier (curl, with POST support), a windowless scheduled
-task, fallback content upgrade, external config-driven profiles, EPUB cover +
-genre embedding, and a status command + sync logging are in place and tested
-(69 unit + 4 CLI tests). Linux/macOS service
-impls are verified in CI (GitHub Actions builds/tests on ubuntu/macos/windows and
-round-trips the service install). See `DESIGN.md` for the full decisions and
-rationale; this file is the short rules-of-the-road.
+packages them into EPUBs. One binary: a CLI plus the same binary run as a
+scheduled background sync. `DESIGN.md` has the architecture and rationale;
+`README.md` has the user-facing command reference. This file is the short
+rules-of-the-road.
 
 ## Load-bearing constraints (don't re-litigate — see DESIGN.md for why)
 
 - **One binary, Cargo workspace:** a `core` lib crate plus a single binary with
   subcommands. The background "service" is the same binary in a sync mode, not a
   separate program.
-- **Background sync = scheduled invocation (Windows Task Scheduler), not a
-  resident daemon.** Zero memory when idle. `install`/`uninstall` register/remove
-  the task (shell out to `schtasks.exe`). Put service-management behind a trait
-  for later Linux/macOS. Take a process lock per run to prevent double-fire.
+- **Background sync = scheduled invocation, not a resident daemon.** Zero
+  memory when idle. Service management sits behind a per-OS trait (Task
+  Scheduler / systemd user timer / launchd, all per-user, no elevation). A
+  process lock per run prevents double-fire.
 - **SQLite (WAL) is the single source of truth**, in `%LOCALAPPDATA%` (via
   `directories::data_local_dir`) — **never roaming `%APPDATA%`**. Store cleaned
   text/XHTML, not raw HTML.
 - **Multi-source by design.** A `Source` trait abstracts each site; a generic
   config-driven adapter handles the common server-rendered + CSS + `?page=N`
-  case, so most sites (novgo included) are just declarative profiles, no
-  recompile. Hand-written adapters only for weird sites. novgo is the first
-  source, not the only one. URL-to-source resolves by host.
-- **One logical novel, multiple ranked sources** (not per-source subscriptions).
-  A novel (author+title) has a primary source plus optional fallbacks.
-  Subscribing to an already-followed novel from a new site adds an alternate
-  source (via `add-source`), never a duplicate — one novel => one EPUB at the
-  author/novel path. **`subscribe` enforces this:** it blocks when the new URL's
-  title matches an existing novel under a *normalized* comparison (case/spacing/
-  punctuation-insensitive, so cross-site formatting differences still match) and
-  points the user at `add-source`; `--force` overrides for a genuinely distinct
-  novel. **Active fallback:** sync gap-fills chapters the primary
-  lacks from fallbacks by priority/chapter-number; primary is authoritative for
-  content. Schema: `novels` / `sources` / `chapters` (see DESIGN.md).
+  case, so such sites (novgo included) are declarative profiles, no recompile.
+  Hand-written adapters only for weird sites. URL-to-source resolves by host.
+- **One logical novel, multiple ranked sources** (not per-source
+  subscriptions). A novel has a primary source plus optional fallbacks — one
+  novel => one EPUB. `subscribe` blocks when the title matches an existing
+  novel under a *normalized* comparison (case/spacing/punctuation-insensitive)
+  and points at `add-source`; `--force` overrides. **Active fallback:** sync
+  gap-fills chapters the primary lacks from fallbacks by priority; primary is
+  authoritative for content. Schema: `novels` / `sources` / `chapters`.
 - **Tiered fetcher behind a trait.** Tier 1 = `ReqwestFetcher` (browser UA +
-  headers); novgo needs only this. Tier 2 = `CurlFetcher` (shells out to system
-  `curl` — bundled on Windows 10+ and macOS, present on most Linux; a missing
-  binary yields an actionable "install curl" error — and supports GET *and* form
-  POST), used for
-  freewebnovel and scribblehub, whose Cloudflare challenges reqwest's TLS
-  fingerprint even though both use Schannel. `build_source` picks the tier +
-  adapter per host. Escalate further (`rquest`, headless browser) only if a site
-  needs it.
+  headers). Tier 2 = `CurlFetcher` (shells out to system `curl`; GET and form
+  POST), for hosts where Tier 1 gets challenged (freewebnovel, scribblehub).
+  `build_source` picks tier + adapter per host. Escalate further only if a
+  site needs it.
 - **Adaptive, per-host politeness:** modest delay + jitter, one request in
   flight per host, back off on 429/503, honor `Retry-After`, resume-on-disk.
   Parallelism only across distinct hosts. **No proxy-rotation / ban-evasion.**
@@ -58,36 +41,30 @@ rationale; this file is the short rules-of-the-road.
   *hint*; observed activity is authoritative. New chapters observed => Ongoing,
   overriding any "completed" label. The label only lowers poll cadence; never
   stop polling until unsubscribed. Hiatus != completed.
-- **404 gaps don't wedge completion.** A `chapter_gaps` row means the **primary**
-  source returned a permanent 404 for that number (via `fetch::NotFound`, distinct
-  from transient 5xx/timeout). It's treated as "accounted for" (`target ⊆ have ∪
-  gaps`) so a novel reaches Live/auto-exports instead of backfilling forever on a
-  dead URL. A gap is recorded **even when a fallback fills the chapter** — that's
-  how the content-upgrade pass knows to *stop* re-fetching the primary for it every
-  sync (the old "upgrade of ch.N failed" spam). User-facing surfaces show only
-  **unfilled** gaps (`store::unfilled_gaps` = recorded gap AND not stored): `subs`
-  /`status` list them, `subs --gaps` filters to novels that have them, a manual run
-  prints a note, and the EPUB gets a front "Missing Chapters" page. Re-probing a
-  known gap on a full walk is silent (no repeated warning). Gaps are gap-filled from
-  a fallback (adding a source to a gapped novel re-opens its backfill). Matters most
-  for URL-generating adapters (lightnovelworld, freewebnovel) whose id sequences
-  have holes.
+- **404 gaps don't wedge completion.** A `chapter_gaps` row means the
+  **primary** source returned a permanent 404 (`fetch::NotFound`, distinct from
+  transient 5xx/timeout) for that number. It counts as accounted for (`target ⊆
+  have ∪ gaps`) so backfill can finish instead of hammering a dead URL forever.
+  The gap is recorded **even when a fallback fills the chapter** — that's what
+  stops the content-upgrade pass from re-fetching the dead primary URL every
+  sync. User-facing surfaces show only **unfilled** gaps
+  (`store::unfilled_gaps`): `subs`/`status` list them, and the EPUB gets a
+  front "Missing Chapters" page. Re-probing a known gap is silent. Matters most
+  for URL-generating adapters (lightnovelworld, freewebnovel) whose id
+  sequences have holes.
 - **Retention resolves delete-vs-append:** ongoing novels keep chapters in the
-  DB (so append = regenerate-from-DB); only *Likely complete* novels (labeled
-  complete AND observably quiet for the grace window AND finally exported) get
-  purged. Never fires on the label alone. Retention **never** deletes an
-  un-exported chapter. Revival after purge re-hydrates the working set.
-- **Auto-export via a Backfilling -> Caught-up/Live state machine**, not a
-  "majority of chapters" heuristic. `auto_export` and `auto_append` are separate
-  toggles.
+  DB (append = regenerate-from-DB); only *Likely complete* novels (labeled
+  complete AND quiet for the grace window AND exported) get purged. Never on
+  the label alone; never an un-exported chapter. Revival re-hydrates.
+- **Auto-export via a Backfilling -> Live state machine**, not a chapter-count
+  heuristic. `auto_export` and `auto_append` are separate toggles.
 - **EPUB writes are atomic** (temp file + rename). A sharing-violation on
-  replace means the file is locked (Calibre/e-reader/OneDrive) -> mark export
-  `pending`, retry next cycle.
-- **Filename sanitization is mandatory** on Windows (strip `<>:"/\|?*`, trailing
-  dots/spaces, reserved names).
-- **Output layout: `<library>/<author>/<novel>/<novel>.epub`** (library defaults
-  to `Documents/lightnovels`); volumes are `<novel> - Vol NN.epub` in the novel
-  folder. See `core::paths`.
+  replace means the file is locked -> mark export `pending`, retry next cycle.
+- **Filename sanitization is mandatory** on Windows (strip `<>:"/\|?*`,
+  trailing dots/spaces, reserved names).
+- **Output layout: `<library>/<author>/<novel>/<novel>.epub`** (library
+  defaults to `Documents/lightnovels`); volumes are `<novel> - Vol NN.epub` in
+  the novel folder. See `core::paths`.
 - Config: global flat `config.ini` (defaults) + per-novel overrides in the DB.
 
 ## Site quick reference
@@ -96,180 +73,100 @@ rationale; this file is the short rules-of-the-road.
   Server-rendered; ToC paginated `?page=N` (~50/page); chapter URLs
   `/<slug>/chapter-<n>-<slug>.html`; content `div#chapter-content.chapter-c`
   (strip `div.ads*`); metadata/cover `og:novel:*` + `og:image`; status "1"/"2".
-- **freewebnovel.com** (hand-written `freewebnovel` adapter, Tier 2 curl):
-  AJAX/JS ToC (no scrapable pagination), so discovery reads `data-total-chapters`
-  and generates sequential `/novel/<slug>/chapter-<n>` URLs from one request;
-  chapter title comes from the chapter page `<title>`; content `.txt`; metadata
-  `og:novel:*`; status word form ("Completed"/"Ongoing").
-- **lightnovelworld.org** (hand-written `lightnovelworld` adapter, Tier 1):
-  JS-rendered ToC, so discovery reads the total from `og:title` ("… - N
-  Chapters") and generates sequential `/novel/<slug>/chapter/<n>/` URLs.
-  Metadata from page elements (`h1.novel-title`, `p.novel-author` — text after
-  the "Author:" label, so authors without a profile link still parse,
-  `.status-badge`) + `og:image` — NOT `og:novel:*`. Content `#chapterText`;
-  `data-protected` is JS copy-blocking only (prose is plain `<p>` text, no
-  decoys observed). **Its `/chapter/N/` id sequence has 404 holes** (deleted/
-  merged chapters), so the generated 1..N range hits dead URLs — handled by the
-  404-gap logic above, not a bug.
-- **royalroad.com** (hand-written `royalroad` adapter, Tier 1): whole chapter
-  list is a `window.chapters = [...]` JSON array in the fiction page (parsed with
-  serde_json) — 1-request discovery, but chapter URLs use non-sequential DB ids
-  so the list must be read, not generated. Metadata: `<title>` (minus
-  "| Royal Road"), `twitter:creator`, `og:image`, status from a `span.label`.
-  Content `.chapter-inner`; **decoy paragraphs** are filtered — a `<style>` marks
-  a randomized class `display:none` and decoy `<p>`s use it, so collect those
+- **freewebnovel.com** (hand-written adapter, Tier 2 curl): AJAX/JS ToC (no
+  scrapable pagination), so discovery reads `data-total-chapters` and generates
+  sequential `/novel/<slug>/chapter-<n>` URLs from one request; chapter title
+  from the chapter page `<title>`; content `.txt`; metadata `og:novel:*`;
+  status word form ("Completed"/"Ongoing").
+- **lightnovelworld.org** (hand-written adapter, Tier 1): JS-rendered ToC, so
+  discovery reads the total from `og:title` ("… - N Chapters") and generates
+  sequential `/novel/<slug>/chapter/<n>/` URLs. Metadata from page elements
+  (`h1.novel-title`, `p.novel-author` — text after the "Author:" label, so
+  authors without a profile link still parse, `.status-badge`) + `og:image` —
+  NOT `og:novel:*`. Content `#chapterText`; `data-protected` is JS
+  copy-blocking only (prose is plain `<p>` text, no decoys observed). **Its
+  `/chapter/N/` id sequence has 404 holes** (deleted/merged chapters), so the
+  generated 1..N range hits dead URLs — handled by the 404-gap logic above,
+  not a bug.
+- **royalroad.com** (hand-written adapter, Tier 1): whole chapter list is a
+  `window.chapters = [...]` JSON array in the fiction page (serde_json) —
+  1-request discovery, but chapter URLs use non-sequential DB ids so the list
+  must be read, not generated. Metadata: `<title>` (minus "| Royal Road"),
+  `twitter:creator`, `og:image`, status from a `span.label`. Content
+  `.chapter-inner`; **decoy paragraphs** are filtered — a `<style>` marks a
+  randomized class `display:none` and decoy `<p>`s use it, so collect those
   classes and skip matching paragraphs.
-- **scribblehub.com** (hand-written `scribblehub` adapter, Tier 2 curl): the
-  hardest source. Cloudflare 403s without a full browser header set *and* a
-  `Referer` (so the curl tier sends both). ToC is a WordPress `admin-ajax.php`
-  **POST** (`action=wi_getreleases_pagination&pagenum=N&mypostid=<id>`), 15/page,
-  newest-first, `a.toc_a` links — an out-of-range page returns 403, so page count
-  is derived from the total (`span.cnt_toc`) and paging stops at it. Chapter URLs
-  use non-sequential ids and the "Chapter N" labels don't match the count, so
-  chapters are numbered by **position**, oldest-first. Series page gives
-  `#mypostid` + total; metadata `og:title` / `a[href*="/profile/"]` /
-  `span.rnd_stats` + `og:image` (minus `noimagefound`); content `#chp_raw`.
+- **scribblehub.com** (hand-written adapter, Tier 2 curl): the hardest source.
+  403s without a full browser header set *and* a `Referer` (the curl tier
+  sends both). ToC is a WordPress `admin-ajax.php` **POST**
+  (`action=wi_getreleases_pagination&pagenum=N&mypostid=<id>`), 15/page,
+  newest-first, `a.toc_a` links — an out-of-range page returns 403, so page
+  count is derived from the total (`span.cnt_toc`) and paging stops at it.
+  Chapter URLs use non-sequential ids and the "Chapter N" labels don't match
+  the count, so chapters are numbered by **position**, oldest-first. Series
+  page gives `#mypostid` + total; metadata `og:title` /
+  `a[href*="/profile/"]` / `span.rnd_stats` + `og:image` (minus
+  `noimagefound`); content `#chp_raw`.
 
 ## Build / Test / Run
 
-From the repo root:
-
-- Build: `cargo build`
-- Test: `cargo test` (unit tests live inline in `core`'s modules)
-- Run (subscription workflow, all DB-backed):
-  - `vesper subscribe <novel-url> [--force]` — register a novel + its primary
-    source. Blocks (pointing to `add-source`) if the title matches a novel you
-    already follow under a normalized comparison; `--force` overrides.
-  - `vesper add-source <novel> <novel-url>` — add a fallback source to an
-    existing novel (warns if the source's title differs under a *normalized*
-    compare — so an apostrophe/punctuation difference won't; proceeds anyway).
-  - `vesper subs [--gaps]` — list subscriptions (primary + fallback sources, and
-    any unfilled 404 gaps); `--gaps` shows only novels with missing chapters.
-  - `vesper refresh <novel|all>` — re-fetch a subscription's metadata (author,
-    cover, genre, status) from its primary source; chapters untouched. `all`
-    refreshes every subscription. (Fixes e.g. an author that was missing at
-    subscribe time, or a status flip.)
-  - `vesper fetch <novel> [--limit N]` — download missing chapters into the DB
-    (resume-aware; `<novel>` is an id or title; `--limit 0` = all missing).
-    Ctrl+C pauses gracefully: it stops after the current (already-saved) chapter,
-    prints a "Paused… resume with…" line, and exits 0. A second Ctrl+C hard-aborts.
-  - `vesper export <novel> [--out PATH]` — build an EPUB from stored chapters.
-  - `vesper unsubscribe <novel>` — remove a subscription (cascades chapters).
-  - `vesper sync [--limit N]` — sync ALL subscriptions (what the background task
-    runs). Single-instance lock: overlapping runs skip. Re-evaluates completion.
-  - `vesper prune [--retention-days N]` — purge exported chapters of
-    LikelyComplete novels (never un-exported chapters or ongoing novels).
-  - `vesper config` — show the config.ini path and current settings.
-  - `vesper status` — DB/log paths, per-novel state, last sync, recent log tail.
-  - `vesper profiles` — list loaded site profiles + the folder for custom ones.
-  - `vesper service install|uninstall|status [--interval-minutes N]` — manage
-    the Windows Task Scheduler job that runs `vesper sync`.
-  - `vesper list <novel-url>` — discovery check: walk the full ToC, report
-    count + first/last (no DB, no bodies fetched).
+- Build: `cargo build`. Test: `cargo test` (unit tests live inline in `core`'s
+  modules). `cargo test` does NOT rebuild the binary — run `cargo build` before
+  invoking `target/debug/vesper.exe`.
+- Full command reference: `README.md`. `<novel>` args accept an id or a title.
 - DB + `sync.lock` live at `%LOCALAPPDATA%/vesper/data/`.
-- Built binary: `target/debug/vesper.exe`
 - Live smoke test: export a few chapters from a novgo novel and validate the
   EPUB (unzip; check `mimetype` == `application/epub+zip`, `content.opf`, and
-  that chapter XHTML holds real prose). `cargo test` does NOT rebuild the
-  binary — run `cargo build` before invoking `target/debug/vesper.exe`.
+  that chapter XHTML holds real prose).
 
 ## Module map
 
 Cargo workspace, two crates under `crates/`:
 
 - `core` (lib `vesper-core`):
-  - `fetch` — `Fetcher` trait; Tier-1 `ReqwestFetcher` (adaptive per-host backoff
-    that grows on 429/503/`Retry-After` and relaxes on success, jitter, bounded
-    retries; browser UA + headers) and Tier-2 `CurlFetcher` (shells out to
-    `curl`; `get` sends a full browser header set + `Referer`, and `post` sends a
-    form-encoded AJAX POST — both needed by scribblehub). `FetchConfig` tunes
-    base/max delay and retry count. Both tiers return a typed `NotFound` on
-    HTTP 404/410 (`is_not_found` is chain-aware) so sync can tell a permanent
-    hole from a transient failure. A missing `curl` yields an actionable error.
+  - `fetch` — `Fetcher` trait; Tier-1 `ReqwestFetcher` (adaptive per-host
+    backoff, jitter, bounded retries) and Tier-2 `CurlFetcher` (GET with full
+    browser headers + `Referer`; form-encoded POST). Both return a typed
+    `NotFound` on 404/410 (`is_not_found` is chain-aware) so sync can tell a
+    permanent hole from a transient failure.
   - `source` — `Source` trait, declarative `SiteProfile`, `GenericSource`
-    adapter, and shared HTML extraction (`parse_novel_meta`, `parse_chapter_body`,
-    status parsing) reused by hand-written adapters. Keep parsing synchronous so
-    the non-`Send` `scraper::Html` never crosses an `.await`.
-  - `freewebnovel` — hand-written `FreewebnovelSource` (AJAX-ToC site). Reuses
-    the shared extractors; discovery generates sequential chapter URLs.
-  - `lightnovelworld` — hand-written `LightNovelWorldSource` (JS-ToC site).
-    Element-based metadata (no `og:novel:*`); author from `p.novel-author` (strips
-    the "Author:" label so link-less authors parse too); discovery generates
-    sequential `/chapter/<n>/` URLs from the count in `og:title`; content
-    `#chapterText`.
-  - `royalroad` — hand-written `RoyalRoadSource`. Discovery parses the
-    `window.chapters` JSON array (serde_json); content `.chapter-inner` with
-    `display:none` decoy `<p>`s filtered out.
-  - `scribblehub` — hand-written `ScribbleHubSource` (curl tier). Discovery POSTs
-    the `admin-ajax.php` ToC pages (newest-first, stops at the `span.cnt_toc`
-    total to avoid an out-of-range 403); chapters numbered by position,
-    oldest-first; content `#chp_raw`.
-  - `profiles` — `SiteProfile`s: built-in (novgo) plus user `.ini` files loaded
-    from `<config_dir>/profiles/` (`all()` merges them; self-documents via a
-    generated README; bad files skipped with a warning). `crate::build_source`
-    (in lib.rs) resolves a URL to its adapter + fetch tier by host.
-  - `model` — domain types (`NovelMeta`, `ChapterRef`, `Chapter`, `NovelStatus`).
-  - `epub` — EPUB packaging (reconstructed XHTML; atomic temp-file+rename;
-    embeds a downloaded cover image and the genre as `dc:subject`; adds a front
-    "Missing Chapters" page when the novel has 404 gaps).
-  - `paths` — library layout (`epub_path`, `novel_dir`): author/novel/epub tree.
-  - `store` — SQLite persistence (`Store`, `StoredNovel`): novels/sources/chapters
-    /chapter_gaps schema, WAL, resume-aware chapter insert, DB-backed load for
-    export, gap record/clear/list, novel-meta refresh, and normalized-title lookup
-    (`find_novel_by_normalized_title`, for subscribe dedup). rusqlite pinned to 0.31
-    (cfg_select workaround). Connection is not `Send`, so the CLI uses a
-    current-thread runtime.
-  - `config` — `Config`: flat `config.ini` (`<config_dir>/config.ini`),
-    self-generating with commented defaults; tolerant reads (escape-disabled so
-    Windows `C:\` paths round-trip). Drives output_dir, delays, retention/grace/
-    recheck days, auto_export/auto_append, split_every_chapters, poll interval,
-    log_path.
-  - `sync` — `sync_novel`: the shared multi-source engine used by both `fetch`
-    and the scheduled `sync`. Backfilling walks the full ToC; a caught-up (Live)
-    novel does a cheap delta check (landing page) with a full-walk fallback on a
-    gap. Gap-fills missing chapters from the highest-priority source (primary
-    authoritative), upgrades fallback-sourced chapters once the primary catches
-    up, drives the Backfilling->Live transition, returns a `SyncReport`. A number
-    the **primary** 404s is recorded as a gap and no longer blocks Backfilling->Live
-    (`target ⊆ have ∪ gaps`), so a dead URL can't wedge a novel; the gap is kept
-    even when a fallback fills the chapter, so the upgrade pass skips it (no futile
-    re-fetch of a permanent primary hole). `SyncReport.gaps` carries only *unfilled*
-    gaps (the user-facing missing set); the primary providing it clears the gap.
-    Reports progress via a structured `SyncProgress` callback (per-chapter `done/total`),
-    which the CLI renders as a single in-place `n/m` line rather than a line per
-    chapter. The callback returns a `ControlFlow`; `Break` stops the pass cleanly
-    after the current (already-committed) chapter and sets `SyncReport.interrupted`
-    (how the CLI turns Ctrl+C into a resumable pause; an interrupted backfill does
-    not transition to Live).
+    adapter, shared HTML extraction reused by hand-written adapters. Keep
+    parsing synchronous so the non-`Send` `scraper::Html` never crosses an
+    `.await`.
+  - `freewebnovel` / `lightnovelworld` / `royalroad` / `scribblehub` —
+    hand-written adapters (site details above).
+  - `profiles` — built-in profiles plus user `.ini` files from
+    `<config_dir>/profiles/` (bad files skipped with a warning).
+    `crate::build_source` (lib.rs) resolves a URL to adapter + fetch tier.
+  - `model` — domain types (`NovelMeta`, `ChapterRef`, `Chapter`,
+    `NovelStatus`).
+  - `epub` — EPUB packaging: reconstructed XHTML, atomic temp-file+rename,
+    cover + `dc:subject` genre, "Missing Chapters" page for 404 gaps.
+  - `paths` — library layout (`epub_path`, `novel_dir`).
+  - `store` — SQLite persistence: novels/sources/chapters/chapter_gaps schema,
+    WAL, resume-aware insert, gap record/clear/list, normalized-title lookup.
+    rusqlite pinned to 0.31 (cfg_select workaround). Connection is not `Send`,
+    so the CLI uses a current-thread runtime.
+  - `config` — flat self-generating `config.ini`; tolerant, escape-disabled
+    reads so Windows `C:\` paths round-trip.
+  - `sync` — `sync_novel`, the shared multi-source engine behind both `fetch`
+    and `sync`. Backfilling walks the full ToC; a Live novel does a cheap delta
+    check with full-walk fallback. Gap-fills from fallbacks, upgrades
+    fallback-sourced chapters once the primary catches up, drives
+    Backfilling->Live, returns a `SyncReport` (`.gaps` = unfilled only).
+    Progress goes through a `SyncProgress` callback returning `ControlFlow`;
+    `Break` stops cleanly after the current committed chapter and sets
+    `SyncReport.interrupted` (how Ctrl+C becomes a resumable pause; an
+    interrupted backfill does not transition to Live).
   - `util` — filename sanitization, chapter number/title parsing, `now_unix`.
 - `cli` (bin `vesper`): clap subcommands on a current-thread Tokio runtime.
-  subscribe / add-source / subs / refresh / fetch / export / unsubscribe / sync /
-  prune / service / config / status / profiles / list. `sync` takes a single-instance
-  advisory file lock (`fs2` — `LockFileEx` on Windows, `flock` on Unix, so
-  overlapping runs skip on every platform) and appends to a log file. A `ProgressBar`
-  helper draws the in-place `n/m` fetch counter on stderr, but only when stderr
-  is a terminal (piped/redirected/windowless runs stay clean); set
-  `VESPER_FORCE_PROGRESS` to force it on. `fetch` also spawns a `tokio::signal::
-  ctrl_c` watcher that flips a shared flag so the progress callback returns
-  `Break` on Ctrl+C — a graceful, resumable pause.
-  - `cli::service` — `ServiceManager` trait with an impl per OS: Windows Task
-    Scheduler (`schtasks`), Linux systemd *user* timer (`systemctl --user`), and
-    macOS launchd agent (`launchctl`) — all per-user, no elevation. The generated
-    unit/plist content is pure and unit-tested on every platform; only the
-    scheduler glue is OS-gated. On Windows, install registers
-    `wscript.exe <sync-hidden.vbs>` so the periodic run is windowless (no console
-    flash); the VBS is generated in the data dir and removed on uninstall (the
-    systemd/launchd runs are inherently console-less).
-
-All planned phases are implemented (design docs -> EPUB pipeline -> storage ->
-multi-source + active fallback -> scheduled sync -> state machine/delta ->
-retention -> config/auto-export), four hand-written adapters (freewebnovel,
-lightnovelworld, royalroad, scribblehub) validate the Source + Fetcher
-abstractions (spanning AJAX/JS ToCs, embedded-JSON chapter lists, decoy-paragraph
-filtering, and POST-based pagination), and the polish items
-(windowless task, fallback content upgrade, external profiles) plus the wrap-up
-pass (cover + genre embedding, status command + logging, reduced poll cadence,
-verified auto_append, cross-platform service impls) are done, and CI (GitHub
-Actions) builds/tests on ubuntu/macos/windows — which verified the Linux/macOS
-service impls. Nothing functional is outstanding; zstd and same-site-name
-disambiguation are documented decisions against.
+  `sync` takes a single-instance advisory file lock (`fs2`) and appends to a
+  log file. The in-place `n/m` progress line draws only when stderr is a
+  terminal (`VESPER_FORCE_PROGRESS` forces it). `fetch` watches
+  `tokio::signal::ctrl_c` and flips the flag that makes the progress callback
+  return `Break`.
+  - `cli::service` — `ServiceManager` trait, one impl per OS (`schtasks` /
+    `systemctl --user` / `launchctl`). Generated unit/plist content is pure and
+    unit-tested everywhere; only the scheduler glue is OS-gated. On Windows the
+    task runs through a generated `wscript.exe` VBS wrapper so it's windowless;
+    the VBS is removed on uninstall.
