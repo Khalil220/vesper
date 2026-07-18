@@ -14,3 +14,6 @@ tokio = { version = "1", features = ["macros", "rt", "signal"] }
 clap = { version = "4", features = ["derive"] }
 directories = "5"
 anyhow = "1"
+# Local-time log timestamps (DST-correct via the OS); `clock` is the only
+# feature we need. Kept out of `core`, which stays date-crate-free.
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }

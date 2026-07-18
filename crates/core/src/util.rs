@@ -57,26 +57,6 @@ pub fn now_unix() -> i64 {
         .unwrap_or(0)
 }
 
-/// Format Unix seconds as a human-readable UTC timestamp `YYYY-MM-DD HH:MM:SSZ`,
-/// without pulling in a date crate. Uses Howard Hinnant's civil-from-days.
-pub fn format_unix_utc(secs: i64) -> String {
-    let days = secs.div_euclid(86_400);
-    let rem = secs.rem_euclid(86_400);
-    let (hh, mm, ss) = (rem / 3600, (rem % 3600) / 60, rem % 60);
-
-    let z = days + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = if month <= 2 { y + 1 } else { y };
-    format!("{year:04}-{month:02}-{d:02} {hh:02}:{mm:02}:{ss:02}Z")
-}
-
 /// Strip a leading "Chapter N -/–/:" prefix from a table-of-contents link's
 /// text, leaving just the chapter's actual name. ToC entries look like
 /// "Chapter 1 - Cultivation Online"; we render our own "Chapter N:" prefix, so
@@ -176,15 +156,6 @@ mod tests {
         assert_eq!(clean_chapter_title("Chapter 5"), "Chapter 5");
         // Not a chapter-prefixed title -> unchanged.
         assert_eq!(clean_chapter_title("Prologue"), "Prologue");
-    }
-
-    #[test]
-    fn formats_unix_utc() {
-        assert_eq!(format_unix_utc(0), "1970-01-01 00:00:00Z");
-        // 2021-01-01 00:00:00 UTC = 1609459200
-        assert_eq!(format_unix_utc(1_609_459_200), "2021-01-01 00:00:00Z");
-        // 2024-02-29 12:34:56 UTC (leap day) = 1709210096
-        assert_eq!(format_unix_utc(1_709_210_096), "2024-02-29 12:34:56Z");
     }
 
     #[test]
