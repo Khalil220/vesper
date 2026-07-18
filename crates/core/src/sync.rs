@@ -187,12 +187,15 @@ pub async fn sync_novel(
     // than a line per chapter, which would be unusable for a big backfill).
     let total = to_fetch.len();
     for (i, num) in to_fetch.into_iter().enumerate() {
+        let known_gap = gaps.contains(&num);
         let mut done = false;
         let mut attempted = false;
-        let mut only_not_found = true;
+        let mut primary_404 = false;
+        let mut primary_ok = false;
         for (idx, (meta, src, map)) in discovered.iter().enumerate() {
             let Some(cref) = map.get(&num) else { continue };
             attempted = true;
+            let is_primary = meta.priority == 1;
             match src.fetch_chapter(cref).await {
                 Ok(chapter) => {
                     if store.insert_chapter_if_absent(novel_id, meta.id, &chapter)? {
@@ -201,34 +204,41 @@ pub async fn sync_novel(
                             report.from_fallback += 1;
                         }
                     }
+                    if is_primary {
+                        primary_ok = true;
+                    }
                     done = true;
                     break;
                 }
                 Err(e) => {
-                    // A 404 is a permanent hole; anything else is transient.
-                    if !is_not_found(&e) {
-                        only_not_found = false;
+                    if is_primary && is_not_found(&e) {
+                        primary_404 = true;
                     }
-                    report.warnings.push(format!(
-                        "ch.{num} from {} failed: {e}; trying next source",
-                        meta.name
-                    ));
+                    // Re-probing an already-known gap on every full walk shouldn't
+                    // re-spam; only warn about a newly-seen failure.
+                    if !known_gap {
+                        report.warnings.push(format!(
+                            "ch.{num} from {} failed: {e}; trying next source",
+                            meta.name
+                        ));
+                    }
                 }
             }
         }
-        if done {
-            // Filled — clear any prior gap (site restored it, or a fallback had it).
+        // A gap means the *primary* can't provide this chapter (permanent 404).
+        // Recorded even when a fallback fills it, so the upgrade pass below stops
+        // re-trying the primary for it every sync.
+        if primary_ok {
             if gaps.remove(&num) {
                 store.clear_gap(novel_id, num)?;
             }
-        } else if attempted && only_not_found {
-            // Every source that lists this number returned 404: a real gap. This
-            // no longer wedges completion, but it's recorded so it stays visible.
+        } else if primary_404 {
             if gaps.insert(num) {
                 store.record_gap(novel_id, num)?;
             }
-        } else if attempted {
-            // Transient failure — leave it to retry next pass.
+        }
+        if !done && !primary_404 && attempted {
+            // Couldn't fetch and it isn't a primary hole => transient; retry next.
             report.failures.push(num);
         }
         // The chapter just fetched is already committed, so stopping here is safe
@@ -246,7 +256,13 @@ pub async fn sync_novel(
     // Skipped when the fetch was interrupted — the user asked to stop.
     if !report.interrupted {
         if let Some((pmeta, psrc, pmap)) = discovered.iter().find(|(m, _, _)| m.priority == 1) {
-            let upgradable = store.chapters_from_other_sources(novel_id, pmeta.id)?;
+            // Skip chapters the primary is a known 404 hole for — upgrading them is
+            // permanently futile (that was the "upgrade of ch.N failed" spam).
+            let upgradable: Vec<u32> = store
+                .chapters_from_other_sources(novel_id, pmeta.id)?
+                .into_iter()
+                .filter(|n| !gaps.contains(n))
+                .collect();
             let up_total = upgradable.len();
             for (i, num) in upgradable.into_iter().enumerate() {
                 let Some(cref) = pmap.get(&num) else { continue };
@@ -258,6 +274,13 @@ pub async fn sync_novel(
                     Ok(chapter) => {
                         store.update_chapter_content(novel_id, pmeta.id, &chapter)?;
                         report.upgraded += 1;
+                    }
+                    Err(e) if is_not_found(&e) => {
+                        // The primary permanently lacks this (it's fallback-filled);
+                        // record the gap so future syncs skip it, and stay quiet.
+                        if gaps.insert(num) {
+                            store.record_gap(novel_id, num)?;
+                        }
                     }
                     Err(e) => report.warnings.push(format!(
                         "upgrade of ch.{num} from {} failed: {e}",
@@ -280,14 +303,12 @@ pub async fn sync_novel(
     // - A non-backfilling novel that fetched something is (still) Live — activity
     //   overrides a prior LikelyComplete. With nothing new, its state is left
     //   unchanged; Live -> LikelyComplete is decided by `reevaluate_completion`.
+    let now_have = store.stored_chapter_numbers(novel_id)?;
     let new_state = if is_backfilling {
-        let now_have = store.stored_chapter_numbers(novel_id)?;
         // Complete once every target chapter is either stored or a known gap. A
         // permanent 404 hole would otherwise wedge the novel in Backfilling
         // forever (and so never auto-export).
-        let outstanding = target
-            .difference(&now_have)
-            .any(|n| !gaps.contains(n));
+        let outstanding = target.difference(&now_have).any(|n| !gaps.contains(n));
         if !target.is_empty() && !outstanding {
             DerivedState::Live
         } else {
@@ -302,7 +323,9 @@ pub async fn sync_novel(
         store.set_derived_state(novel_id, new_state)?;
     }
     report.new_state = new_state;
-    report.gaps = gaps.into_iter().collect();
+    // Report only *unfilled* gaps as missing — a gap filled from a fallback is a
+    // primary hole but not a missing chapter, so it shouldn't surface to the user.
+    report.gaps = gaps.iter().copied().filter(|n| !now_have.contains(n)).collect();
 
     Ok(report)
 }
@@ -570,7 +593,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn gap_is_filled_from_fallback_not_recorded() {
+    async fn gap_filled_from_fallback_is_recorded_but_not_surfaced() {
         let store = Store::open_in_memory().unwrap();
         let id = subscribe(&store);
         store.add_source(id, "fallback", "https://fallback.example/n").unwrap();
@@ -591,9 +614,58 @@ mod tests {
 
         assert_eq!(report.newly_fetched, 5);
         assert_eq!(report.from_fallback, 1, "ch.3 came from the fallback");
-        assert!(report.gaps.is_empty(), "the hole was filled, so it's not a gap");
-        assert!(store.gaps(id).unwrap().is_empty());
+        // ch.3 is a primary 404 hole, so it's recorded (so upgrades skip it)...
+        assert_eq!(store.gaps(id).unwrap().into_iter().collect::<Vec<_>>(), vec![3]);
+        // ...but it's filled from the fallback, so it isn't a *missing* chapter.
+        assert!(report.gaps.is_empty(), "filled, so nothing is surfaced as missing");
+        assert!(store.unfilled_gaps(id).unwrap().is_empty());
         assert_eq!(report.new_state, DerivedState::Live);
+    }
+
+    #[tokio::test]
+    async fn primary_hole_filled_from_fallback_is_not_re_upgraded() {
+        let store = Store::open_in_memory().unwrap();
+        let id = subscribe(&store);
+        store.add_source(id, "fallback", "https://fallback.example/n").unwrap();
+        // Primary is a 404 hole at ch.2; the fallback has it.
+        let backfill = pair(
+            &store,
+            id,
+            vec![
+                Box::new(MockSource::new("primary", &[1, 3]).with_holes(&[2])),
+                Box::new(MockSource::new("fallback", &[1, 2, 3])),
+            ],
+        );
+        let r1 = sync_novel(&store, id, DerivedState::Backfilling, &backfill, 0, |_| {
+            ControlFlow::Continue(())
+        })
+        .await
+        .unwrap();
+        assert_eq!(r1.from_fallback, 1, "ch.2 filled from fallback");
+        assert_eq!(store.gaps(id).unwrap().into_iter().collect::<Vec<_>>(), vec![2]);
+        assert_eq!(r1.upgraded, 0);
+
+        // The next sync must NOT keep trying to upgrade ch.2 to the primary — that
+        // permanent 404 was the "upgrade of ch.N failed" spam.
+        let again = pair(
+            &store,
+            id,
+            vec![
+                Box::new(MockSource::new("primary", &[1, 3]).with_holes(&[2])),
+                Box::new(MockSource::new("fallback", &[1, 2, 3])),
+            ],
+        );
+        let r2 = sync_novel(&store, id, DerivedState::Live, &again, 0, |_| {
+            ControlFlow::Continue(())
+        })
+        .await
+        .unwrap();
+        assert_eq!(r2.upgraded, 0);
+        assert!(
+            !r2.warnings.iter().any(|w| w.contains("upgrade")),
+            "no futile upgrade attempt: {:?}",
+            r2.warnings
+        );
     }
 
     #[tokio::test]

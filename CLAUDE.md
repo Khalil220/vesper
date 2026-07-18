@@ -9,7 +9,7 @@ profile; hand-written freewebnovel, lightnovelworld, royalroad + scribblehub
 adapters), a second fetch tier (curl, with POST support), a windowless scheduled
 task, fallback content upgrade, external config-driven profiles, EPUB cover +
 genre embedding, and a status command + sync logging are in place and tested
-(68 unit + 4 CLI tests). Linux/macOS service
+(69 unit + 4 CLI tests). Linux/macOS service
 impls are verified in CI (GitHub Actions builds/tests on ubuntu/macos/windows and
 round-trips the service install). See `DESIGN.md` for the full decisions and
 rationale; this file is the short rules-of-the-road.
@@ -58,15 +58,20 @@ rationale; this file is the short rules-of-the-road.
   *hint*; observed activity is authoritative. New chapters observed => Ongoing,
   overriding any "completed" label. The label only lowers poll cadence; never
   stop polling until unsubscribed. Hiatus != completed.
-- **404 gaps don't wedge completion.** A chapter that returns a permanent 404
-  (distinguished from transient 5xx/timeout via `fetch::NotFound`) is recorded in
-  `chapter_gaps` and treated as "accounted for" so a novel still reaches
-  Live/auto-exports instead of backfilling forever on a dead URL. Gaps are
-  **surfaced**, not hidden: `subs`/`status` list them, a manual run prints a note,
-  the log records them, and the EPUB gets a front "Missing Chapters" page. They're
-  re-probed on later full walks and gap-filled from a fallback (adding a source to
-  a gapped novel re-opens its backfill). This matters most for URL-generating
-  adapters (lightnovelworld, freewebnovel) whose id sequences can have holes.
+- **404 gaps don't wedge completion.** A `chapter_gaps` row means the **primary**
+  source returned a permanent 404 for that number (via `fetch::NotFound`, distinct
+  from transient 5xx/timeout). It's treated as "accounted for" (`target ⊆ have ∪
+  gaps`) so a novel reaches Live/auto-exports instead of backfilling forever on a
+  dead URL. A gap is recorded **even when a fallback fills the chapter** — that's
+  how the content-upgrade pass knows to *stop* re-fetching the primary for it every
+  sync (the old "upgrade of ch.N failed" spam). User-facing surfaces show only
+  **unfilled** gaps (`store::unfilled_gaps` = recorded gap AND not stored): `subs`
+  /`status` list them, `subs --gaps` filters to novels that have them, a manual run
+  prints a note, and the EPUB gets a front "Missing Chapters" page. Re-probing a
+  known gap on a full walk is silent (no repeated warning). Gaps are gap-filled from
+  a fallback (adding a source to a gapped novel re-opens its backfill). Matters most
+  for URL-generating adapters (lightnovelworld, freewebnovel) whose id sequences
+  have holes.
 - **Retention resolves delete-vs-append:** ongoing novels keep chapters in the
   DB (so append = regenerate-from-DB); only *Likely complete* novels (labeled
   complete AND observably quiet for the grace window AND finally exported) get
@@ -132,11 +137,14 @@ From the repo root:
 - Build: `cargo build`
 - Test: `cargo test` (unit tests live inline in `core`'s modules)
 - Run (subscription workflow, all DB-backed):
-  - `vesper subscribe <novel-url>` — register a novel + its primary source.
+  - `vesper subscribe <novel-url> [--force]` — register a novel + its primary
+    source. Blocks (pointing to `add-source`) if the title matches a novel you
+    already follow under a normalized comparison; `--force` overrides.
   - `vesper add-source <novel> <novel-url>` — add a fallback source to an
-    existing novel (warns if the source's title differs; proceeds anyway).
-  - `vesper subs` — list subscriptions (shows primary + fallback sources, and any
-    404 gaps).
+    existing novel (warns if the source's title differs under a *normalized*
+    compare — so an apostrophe/punctuation difference won't; proceeds anyway).
+  - `vesper subs [--gaps]` — list subscriptions (primary + fallback sources, and
+    any unfilled 404 gaps); `--gaps` shows only novels with missing chapters.
   - `vesper refresh <novel|all>` — re-fetch a subscription's metadata (author,
     cover, genre, status) from its primary source; chapters untouched. `all`
     refreshes every subscription. (Fixes e.g. an author that was missing at
@@ -221,10 +229,12 @@ Cargo workspace, two crates under `crates/`:
     novel does a cheap delta check (landing page) with a full-walk fallback on a
     gap. Gap-fills missing chapters from the highest-priority source (primary
     authoritative), upgrades fallback-sourced chapters once the primary catches
-    up, drives the Backfilling->Live transition, returns a `SyncReport`. A chapter
-    that 404s from every source is recorded as a gap (`SyncReport.gaps`) and no
-    longer blocks the Backfilling->Live transition (`target ⊆ have ∪ gaps`), so a
-    dead URL can't wedge a novel; a filled/reappeared chapter clears its gap.
+    up, drives the Backfilling->Live transition, returns a `SyncReport`. A number
+    the **primary** 404s is recorded as a gap and no longer blocks Backfilling->Live
+    (`target ⊆ have ∪ gaps`), so a dead URL can't wedge a novel; the gap is kept
+    even when a fallback fills the chapter, so the upgrade pass skips it (no futile
+    re-fetch of a permanent primary hole). `SyncReport.gaps` carries only *unfilled*
+    gaps (the user-facing missing set); the primary providing it clears the gap.
     Reports progress via a structured `SyncProgress` callback (per-chapter `done/total`),
     which the CLI renders as a single in-place `n/m` line rather than a line per
     chapter. The callback returns a `ControlFlow`; `Break` stops the pass cleanly

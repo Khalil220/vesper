@@ -426,6 +426,18 @@ Verified by probing during design:
   gapped novel re-opens its backfill for exactly that. Verified end-to-end on a
   real library: three wedged novels (1, 2, and 10 holes) went Live and exported,
   each EPUB carrying its notice page.
+  - **Refinement after live use (the "messy sync output").** Once those novels got
+    a freewebnovel fallback that *filled* the holes, sync spewed contradictory
+    noise: for each hole, the fetch pass logged the primary 404 (before silently
+    succeeding from the fallback), then the content-upgrade pass logged the *same*
+    404 again trying to upgrade the fallback chapter back to the primary — which is
+    a permanent hole, so it would re-fail every sync forever. Fix: a gap now means
+    "the **primary** 404s this number" (recorded even when a fallback fills it), the
+    upgrade pass **skips** numbers that are primary-gaps, and re-probing a known gap
+    is silent. User-facing surfaces show only *unfilled* gaps
+    (`store::unfilled_gaps`), so a fallback-filled hole is no longer reported as
+    missing (no false EPUB notice, no `subs` gap line). Added `subs --gaps` to list
+    only novels with still-missing chapters.
 - **Metadata refresh (`vesper refresh`).** Novel metadata (author, cover, genre,
   status hint) is captured once at subscribe time, so anything missing or wrong
   then stays that way. `refresh` re-fetches it from the primary source and updates
@@ -448,9 +460,12 @@ Verified by probing during design:
   stops with a message pointing at `vesper add-source <id> <url>`; `--force`
   overrides for a genuinely distinct novel. Normalized matching catches the same
   title across sites, not a different translation — no universal cross-site id
-  exists — but it removes the common accidental fork. Also: the `<novel>` selector
-  for id-or-title commands is an id *or the exact title* (quoted if it has spaces,
-  since it's one arg); the help now says so and steers toward the id from `subs`.
+  exists — but it removes the common accidental fork. `add-source`'s "different
+  title" warning uses the same normalized compare, so a curly-vs-straight
+  apostrophe (or any punctuation/spacing difference between sites) no longer trips a
+  spurious warning. Also: the `<novel>` selector for id-or-title commands is an id
+  *or the exact title* (quoted if it has spaces, since it's one arg); the help now
+  says so and steers toward the id from `subs`.
 - **Genre metadata.** Captured from `og:novel:genre` (novgo, freewebnovel),
   stored on the novel, emitted as EPUB `dc:subject`. lightnovelworld leaves it
   `None` (genre is only in its JSON-LD, which we don't parse).

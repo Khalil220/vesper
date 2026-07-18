@@ -54,7 +54,11 @@ enum Command {
         delay_ms: Option<u64>,
     },
     /// List all subscriptions.
-    Subs,
+    Subs {
+        /// Show only novels that have missing (unavailable) chapters.
+        #[arg(long)]
+        gaps: bool,
+    },
     /// Re-fetch a subscription's metadata (author, cover, genre, status) from its
     /// primary source; stored chapters are left untouched.
     Refresh {
@@ -155,7 +159,7 @@ async fn main() -> Result<()> {
         Command::AddSource { novel, url, delay_ms } => {
             add_source(&config, novel, url, delay_ms).await
         }
-        Command::Subs => subs(),
+        Command::Subs { gaps } => subs(gaps),
         Command::Refresh { novel, delay_ms } => refresh(&config, novel, delay_ms).await,
         Command::Unsubscribe { novel } => unsubscribe(novel),
         Command::Fetch { novel, limit, delay_ms } => fetch(&config, novel, limit, delay_ms).await,
@@ -207,7 +211,7 @@ async fn export_novel(store: &Store, novel: &StoredNovel, config: &Config) -> Re
         Some(url) => download_cover(url).await,
         None => None,
     };
-    let gaps: Vec<u32> = store.gaps(novel.id)?.into_iter().collect();
+    let gaps: Vec<u32> = store.unfilled_gaps(novel.id)?.into_iter().collect();
     let mut paths = Vec::new();
 
     if config.split_every_chapters == 0 {
@@ -444,7 +448,11 @@ async fn add_source(config: &Config, novel: String, url: String, delay_ms: Optio
 
     eprintln!("Checking new source...");
     if let Ok(meta) = source.fetch_novel(&url).await {
-        if !meta.title.eq_ignore_ascii_case(&found.title) {
+        // Compare normalized (case/spacing/punctuation-insensitive) so a curly vs
+        // straight apostrophe — or any punctuation difference between sites —
+        // doesn't trip a spurious "different title" warning.
+        use vesper_core::util::normalize_title;
+        if normalize_title(&meta.title) != normalize_title(&found.title) {
             eprintln!(
                 "  warning: this source's title is \"{}\", but the novel is \"{}\". \
                  Proceeding since you asked to link them.",
@@ -458,7 +466,7 @@ async fn add_source(config: &Config, novel: String, url: String, delay_ms: Optio
 
     // If the novel has gaps, re-open its backfill so the next sync does a full
     // walk and tries to fill those holes from the new source.
-    if !store.gaps(found.id)?.is_empty() {
+    if !store.unfilled_gaps(found.id)?.is_empty() {
         store.set_derived_state(found.id, DerivedState::Backfilling)?;
         println!("  It has unavailable chapters; the next sync will try to fill them from this source.");
     }
@@ -528,21 +536,26 @@ async fn refresh(config: &Config, novel: String, delay_ms: Option<u64>) -> Resul
     Ok(())
 }
 
-fn subs() -> Result<()> {
+fn subs(gaps_only: bool) -> Result<()> {
     let store = Store::open_default()?;
     let novels = store.list_subscriptions()?;
     if novels.is_empty() {
         println!("No subscriptions yet. Add one with `vesper subscribe <url>`.");
         return Ok(());
     }
+    let mut shown = 0usize;
     for n in novels {
+        let gaps = store.unfilled_gaps(n.id)?;
+        if gaps_only && gaps.is_empty() {
+            continue;
+        }
+        shown += 1;
         let author = n.author.as_deref().unwrap_or("Unknown Author");
         let pending = if n.export_pending { ", export pending" } else { "" };
         println!(
             "#{}  {} — {}  [{} chapters, {}{pending}]",
             n.id, n.title, author, n.chapter_count, n.derived_state.as_str()
         );
-        let gaps = store.gaps(n.id)?;
         if !gaps.is_empty() {
             println!("    gaps: {}", describe_gaps(&gaps));
         }
@@ -554,6 +567,9 @@ fn subs() -> Result<()> {
             let role = if s.priority == 1 { "primary" } else { "fallback" };
             println!("    [{role}] {} — {} ({seen})", s.name, s.url);
         }
+    }
+    if gaps_only && shown == 0 {
+        println!("No subscriptions have missing chapters.");
     }
     Ok(())
 }
@@ -675,7 +691,7 @@ async fn export(config: &Config, novel: String, out: Option<PathBuf>) -> Result<
             Some(url) => download_cover(url).await,
             None => None,
         };
-        let gaps: Vec<u32> = store.gaps(found.id)?.into_iter().collect();
+        let gaps: Vec<u32> = store.unfilled_gaps(found.id)?.into_iter().collect();
         build_epub(&meta, &chapters, &out_path, cover.as_ref(), &gaps)?;
         store.mark_all_exported(found.id)?;
         println!("Exported {} chapters of \"{}\" to {}", chapters.len(), found.title, out_path.display());
@@ -857,7 +873,7 @@ fn status(config: &Config) -> Result<()> {
             "  #{} {} — {} chapters [{}{pending}]",
             n.id, n.title, n.chapter_count, n.derived_state.as_str()
         );
-        let gaps = store.gaps(n.id)?;
+        let gaps = store.unfilled_gaps(n.id)?;
         if !gaps.is_empty() {
             println!("      gaps: {}", describe_gaps(&gaps));
         }

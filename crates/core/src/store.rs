@@ -406,6 +406,23 @@ impl Store {
         Ok(set)
     }
 
+    /// Recorded gaps whose chapter is *not* stored from any source — i.e. truly
+    /// missing chapters (a gap filled from a fallback is excluded). This is what
+    /// the UI and EPUB notice should show.
+    pub fn unfilled_gaps(&self, novel_id: i64) -> Result<BTreeSet<u32>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT number FROM chapter_gaps
+             WHERE novel_id = ?1
+               AND number NOT IN (SELECT number FROM chapters WHERE novel_id = ?1)",
+        )?;
+        let rows = stmt.query_map(params![novel_id], |r| r.get::<_, i64>(0))?;
+        let mut set = BTreeSet::new();
+        for n in rows {
+            set.insert(n? as u32);
+        }
+        Ok(set)
+    }
+
     /// Mark a chapter number as a permanent gap (no-op if already recorded).
     pub fn record_gap(&self, novel_id: i64, number: u32) -> Result<()> {
         self.conn.execute(
