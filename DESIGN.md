@@ -327,6 +327,23 @@ Verified by probing during design:
   decoy `<p>`s that class, so the adapter collects the hidden classes and skips
   matching paragraphs (unit-tested; live pages sometimes define the class without
   injecting a decoy). Tier 1 (reqwest) — it doesn't fingerprint-block.
+- **Fifth source (scribblehub).** A fourth hand-written adapter and the hardest.
+  Cloudflare 403s the curl tier unless it sends a *full* browser header set
+  (`Sec-Fetch-*`, `sec-ch-ua*`, `Upgrade-Insecure-Requests`) **and** a `Referer`;
+  both were added to `CurlFetcher::get` (the `Referer` fix was what finally let
+  chapter pages through). The ToC is a WordPress `admin-ajax.php` **POST**
+  (`action=wi_getreleases_pagination&pagenum=N&mypostid=<id>`), which forced a new
+  `Fetcher::post` method — default-erroring on tiers that don't support it, real
+  only on `CurlFetcher` (form-encoded `-X POST --data`). Pages are 15 chapters,
+  newest-first (`a.toc_a`); an out-of-range page returns 403, so the adapter
+  derives the page count from the total (`span.cnt_toc`) and stops paging at it
+  rather than probing past the end. Chapter URLs use non-sequential ids and the
+  "Chapter N" labels don't track the count (prologues/interludes/side stories), so
+  chapters are numbered by **position**, oldest-first (the newest-first pages are
+  reversed). Series page yields `#mypostid` + total; metadata from `og:title`,
+  `a[href*="/profile/"]`, `span.rnd_stats`, `og:image` (minus `noimagefound`);
+  content `#chp_raw`. This adapter is what exercised the POST path in the Fetcher
+  abstraction.
 - **External config-driven profiles.** `SiteProfile` holds owned strings and
   exposes `chapter_marker` + `page_param`; generic sites are added via `.ini`
   files in `<config_dir>/profiles/` (required: name, host, content_selector).

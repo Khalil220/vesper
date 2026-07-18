@@ -4,11 +4,12 @@
 packages them into EPUBs. One binary, two faces: a CLI (control + export) and a
 lightweight background sync that keeps subscribed novels current.
 
-**Status: implemented (v1).** All planned phases plus four sources (novgo
-profile; hand-written freewebnovel, lightnovelworld + royalroad adapters), a
-second fetch tier (curl), a windowless scheduled task, fallback content upgrade,
-external config-driven profiles, EPUB cover + genre embedding, and a status
-command + sync logging are in place and tested (56 unit + 2 CLI tests). Linux/macOS service
+**Status: implemented (v1).** All planned phases plus five sources (novgo
+profile; hand-written freewebnovel, lightnovelworld, royalroad + scribblehub
+adapters), a second fetch tier (curl, with POST support), a windowless scheduled
+task, fallback content upgrade, external config-driven profiles, EPUB cover +
+genre embedding, and a status command + sync logging are in place and tested
+(59 unit + 2 CLI tests). Linux/macOS service
 impls are verified in CI (GitHub Actions builds/tests on ubuntu/macos/windows and
 round-trips the service install). See `DESIGN.md` for the full decisions and
 rationale; this file is the short rules-of-the-road.
@@ -39,10 +40,11 @@ rationale; this file is the short rules-of-the-road.
   content. Schema: `novels` / `sources` / `chapters` (see DESIGN.md).
 - **Tiered fetcher behind a trait.** Tier 1 = `ReqwestFetcher` (browser UA +
   headers); novgo needs only this. Tier 2 = `CurlFetcher` (shells out to system
-  `curl`, on Windows 10+), used for freewebnovel, whose Cloudflare challenges
-  reqwest's TLS fingerprint even though both use Schannel. `build_source` picks
-  the tier + adapter per host. Escalate further (`rquest`, headless browser)
-  only if a site needs it.
+  `curl`, on Windows 10+, and supports GET *and* form POST), used for
+  freewebnovel and scribblehub, whose Cloudflare challenges reqwest's TLS
+  fingerprint even though both use Schannel. `build_source` picks the tier +
+  adapter per host. Escalate further (`rquest`, headless browser) only if a site
+  needs it.
 - **Adaptive, per-host politeness:** modest delay + jitter, one request in
   flight per host, back off on 429/503, honor `Retry-After`, resume-on-disk.
   Parallelism only across distinct hosts. **No proxy-rotation / ban-evasion.**
@@ -94,6 +96,16 @@ rationale; this file is the short rules-of-the-road.
   Content `.chapter-inner`; **decoy paragraphs** are filtered — a `<style>` marks
   a randomized class `display:none` and decoy `<p>`s use it, so collect those
   classes and skip matching paragraphs.
+- **scribblehub.com** (hand-written `scribblehub` adapter, Tier 2 curl): the
+  hardest source. Cloudflare 403s without a full browser header set *and* a
+  `Referer` (so the curl tier sends both). ToC is a WordPress `admin-ajax.php`
+  **POST** (`action=wi_getreleases_pagination&pagenum=N&mypostid=<id>`), 15/page,
+  newest-first, `a.toc_a` links — an out-of-range page returns 403, so page count
+  is derived from the total (`span.cnt_toc`) and paging stops at it. Chapter URLs
+  use non-sequential ids and the "Chapter N" labels don't match the count, so
+  chapters are numbered by **position**, oldest-first. Series page gives
+  `#mypostid` + total; metadata `og:title` / `a[href*="/profile/"]` /
+  `span.rnd_stats` + `og:image` (minus `noimagefound`); content `#chp_raw`.
 
 ## Build / Test / Run
 
@@ -136,7 +148,9 @@ Cargo workspace, two crates under `crates/`:
   - `fetch` — `Fetcher` trait; Tier-1 `ReqwestFetcher` (adaptive per-host backoff
     that grows on 429/503/`Retry-After` and relaxes on success, jitter, bounded
     retries; browser UA + headers) and Tier-2 `CurlFetcher` (shells out to
-    `curl`). `FetchConfig` tunes base/max delay and retry count.
+    `curl`; `get` sends a full browser header set + `Referer`, and `post` sends a
+    form-encoded AJAX POST — both needed by scribblehub). `FetchConfig` tunes
+    base/max delay and retry count.
   - `source` — `Source` trait, declarative `SiteProfile`, `GenericSource`
     adapter, and shared HTML extraction (`parse_novel_meta`, `parse_chapter_body`,
     status parsing) reused by hand-written adapters. Keep parsing synchronous so
@@ -149,6 +163,10 @@ Cargo workspace, two crates under `crates/`:
   - `royalroad` — hand-written `RoyalRoadSource`. Discovery parses the
     `window.chapters` JSON array (serde_json); content `.chapter-inner` with
     `display:none` decoy `<p>`s filtered out.
+  - `scribblehub` — hand-written `ScribbleHubSource` (curl tier). Discovery POSTs
+    the `admin-ajax.php` ToC pages (newest-first, stops at the `span.cnt_toc`
+    total to avoid an out-of-range 403); chapters numbered by position,
+    oldest-first; content `#chp_raw`.
   - `profiles` — `SiteProfile`s: built-in (novgo) plus user `.ini` files loaded
     from `<config_dir>/profiles/` (`all()` merges them; self-documents via a
     generated README; bad files skipped with a warning). `crate::build_source`
@@ -184,8 +202,10 @@ Cargo workspace, two crates under `crates/`:
 
 All planned phases are implemented (design docs -> EPUB pipeline -> storage ->
 multi-source + active fallback -> scheduled sync -> state machine/delta ->
-retention -> config/auto-export), two hand-written adapters (freewebnovel,
-lightnovelworld) validate the Source + Fetcher abstractions, and the polish items
+retention -> config/auto-export), four hand-written adapters (freewebnovel,
+lightnovelworld, royalroad, scribblehub) validate the Source + Fetcher
+abstractions (spanning AJAX/JS ToCs, embedded-JSON chapter lists, decoy-paragraph
+filtering, and POST-based pagination), and the polish items
 (windowless task, fallback content upgrade, external profiles) plus the wrap-up
 pass (cover + genre embedding, status command + logging, reduced poll cadence,
 verified auto_append, cross-platform service impls) are done, and CI (GitHub

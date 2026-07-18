@@ -26,6 +26,13 @@ use tokio::time::sleep;
 #[async_trait]
 pub trait Fetcher: Send + Sync {
     async fn get(&self, url: &str) -> Result<String>;
+
+    /// POST a form-urlencoded body and return the response text. For AJAX ToC
+    /// endpoints (ScribbleHub). Default: unsupported — only the curl tier
+    /// implements it, since the sites that need POST also need that tier.
+    async fn post(&self, _url: &str, _form_body: &str) -> Result<String> {
+        bail!("POST is not supported by this fetch tier")
+    }
 }
 
 /// Default browser-like User-Agent. novgo serves us fine even without this, but
@@ -210,10 +217,31 @@ impl Fetcher for CurlFetcher {
                     "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
                     "-H",
                     "Accept-Language: en-US,en;q=0.9",
+                    "-H",
+                    "Upgrade-Insecure-Requests: 1",
+                    "-H",
+                    "Sec-Fetch-Dest: document",
+                    "-H",
+                    "Sec-Fetch-Mode: navigate",
+                    "-H",
+                    "Sec-Fetch-Site: none",
+                    "-H",
+                    "Sec-Fetch-User: ?1",
+                    "-H",
+                    "sec-ch-ua: \"Chromium\";v=\"126\", \"Google Chrome\";v=\"126\", \"Not.A/Brand\";v=\"24\"",
+                    "-H",
+                    "sec-ch-ua-mobile: ?0",
+                    "-H",
+                    "sec-ch-ua-platform: \"Windows\"",
                     "-w",
                     "\n%{http_code}",
-                    url,
                 ])
+                .arg("-H")
+                .arg(format!(
+                    "Referer: {}",
+                    host_of(url).map(|h| format!("https://{h}/")).unwrap_or_default()
+                ))
+                .arg(url)
                 .output()
                 .await
                 .context("running curl (is it installed and on PATH?)")?;
@@ -254,6 +282,77 @@ impl Fetcher for CurlFetcher {
                 );
             }
             bail!("GET {url} returned HTTP {code}");
+        }
+    }
+
+    async fn post(&self, url: &str, form_body: &str) -> Result<String> {
+        let referer = host_of(url)
+            .map(|h| format!("https://{h}/"))
+            .unwrap_or_default();
+        let mut attempt = 0u32;
+        loop {
+            sleep(self.config.base_delay + jitter(self.config.base_delay)).await;
+
+            let out = tokio::process::Command::new("curl")
+                .args([
+                    "-sS",
+                    "--compressed",
+                    "--http1.1",
+                    "--max-time",
+                    "30",
+                    "-A",
+                    DEFAULT_UA,
+                    "-H",
+                    "Accept: */*",
+                    "-H",
+                    "Accept-Language: en-US,en;q=0.9",
+                    "-H",
+                    "Content-Type: application/x-www-form-urlencoded; charset=UTF-8",
+                    "-H",
+                    "X-Requested-With: XMLHttpRequest",
+                    "-H",
+                    "Sec-Fetch-Dest: empty",
+                    "-H",
+                    "Sec-Fetch-Mode: cors",
+                    "-H",
+                    "Sec-Fetch-Site: same-origin",
+                    "-H",
+                    "sec-ch-ua: \"Chromium\";v=\"126\", \"Google Chrome\";v=\"126\", \"Not.A/Brand\";v=\"24\"",
+                    "-H",
+                    "sec-ch-ua-mobile: ?0",
+                    "-H",
+                    "sec-ch-ua-platform: \"Windows\"",
+                ])
+                .arg("-H")
+                .arg(format!("Referer: {referer}"))
+                .arg("--data")
+                .arg(form_body)
+                .args(["-X", "POST", "-w", "\n%{http_code}", url])
+                .output()
+                .await
+                .context("running curl (is it installed and on PATH?)")?;
+
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let (body, status) = stdout.rsplit_once('\n').unwrap_or((stdout.as_ref(), ""));
+            let code: u16 = status.trim().parse().unwrap_or(0);
+
+            if code / 100 == 2 {
+                return Ok(body.to_string());
+            }
+            let retryable = code == 0 || is_retryable_status(code);
+            if retryable && attempt < self.config.max_retries {
+                let wait = backoff_delay(self.config.base_delay, attempt, self.config.max_delay);
+                attempt += 1;
+                sleep(wait).await;
+                continue;
+            }
+            if code == 0 {
+                bail!(
+                    "curl POST failed for {url}: {}",
+                    String::from_utf8_lossy(&out.stderr).trim()
+                );
+            }
+            bail!("POST {url} returned HTTP {code}");
         }
     }
 }
