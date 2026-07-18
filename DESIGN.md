@@ -435,7 +435,9 @@ Verified by probing during design:
   `p.novel-author`), so such novels became "Unknown Author"; the adapter now reads
   the element text, and `refresh` fixes already-subscribed novels. Also useful for
   a status flip (Ongoing→Completed) or an upstream cover change. If the author
-  changes, a re-export moves the EPUB under the corrected author folder.
+  changes, a re-export moves the EPUB under the corrected author folder. `refresh
+  all` walks every subscription (one metadata request each) and reports which
+  authors changed.
 - **Genre metadata.** Captured from `og:novel:genre` (novgo, freewebnovel),
   stored on the novel, emitted as EPUB `dc:subject`. lightnovelworld leaves it
   `None` (genre is only in its JSON-LD, which we don't parse).

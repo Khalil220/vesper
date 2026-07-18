@@ -133,9 +133,10 @@ From the repo root:
     existing novel (warns if the source's title differs; proceeds anyway).
   - `vesper subs` — list subscriptions (shows primary + fallback sources, and any
     404 gaps).
-  - `vesper refresh <novel>` — re-fetch a subscription's metadata (author, cover,
-    genre, status) from its primary source; chapters untouched. (Fixes e.g. an
-    author that was missing at subscribe time.)
+  - `vesper refresh <novel|all>` — re-fetch a subscription's metadata (author,
+    cover, genre, status) from its primary source; chapters untouched. `all`
+    refreshes every subscription. (Fixes e.g. an author that was missing at
+    subscribe time, or a status flip.)
   - `vesper fetch <novel> [--limit N]` — download missing chapters into the DB
     (resume-aware; `<novel>` is an id or title; `--limit 0` = all missing).
     Ctrl+C pauses gracefully: it stops after the current (already-saved) chapter,

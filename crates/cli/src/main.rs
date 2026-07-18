@@ -53,7 +53,7 @@ enum Command {
     /// Re-fetch a subscription's metadata (author, cover, genre, status) from its
     /// primary source; stored chapters are left untouched.
     Refresh {
-        /// Novel to refresh (id or title).
+        /// Novel to refresh (id or title), or `all` for every subscription.
         novel: String,
         /// Override the request delay, in milliseconds (default: config value).
         #[arg(long)]
@@ -431,32 +431,65 @@ async fn add_source(config: &Config, novel: String, url: String, delay_ms: Optio
     Ok(())
 }
 
+/// Re-fetch one novel's metadata from its primary source and update the row.
+/// Returns `Some((old, new))` if the author (and thus the export path) changed.
+async fn refresh_one(store: &Store, novel: &StoredNovel, delay_ms: u64) -> Result<Option<(String, String)>> {
+    let primary = novel
+        .primary_source()
+        .ok_or_else(|| anyhow!("\"{}\" has no source to refresh from", novel.title))?;
+    let source = source_for(&primary.url, delay_ms)?;
+    let meta = source.fetch_novel(&primary.url).await?;
+    store.update_novel_meta(novel.id, &meta)?;
+
+    let old = novel.author.as_deref().unwrap_or("Unknown Author").to_string();
+    let new = meta.author.as_deref().unwrap_or("Unknown Author").to_string();
+    Ok((old != new).then_some((old, new)))
+}
+
 async fn refresh(config: &Config, novel: String, delay_ms: Option<u64>) -> Result<()> {
     let store = Store::open_default()?;
+    let delay = delay_ms.unwrap_or(config.request_delay_ms);
+
+    if novel.eq_ignore_ascii_case("all") {
+        let novels = store.list_subscriptions()?;
+        if novels.is_empty() {
+            println!("No subscriptions to refresh.");
+            return Ok(());
+        }
+        eprintln!("Refreshing metadata for {} subscription(s)...", novels.len());
+        let mut changed = 0usize;
+        for n in &novels {
+            match refresh_one(&store, n, delay).await {
+                Ok(Some((old, new))) => {
+                    println!("  {} — author: {old} -> {new}", n.title);
+                    changed += 1;
+                }
+                Ok(None) => println!("  {} — no author change", n.title),
+                Err(e) => eprintln!("  ! {} — {e}", n.title),
+            }
+        }
+        if changed > 0 {
+            println!(
+                "\n{changed} author(s) changed — re-export those novels \
+                 (`vesper export <id>`) to move their EPUBs into the new folders."
+            );
+        }
+        return Ok(());
+    }
+
     let found = store
         .find_novel(&novel)?
         .ok_or_else(|| anyhow!("no subscription matches \"{novel}\""))?;
-    let primary = found
-        .primary_source()
-        .ok_or_else(|| anyhow!("\"{}\" has no source to refresh from", found.title))?;
-    let source = source_for(&primary.url, delay_ms.unwrap_or(config.request_delay_ms))?;
-
-    eprintln!("Refreshing metadata for \"{}\" from {}...", found.title, source.name());
-    let meta = source.fetch_novel(&primary.url).await?;
-    store.update_novel_meta(found.id, &meta)?;
-
-    println!("Refreshed \"{}\".", found.title);
-    let old_author = found.author.as_deref().unwrap_or("Unknown Author");
-    let new_author = meta.author.as_deref().unwrap_or("Unknown Author");
-    if old_author != new_author {
-        println!("  author: {old_author} -> {new_author}");
-        println!(
-            "  (the author changed — run `vesper export {}` to rebuild the EPUB \
-             under the new author folder)",
-            found.id
-        );
-    } else {
-        println!("  author: {new_author} (unchanged)");
+    eprintln!("Refreshing metadata for \"{}\"...", found.title);
+    match refresh_one(&store, &found, delay).await? {
+        Some((old, new)) => {
+            println!("Refreshed \"{}\": author {old} -> {new}.", found.title);
+            println!(
+                "Run `vesper export {}` to rebuild the EPUB under the new author folder.",
+                found.id
+            );
+        }
+        None => println!("Refreshed \"{}\": author unchanged.", found.title),
     }
     Ok(())
 }
