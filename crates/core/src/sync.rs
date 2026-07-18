@@ -21,6 +21,11 @@ use crate::model::{ChapterRef, DerivedState};
 use crate::source::Source;
 use crate::store::{Store, StoredSource};
 
+/// How often (in chapters) to emit a progress heartbeat during a long fetch,
+/// instead of one line per chapter. Also the threshold below which a run is
+/// short enough that the final summary alone suffices — no progress lines.
+const PROGRESS_EVERY: usize = 25;
+
 /// Outcome of a sync pass.
 #[derive(Debug)]
 pub struct SyncReport {
@@ -151,11 +156,18 @@ pub async fn sync_novel(
         missing.into_iter().take(limit).collect()
     };
 
-    for num in to_fetch {
+    // Progress is reported periodically, not per chapter: a big backfill would
+    // otherwise emit thousands of lines (painful in a terminal, and worse for a
+    // screen reader). Announce the total up front for long runs, then a heartbeat
+    // every `PROGRESS_EVERY` chapters.
+    let total = to_fetch.len();
+    if total > PROGRESS_EVERY {
+        on_progress(format!("downloading {total} chapter(s)..."));
+    }
+    for (i, num) in to_fetch.into_iter().enumerate() {
         let mut done = false;
         for (idx, (meta, src, map)) in discovered.iter().enumerate() {
             let Some(cref) = map.get(&num) else { continue };
-            on_progress(format!("ch.{num} <- {}", meta.name));
             match src.fetch_chapter(cref).await {
                 Ok(chapter) => {
                     if store.insert_chapter_if_absent(novel_id, meta.id, &chapter)? {
@@ -176,6 +188,10 @@ pub async fn sync_novel(
         if !done {
             report.failures.push(num);
         }
+        let n = i + 1;
+        if total > PROGRESS_EVERY && n % PROGRESS_EVERY == 0 && n != total {
+            on_progress(format!("  ...{n}/{total} (ch.{num})"));
+        }
     }
 
     // Content upgrade: the primary is authoritative, so any chapter we're
@@ -183,9 +199,16 @@ pub async fn sync_novel(
     // re-fetched from the primary and replaced. Normally there are none (steady
     // state is all-primary); this fires once after a lagging primary catches up.
     if let Some((pmeta, psrc, pmap)) = discovered.iter().find(|(m, _, _)| m.priority == 1) {
-        for num in store.chapters_from_other_sources(novel_id, pmeta.id)? {
+        let upgradable = store.chapters_from_other_sources(novel_id, pmeta.id)?;
+        if upgradable.len() > PROGRESS_EVERY {
+            on_progress(format!(
+                "upgrading {} chapter(s) to {}...",
+                upgradable.len(),
+                pmeta.name
+            ));
+        }
+        for num in upgradable {
             let Some(cref) = pmap.get(&num) else { continue };
-            on_progress(format!("ch.{num} upgrade <- {}", pmeta.name));
             match psrc.fetch_chapter(cref).await {
                 Ok(chapter) => {
                     store.update_chapter_content(novel_id, pmeta.id, &chapter)?;
@@ -380,6 +403,44 @@ mod tests {
         assert_eq!(ch4.paragraphs, vec!["fallback body 4"]);
         let ch1 = store.load_chapters(id).unwrap().into_iter().find(|c| c.number == 1).unwrap();
         assert_eq!(ch1.paragraphs, vec!["primary body 1"]);
+    }
+
+    #[tokio::test]
+    async fn progress_is_throttled_not_per_chapter() {
+        let store = Store::open_in_memory().unwrap();
+        let id = subscribe(&store);
+        // 60 chapters: enough to cross the PROGRESS_EVERY (25) threshold twice.
+        let numbers: Vec<u32> = (1..=60).collect();
+        let sources = pair(&store, id, vec![Box::new(MockSource::new("primary", &numbers))]);
+
+        let mut lines: Vec<String> = Vec::new();
+        let report = sync_novel(&store, id, DerivedState::Backfilling, &sources, 0, |l| {
+            lines.push(l)
+        })
+        .await
+        .unwrap();
+        assert_eq!(report.newly_fetched, 60);
+
+        // A per-chapter callback would emit ~60 lines; the throttled one emits a
+        // header plus a heartbeat every 25 (at 25 and 50, not at the final 60).
+        assert!(lines.len() < 10, "expected few progress lines, got {}: {lines:?}", lines.len());
+        assert!(lines.iter().any(|l| l.contains("downloading 60")), "header: {lines:?}");
+        assert!(lines.iter().any(|l| l.contains("25/60")), "heartbeat at 25: {lines:?}");
+        assert!(lines.iter().any(|l| l.contains("50/60")), "heartbeat at 50: {lines:?}");
+        assert!(!lines.iter().any(|l| l.contains("60/60")), "no heartbeat at the end: {lines:?}");
+    }
+
+    #[tokio::test]
+    async fn short_fetch_emits_no_progress_lines() {
+        let store = Store::open_in_memory().unwrap();
+        let id = subscribe(&store);
+        let sources = pair(&store, id, vec![Box::new(MockSource::new("primary", &[1, 2, 3]))]);
+
+        let mut lines: Vec<String> = Vec::new();
+        sync_novel(&store, id, DerivedState::Backfilling, &sources, 0, |l| lines.push(l))
+            .await
+            .unwrap();
+        assert!(lines.is_empty(), "a 3-chapter fetch should stay quiet, got {lines:?}");
     }
 
     #[tokio::test]
