@@ -264,11 +264,10 @@ fn log_line(config: &Config, msg: &str) {
     }
 }
 
-/// Current local wall-clock time with the UTC offset, e.g.
-/// `2026-07-17 21:39:12 -04:00`. Local (not UTC) so the log reads naturally; the
-/// offset keeps it unambiguous. DST is handled by the OS via `chrono::Local`.
+/// Current local wall-clock time, e.g. `2026-07-17 21:39:12`. Local (not UTC) so
+/// the log reads naturally; DST is handled by the OS via `chrono::Local`.
 fn local_timestamp() -> String {
-    chrono::Local::now().format("%Y-%m-%d %H:%M:%S %:z").to_string()
+    chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string()
 }
 
 /// A single-line, self-overwriting `n/m` progress indicator on stderr. It draws
@@ -757,21 +756,16 @@ mod tests {
 
     #[test]
     fn local_timestamp_has_expected_shape() {
-        // e.g. "2026-07-17 21:39:12 -04:00" — 26 chars, offset always ±HH:MM.
+        // e.g. "2026-07-17 21:39:12" — 19 chars, no offset suffix.
         let ts = local_timestamp();
         println!("sample log timestamp: {ts}");
-        assert_eq!(ts.len(), 26, "unexpected shape: {ts}");
+        assert_eq!(ts.len(), 19, "unexpected shape: {ts}");
         assert_eq!(&ts[4..5], "-");
         assert_eq!(&ts[7..8], "-");
         assert_eq!(&ts[10..11], " ");
         assert_eq!(&ts[13..14], ":");
         assert_eq!(&ts[16..17], ":");
-        assert_eq!(&ts[19..20], " ");
-        let sign = &ts[20..21];
-        assert!(sign == "+" || sign == "-", "offset sign missing: {ts}");
-        assert_eq!(&ts[23..24], ":");
-        // The date/time/offset digits should all parse.
         assert!(ts[0..4].parse::<u32>().is_ok(), "year: {ts}");
-        assert!(ts[21..23].parse::<u32>().is_ok(), "offset hours: {ts}");
+        assert!(ts[11..13].parse::<u32>().is_ok(), "hour: {ts}");
     }
 }

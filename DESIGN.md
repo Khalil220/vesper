@@ -373,13 +373,12 @@ Verified by probing during design:
 - **Observability.** A `status` command (DB/log paths, per-novel state, last
   completed sync, recent log tail) and a log file (config `log_path`) that the
   background sync appends to — its stderr is discarded, so the log is the trail.
-  Log lines are stamped with local wall-clock time plus the UTC offset (e.g.
-  `2026-07-17 21:39:12 -04:00`) via `chrono::Local` in the CLI — local so the log
-  reads naturally, offset so it stays unambiguous, and the OS handles DST (which
-  is why this isn't hand-rolled: local time needs the tz/DST rules a date crate
-  provides). `chrono` was already in the tree transitively (via `epub-builder`),
-  so wiring it up as a direct CLI dep (feature `clock` only) added no new crates;
-  `core` itself stays free of any direct date-crate dependency.
+  Log lines are stamped with local wall-clock time (e.g. `2026-07-17 21:39:12`)
+  via `chrono::Local` in the CLI — local so the log reads naturally, with the OS
+  handling DST (which is why this isn't hand-rolled: local time needs the tz/DST
+  rules a date crate provides). `chrono` was already in the tree transitively (via
+  `epub-builder`), so wiring it up as a direct CLI dep (feature `clock` only)
+  added no new crates; `core` itself stays free of any direct date-crate dependency.
 - **Reduced poll cadence.** Config `likely_complete_recheck_days` (default 7);
   the all-subscriptions sync skips a LikelyComplete novel re-checked within that
   window. Activity reverts it to Live and resumes normal cadence.
