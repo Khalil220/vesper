@@ -18,8 +18,8 @@ for depth.
   instead of drifting apart, and it is one artifact to distribute.
 
 - **The CLI owns:** subscription management (subscribe/add-source/unsubscribe/
-  subs), fetch, EPUB export, prune, `config`/`profiles` display, and service
-  install/uninstall/status. No TUI — plain commands and arguments.
+  subs/refresh), fetch, EPUB export, prune, `config`/`profiles` display, and
+  service install/uninstall/status. No TUI — plain commands and arguments.
 
 - **The background sync is a dumb poller:** check subscribed novels for new
   chapters, fetch the deltas, store them, and (conditionally) trigger export. It
@@ -314,7 +314,10 @@ Verified by probing during design:
   Shared extractors are reused, so the storage/sync/export pipeline was unchanged.
 - **Third source (lightnovelworld).** A second hand-written adapter for a
   JS-rendered ToC. Metadata comes from page elements (`h1.novel-title`,
-  `a.author-link`, `.status-badge`), not `og:novel:*`; discovery generates
+  `p.novel-author`, `.status-badge`), not `og:novel:*`; the author is the text of
+  `p.novel-author` minus the "Author:" label (authors with a profile page nest an
+  `a.author-link`, but link-less authors are plain text, so reading the element's
+  text handles both); discovery generates
   sequential `/novel/<slug>/chapter/<n>/` URLs from the count in `og:title`;
   content is `#chapterText`. Runs on Tier 1 (reqwest) — it doesn't
   fingerprint-block, unlike freewebnovel. Its `data-protected` flag is JS
@@ -423,6 +426,16 @@ Verified by probing during design:
   gapped novel re-opens its backfill for exactly that. Verified end-to-end on a
   real library: three wedged novels (1, 2, and 10 holes) went Live and exported,
   each EPUB carrying its notice page.
+- **Metadata refresh (`vesper refresh`).** Novel metadata (author, cover, genre,
+  status hint) is captured once at subscribe time, so anything missing or wrong
+  then stays that way. `refresh` re-fetches it from the primary source and updates
+  the row (title and chapters untouched) via `Store::update_novel_meta`. Motivated
+  by a real miss: lightnovelworld's author was read from `a.author-link`, which is
+  absent for authors without a profile page (their name is plain text in
+  `p.novel-author`), so such novels became "Unknown Author"; the adapter now reads
+  the element text, and `refresh` fixes already-subscribed novels. Also useful for
+  a status flip (Ongoing→Completed) or an upstream cover change. If the author
+  changes, a re-export moves the EPUB under the corrected author folder.
 - **Genre metadata.** Captured from `og:novel:genre` (novgo, freewebnovel),
   stored on the novel, emitted as EPUB `dc:subject`. lightnovelworld leaves it
   `None` (genre is only in its JSON-LD, which we don't parse).
