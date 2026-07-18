@@ -8,7 +8,7 @@ mod service;
 use std::fs::{File, OpenOptions};
 use std::io::{IsTerminal, Write};
 use std::ops::ControlFlow;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -323,23 +323,33 @@ fn acquire_sync_lock() -> Result<Option<File>> {
         .parent()
         .map(|p| p.join("sync.lock"))
         .ok_or_else(|| anyhow!("cannot resolve lock path"))?;
-    if let Some(parent) = lock_path.parent() {
+    try_lock_file(&lock_path)
+}
+
+/// Take an exclusive advisory lock on `path`, returning the held `File` on
+/// success or `None` if another process already holds it. Cross-platform via
+/// `fs2` (LockFileEx on Windows, `flock` on Unix) — this is what makes
+/// overlapping `sync` runs skip on every platform, not just Windows. The lock is
+/// released when the returned `File` is dropped (i.e. at the end of the run).
+fn try_lock_file(path: &Path) -> Result<Option<File>> {
+    use fs2::FileExt;
+    if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).ok();
     }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-        match OpenOptions::new().write(true).create(true).share_mode(0).open(&lock_path) {
-            Ok(f) => Ok(Some(f)),
-            Err(e) if e.raw_os_error() == Some(32) => Ok(None),
-            Err(e) => Err(e.into()),
-        }
+    let file = OpenOptions::new().write(true).create(true).open(path)?;
+    match file.try_lock_exclusive() {
+        Ok(()) => Ok(Some(file)),
+        Err(e) if lock_would_block(&e) => Ok(None),
+        Err(e) => Err(e.into()),
     }
-    #[cfg(not(windows))]
-    {
-        let f = OpenOptions::new().write(true).create(true).open(&lock_path)?;
-        Ok(Some(f))
-    }
+}
+
+/// Whether a `try_lock_exclusive` error means "already locked by someone else".
+/// On Unix `flock` returns `EWOULDBLOCK`, which std maps to `WouldBlock`; on
+/// Windows `LockFileEx` returns `ERROR_LOCK_VIOLATION` (os error 33), which it
+/// does not, so match that explicitly.
+fn lock_would_block(e: &std::io::Error) -> bool {
+    e.kind() == std::io::ErrorKind::WouldBlock || (cfg!(windows) && e.raw_os_error() == Some(33))
 }
 
 async fn subscribe(config: &Config, url: String, delay_ms: Option<u64>) -> Result<()> {
@@ -767,5 +777,26 @@ mod tests {
         assert_eq!(&ts[16..17], ":");
         assert!(ts[0..4].parse::<u32>().is_ok(), "year: {ts}");
         assert!(ts[11..13].parse::<u32>().is_ok(), "hour: {ts}");
+    }
+
+    #[test]
+    fn sync_lock_is_single_holder() {
+        let path = std::env::temp_dir().join(format!("vesper-locktest-{}.lock", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+
+        let first = try_lock_file(&path).unwrap();
+        assert!(first.is_some(), "first acquisition should succeed");
+
+        // A second acquisition while the first is held must be refused — this is
+        // the guarantee that was silently missing on non-Windows.
+        let second = try_lock_file(&path).unwrap();
+        assert!(second.is_none(), "second acquisition must be refused while held");
+
+        drop(first);
+        let third = try_lock_file(&path).unwrap();
+        assert!(third.is_some(), "acquisition succeeds again once released");
+
+        drop(third);
+        let _ = std::fs::remove_file(&path);
     }
 }

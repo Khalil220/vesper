@@ -17,3 +17,6 @@ anyhow = "1"
 # Local-time log timestamps (DST-correct via the OS); `clock` is the only
 # feature we need. Kept out of `core`, which stays date-crate-free.
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+# Cross-platform advisory file lock for the single-instance sync guard
+# (LockFileEx on Windows, flock on Unix) — replaces the Windows-only share_mode.
+fs2 = "0.4"

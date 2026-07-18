@@ -391,6 +391,18 @@ Verified by probing during design:
   reports `timer is enabled`, launchd reports `loaded: com.vesper.sync`, with the
   unit/plist files written and removed. The unit/plist *content* is also
   unit-tested on every platform.
+- **Cross-platform process lock.** The single-instance sync guard originally only
+  took a real lock on Windows (`share_mode(0)`); the non-Windows branch opened the
+  file but never locked it, so overlapping `sync` runs would *not* skip on
+  Linux/macOS — the exact platforms where the systemd timer / launchd agent can
+  re-fire mid-backfill. Replaced with a cross-platform advisory lock via `fs2`
+  (`LockFileEx` on Windows, `flock` on Unix); a unit test asserts a second
+  acquisition of a held lock is refused (runs on all platforms, incl. CI).
+- **`curl` on Linux.** The Tier-2 fetcher shells out to system `curl` (bundled on
+  Windows 10+ and macOS, present on most Linux). On a minimal Linux install it may
+  be absent; a missing binary now surfaces an actionable "install curl" error
+  instead of a bare spawn failure. Only the two curl-tier sources (freewebnovel,
+  scribblehub) need it; the other three run on Tier-1 reqwest.
 - **Genre metadata.** Captured from `og:novel:genre` (novgo, freewebnovel),
   stored on the novel, emitted as EPUB `dc:subject`. lightnovelworld leaves it
   `None` (genre is only in its JSON-LD, which we don't parse).

@@ -9,7 +9,7 @@ profile; hand-written freewebnovel, lightnovelworld, royalroad + scribblehub
 adapters), a second fetch tier (curl, with POST support), a windowless scheduled
 task, fallback content upgrade, external config-driven profiles, EPUB cover +
 genre embedding, and a status command + sync logging are in place and tested
-(60 unit + 3 CLI tests). Linux/macOS service
+(61 unit + 4 CLI tests). Linux/macOS service
 impls are verified in CI (GitHub Actions builds/tests on ubuntu/macos/windows and
 round-trips the service install). See `DESIGN.md` for the full decisions and
 rationale; this file is the short rules-of-the-road.
@@ -40,7 +40,9 @@ rationale; this file is the short rules-of-the-road.
   content. Schema: `novels` / `sources` / `chapters` (see DESIGN.md).
 - **Tiered fetcher behind a trait.** Tier 1 = `ReqwestFetcher` (browser UA +
   headers); novgo needs only this. Tier 2 = `CurlFetcher` (shells out to system
-  `curl`, on Windows 10+, and supports GET *and* form POST), used for
+  `curl` — bundled on Windows 10+ and macOS, present on most Linux; a missing
+  binary yields an actionable "install curl" error — and supports GET *and* form
+  POST), used for
   freewebnovel and scribblehub, whose Cloudflare challenges reqwest's TLS
   fingerprint even though both use Schannel. `build_source` picks the tier +
   adapter per host. Escalate further (`rquest`, headless browser) only if a site
@@ -202,16 +204,21 @@ Cargo workspace, two crates under `crates/`:
 - `cli` (bin `vesper`): clap subcommands on a current-thread Tokio runtime.
   subscribe / add-source / subs / fetch / export / unsubscribe / sync / prune /
   service / config / status / profiles / list. `sync` takes a single-instance
-  file lock (Windows `share_mode(0)`) and appends to a log file. A `ProgressBar`
+  advisory file lock (`fs2` — `LockFileEx` on Windows, `flock` on Unix, so
+  overlapping runs skip on every platform) and appends to a log file. A `ProgressBar`
   helper draws the in-place `n/m` fetch counter on stderr, but only when stderr
   is a terminal (piped/redirected/windowless runs stay clean); set
   `VESPER_FORCE_PROGRESS` to force it on. `fetch` also spawns a `tokio::signal::
   ctrl_c` watcher that flips a shared flag so the progress callback returns
   `Break` on Ctrl+C — a graceful, resumable pause.
-  - `cli::service` — `ServiceManager` trait + Windows Task Scheduler impl (shells
-    out to `schtasks`); other platforms stubbed for later. Install registers
+  - `cli::service` — `ServiceManager` trait with an impl per OS: Windows Task
+    Scheduler (`schtasks`), Linux systemd *user* timer (`systemctl --user`), and
+    macOS launchd agent (`launchctl`) — all per-user, no elevation. The generated
+    unit/plist content is pure and unit-tested on every platform; only the
+    scheduler glue is OS-gated. On Windows, install registers
     `wscript.exe <sync-hidden.vbs>` so the periodic run is windowless (no console
-    flash); the VBS is generated in the data dir and removed on uninstall.
+    flash); the VBS is generated in the data dir and removed on uninstall (the
+    systemd/launchd runs are inherently console-less).
 
 All planned phases are implemented (design docs -> EPUB pipeline -> storage ->
 multi-source + active fallback -> scheduled sync -> state machine/delta ->

@@ -197,6 +197,24 @@ impl CurlFetcher {
     }
 }
 
+/// Run a prepared `curl` command, turning a missing binary into an actionable
+/// message. `curl` ships with Windows 10+ and macOS; on a minimal Linux install
+/// it may be absent, and only the Tier-2 sources (freewebnovel, scribblehub)
+/// need it.
+async fn run_curl(mut cmd: tokio::process::Command) -> Result<std::process::Output> {
+    cmd.output().await.map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            anyhow!(
+                "`curl` was not found on PATH. It is required by the freewebnovel \
+                 and scribblehub sources (macOS and Windows 10+ ship it; on Linux \
+                 install it, e.g. `sudo apt install curl` or `sudo dnf install curl`)."
+            )
+        } else {
+            anyhow::Error::new(e).context("running curl")
+        }
+    })
+}
+
 #[async_trait]
 impl Fetcher for CurlFetcher {
     async fn get(&self, url: &str) -> Result<String> {
@@ -204,47 +222,45 @@ impl Fetcher for CurlFetcher {
         loop {
             sleep(self.config.base_delay + jitter(self.config.base_delay)).await;
 
-            let out = tokio::process::Command::new("curl")
-                .args([
-                    "-sS",
-                    "--compressed",
-                    "--http1.1",
-                    "--max-time",
-                    "30",
-                    "-A",
-                    DEFAULT_UA,
-                    "-H",
-                    "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-                    "-H",
-                    "Accept-Language: en-US,en;q=0.9",
-                    "-H",
-                    "Upgrade-Insecure-Requests: 1",
-                    "-H",
-                    "Sec-Fetch-Dest: document",
-                    "-H",
-                    "Sec-Fetch-Mode: navigate",
-                    "-H",
-                    "Sec-Fetch-Site: none",
-                    "-H",
-                    "Sec-Fetch-User: ?1",
-                    "-H",
-                    "sec-ch-ua: \"Chromium\";v=\"126\", \"Google Chrome\";v=\"126\", \"Not.A/Brand\";v=\"24\"",
-                    "-H",
-                    "sec-ch-ua-mobile: ?0",
-                    "-H",
-                    "sec-ch-ua-platform: \"Windows\"",
-                    "-w",
-                    "\n%{http_code}",
-                ])
-                .arg("-H")
-                .arg(format!(
-                    "Referer: {}",
-                    host_of(url).map(|h| format!("https://{h}/")).unwrap_or_default()
-                ))
-                .arg(url)
-                .output()
-                .await
-                .context("running curl (is it installed and on PATH?)")?;
+            let mut cmd = tokio::process::Command::new("curl");
+            cmd.args([
+                "-sS",
+                "--compressed",
+                "--http1.1",
+                "--max-time",
+                "30",
+                "-A",
+                DEFAULT_UA,
+                "-H",
+                "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+                "-H",
+                "Accept-Language: en-US,en;q=0.9",
+                "-H",
+                "Upgrade-Insecure-Requests: 1",
+                "-H",
+                "Sec-Fetch-Dest: document",
+                "-H",
+                "Sec-Fetch-Mode: navigate",
+                "-H",
+                "Sec-Fetch-Site: none",
+                "-H",
+                "Sec-Fetch-User: ?1",
+                "-H",
+                "sec-ch-ua: \"Chromium\";v=\"126\", \"Google Chrome\";v=\"126\", \"Not.A/Brand\";v=\"24\"",
+                "-H",
+                "sec-ch-ua-mobile: ?0",
+                "-H",
+                "sec-ch-ua-platform: \"Windows\"",
+                "-w",
+                "\n%{http_code}",
+            ])
+            .arg("-H")
+            .arg(format!(
+                "Referer: {}",
+                host_of(url).map(|h| format!("https://{h}/")).unwrap_or_default()
+            ))
+            .arg(url);
+            let out = run_curl(cmd).await?;
 
             // stdout is the body followed by "\n<status>" (from -w).
             let stdout = String::from_utf8_lossy(&out.stdout);
@@ -293,44 +309,42 @@ impl Fetcher for CurlFetcher {
         loop {
             sleep(self.config.base_delay + jitter(self.config.base_delay)).await;
 
-            let out = tokio::process::Command::new("curl")
-                .args([
-                    "-sS",
-                    "--compressed",
-                    "--http1.1",
-                    "--max-time",
-                    "30",
-                    "-A",
-                    DEFAULT_UA,
-                    "-H",
-                    "Accept: */*",
-                    "-H",
-                    "Accept-Language: en-US,en;q=0.9",
-                    "-H",
-                    "Content-Type: application/x-www-form-urlencoded; charset=UTF-8",
-                    "-H",
-                    "X-Requested-With: XMLHttpRequest",
-                    "-H",
-                    "Sec-Fetch-Dest: empty",
-                    "-H",
-                    "Sec-Fetch-Mode: cors",
-                    "-H",
-                    "Sec-Fetch-Site: same-origin",
-                    "-H",
-                    "sec-ch-ua: \"Chromium\";v=\"126\", \"Google Chrome\";v=\"126\", \"Not.A/Brand\";v=\"24\"",
-                    "-H",
-                    "sec-ch-ua-mobile: ?0",
-                    "-H",
-                    "sec-ch-ua-platform: \"Windows\"",
-                ])
-                .arg("-H")
-                .arg(format!("Referer: {referer}"))
-                .arg("--data")
-                .arg(form_body)
-                .args(["-X", "POST", "-w", "\n%{http_code}", url])
-                .output()
-                .await
-                .context("running curl (is it installed and on PATH?)")?;
+            let mut cmd = tokio::process::Command::new("curl");
+            cmd.args([
+                "-sS",
+                "--compressed",
+                "--http1.1",
+                "--max-time",
+                "30",
+                "-A",
+                DEFAULT_UA,
+                "-H",
+                "Accept: */*",
+                "-H",
+                "Accept-Language: en-US,en;q=0.9",
+                "-H",
+                "Content-Type: application/x-www-form-urlencoded; charset=UTF-8",
+                "-H",
+                "X-Requested-With: XMLHttpRequest",
+                "-H",
+                "Sec-Fetch-Dest: empty",
+                "-H",
+                "Sec-Fetch-Mode: cors",
+                "-H",
+                "Sec-Fetch-Site: same-origin",
+                "-H",
+                "sec-ch-ua: \"Chromium\";v=\"126\", \"Google Chrome\";v=\"126\", \"Not.A/Brand\";v=\"24\"",
+                "-H",
+                "sec-ch-ua-mobile: ?0",
+                "-H",
+                "sec-ch-ua-platform: \"Windows\"",
+            ])
+            .arg("-H")
+            .arg(format!("Referer: {referer}"))
+            .arg("--data")
+            .arg(form_body)
+            .args(["-X", "POST", "-w", "\n%{http_code}", url]);
+            let out = run_curl(cmd).await?;
 
             let stdout = String::from_utf8_lossy(&out.stdout);
             let (body, status) = stdout.rsplit_once('\n').unwrap_or((stdout.as_ref(), ""));
@@ -429,6 +443,21 @@ mod tests {
             Some("novgo.net")
         );
         assert_eq!(host_of("not a url"), None);
+    }
+
+    #[tokio::test]
+    async fn missing_curl_binary_gives_actionable_error() {
+        // A non-existent binary triggers the same NotFound path as a missing
+        // curl (relevant on minimal Linux). The message must name curl and hint
+        // at installing it rather than surfacing a bare OS error.
+        let cmd = tokio::process::Command::new("vesper-no-such-binary-zzq");
+        let err = run_curl(cmd).await.expect_err("spawning a missing binary must fail");
+        let msg = err.to_string();
+        assert!(msg.contains("curl"), "should mention curl: {msg}");
+        assert!(
+            msg.contains("install") || msg.contains("PATH"),
+            "should be actionable: {msg}"
+        );
     }
 
     #[test]

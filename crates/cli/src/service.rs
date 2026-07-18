@@ -1,11 +1,13 @@
 //! Background-service management: registering the periodic `sync` job with the
 //! OS scheduler.
 //!
-//! Windows (Task Scheduler, via `schtasks`) is implemented. Other platforms are
-//! stubbed behind the same trait so a systemd user unit / launchd agent can be
-//! added later without touching the CLI. Task Scheduler is chosen over a real
-//! Windows Service because the sync is a scheduled invocation, not a resident
-//! daemon (see DESIGN.md), and a per-user task needs no elevation.
+//! All three platforms are implemented behind one `ServiceManager` trait:
+//! Windows (Task Scheduler, via `schtasks`), Linux (a systemd *user* timer +
+//! oneshot service, via `systemctl --user`), and macOS (a launchd agent, via
+//! `launchctl`). None needs elevation — each installs a per-user job. A
+//! scheduled invocation is used rather than a resident daemon (see DESIGN.md).
+//! The generated unit/plist *content* is pure and unit-tested on every platform;
+//! only the `systemctl`/`launchctl`/`schtasks` glue is OS-gated.
 
 #![allow(dead_code)] // Some fields/impls are platform-gated.
 
