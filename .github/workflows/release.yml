@@ -5,6 +5,10 @@ name: Release
 # packages each with the README, and attaches them all to the GitHub release
 # for the tag. The upload happens in a single final job so the matrix builds
 # don't race each other creating the release.
+#
+# Release notes come from CHANGELOG.md: the section under the `## X.Y.0`
+# heading matching the tag becomes the release body. No entry, no release —
+# the job fails rather than publishing with empty notes.
 
 on:
   push:
@@ -69,12 +73,21 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v5
       - uses: actions/download-artifact@v4
         with:
           pattern: package-*
           merge-multiple: true
           path: dist
+      - name: Extract changelog entry
+        run: |
+          hdr="## ${GITHUB_REF_NAME#v}"
+          awk -v hdr="$hdr" '$0 == hdr {found=1; next} /^## / {found=0} found' CHANGELOG.md > notes.md
+          if ! grep -q '[^[:space:]]' notes.md; then
+            echo "No CHANGELOG.md entry for $GITHUB_REF_NAME" >&2
+            exit 1
+          fi
       - uses: softprops/action-gh-release@v2
         with:
           files: dist/*
-          generate_release_notes: true
+          body_path: notes.md

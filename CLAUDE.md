@@ -125,9 +125,12 @@ rules-of-the-road.
   component; it stays 0.
 - The version lives once, in `[workspace.package]` in the root `Cargo.toml`
   (both crates inherit it). To release: bump it, run `cargo update -w` to
-  refresh the lockfile, commit, then tag `vX.Y.0` and push the tag —
-  `.github/workflows/release.yml` builds Windows/Linux/macOS binaries and
-  attaches them to the GitHub release.
+  refresh the lockfile, add a `CHANGELOG.md` entry, commit, then tag `vX.Y.0`
+  and push the tag — `.github/workflows/release.yml` builds Windows/Linux/
+  macOS binaries and attaches them to the GitHub release.
+- Release notes are the `CHANGELOG.md` section under the `## X.Y.0` heading
+  matching the tag (no `v` prefix, heading exact — the workflow extracts it
+  verbatim). A tag without a matching entry fails the release job on purpose.
 
 ## Module map
 
