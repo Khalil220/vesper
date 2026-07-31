@@ -105,16 +105,30 @@ fn parse_total_chapters(html: &str) -> Option<u32> {
 }
 
 /// Pull the chapter's name from the `<title>`, which looks like
-/// "Novel - Chapter N - Name | Free Web Novel". Anchors on " - Chapter " so a
-/// novel name containing " - " doesn't break it.
+/// "Novel - Chapter N | Name | Free Web Novel" (some older chapters separate
+/// the name with a space or a dash instead of the pipe). Anchors on
+/// " - Chapter " so a novel name containing " - " doesn't break it.
+///
+/// The site name is trimmed off the *end*, not by splitting on the first `|` —
+/// the pipe before the chapter name is the same character, so splitting from
+/// the front threw the name away and left a bare "Chapter N".
 fn parse_chapter_title(html: &str) -> Option<String> {
     let doc = Html::parse_document(html);
     let sel = Selector::parse("title").ok()?;
     let raw = doc.select(&sel).next()?.text().collect::<String>();
-    let no_suffix = raw.split('|').next().unwrap_or(&raw).trim();
+    let no_suffix = strip_site_suffix(raw.trim());
     let after = no_suffix.find(" - Chapter ").map(|i| &no_suffix[i + 3..])?;
     let cleaned = clean_chapter_title(after.trim());
     (!cleaned.is_empty()).then_some(cleaned)
+}
+
+/// Drop the trailing "| Free Web Novel" branding, leaving any earlier `|` (the
+/// one separating "Chapter N" from its name) intact.
+fn strip_site_suffix(title: &str) -> &str {
+    match title.rsplit_once('|') {
+        Some((head, tail)) if tail.trim().eq_ignore_ascii_case("Free Web Novel") => head.trim(),
+        _ => title,
+    }
 }
 
 #[cfg(test)]
@@ -144,10 +158,60 @@ mod tests {
         );
     }
 
+    fn title_html(inner: &str) -> String {
+        format!("<html><head><title>{inner}</title></head><body></body></html>")
+    }
+
     #[test]
     fn parses_chapter_title_from_title_tag() {
-        let html = "<html><head><title>The Bloodline System - Chapter 1 - How It All Began | Free Web Novel</title></head><body></body></html>";
-        assert_eq!(parse_chapter_title(html).as_deref(), Some("How It All Began"));
+        let html = title_html("The Bloodline System - Chapter 1 - How It All Began | Free Web Novel");
+        assert_eq!(parse_chapter_title(&html).as_deref(), Some("How It All Began"));
+    }
+
+    /// The common freewebnovel shape: the chapter name is separated from
+    /// "Chapter N" by a pipe, the same character the site-name suffix uses.
+    #[test]
+    fn parses_chapter_title_separated_by_pipe() {
+        let html = title_html(
+            "Investing In My Three Crippled Wives Get 10,000x Times Return - Chapter 1 | The Three Wives | Free Web Novel",
+        );
+        assert_eq!(parse_chapter_title(&html).as_deref(), Some("The Three Wives"));
+    }
+
+    /// A name containing a comma/pipe-free run still survives the end-anchored
+    /// suffix strip.
+    #[test]
+    fn parses_chapter_title_with_punctuation() {
+        let html = title_html(
+            "Investing In My Three Crippled Wives Get 10,000x Times Return - Chapter 62 | Trouble, Heading To The Hero Association | Free Web Novel",
+        );
+        assert_eq!(
+            parse_chapter_title(&html).as_deref(),
+            Some("Trouble, Heading To The Hero Association")
+        );
+    }
+
+    /// Some chapters omit the separator entirely.
+    #[test]
+    fn parses_chapter_title_separated_by_space() {
+        let html = title_html(
+            "Investing In My Three Crippled Wives Get 10,000x Times Return - Chapter 61 Gifts & Forgiveness | Free Web Novel",
+        );
+        assert_eq!(parse_chapter_title(&html).as_deref(), Some("Gifts & Forgiveness"));
+    }
+
+    /// No name on the page — the caller's "Chapter N" placeholder is what we
+    /// end up with either way.
+    #[test]
+    fn unnamed_chapter_falls_back_to_number() {
+        let html = title_html("The Bloodline System - Chapter 5 | Free Web Novel");
+        assert_eq!(parse_chapter_title(&html).as_deref(), Some("Chapter 5"));
+    }
+
+    #[test]
+    fn strips_only_the_site_suffix() {
+        assert_eq!(strip_site_suffix("A - Chapter 1 | Name | Free Web Novel"), "A - Chapter 1 | Name");
+        assert_eq!(strip_site_suffix("A - Chapter 1 | Name"), "A - Chapter 1 | Name");
     }
 
     #[test]

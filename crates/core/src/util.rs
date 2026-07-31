@@ -68,7 +68,7 @@ pub fn now_unix() -> i64 {
         .unwrap_or(0)
 }
 
-/// Strip a leading "Chapter N -/–/:" prefix from a table-of-contents link's
+/// Strip a leading "Chapter N -/–/:/|" prefix from a table-of-contents link's
 /// text, leaving just the chapter's actual name. ToC entries look like
 /// "Chapter 1 - Cultivation Online"; we render our own "Chapter N:" prefix, so
 /// keeping the site's would double it. If the text is *only* the prefix (no real
@@ -90,8 +90,8 @@ pub fn clean_chapter_title(raw: &str) -> String {
             while i < t.len() && bytes[i] == b' ' {
                 i += 1;
             }
-            // Skip one separator: ASCII '-'/':' or a Unicode en/em dash.
-            if i < t.len() && (bytes[i] == b'-' || bytes[i] == b':') {
+            // Skip one separator: ASCII '-'/':'/'|' or a Unicode en/em dash.
+            if i < t.len() && (bytes[i] == b'-' || bytes[i] == b':' || bytes[i] == b'|') {
                 i += 1;
             } else if let Some(c) = t[i..].chars().next() {
                 if c == '\u{2013}' || c == '\u{2014}' {

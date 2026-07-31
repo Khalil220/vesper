@@ -76,8 +76,12 @@ rules-of-the-road.
 - **freewebnovel.com** (hand-written adapter, Tier 2 curl): AJAX/JS ToC (no
   scrapable pagination), so discovery reads `data-total-chapters` and generates
   sequential `/novel/<slug>/chapter-<n>` URLs from one request; chapter title
-  from the chapter page `<title>`; content `.txt`; metadata `og:novel:*`;
-  status word form ("Completed"/"Ongoing").
+  from the chapter page `<title>`, which reads
+  "Novel - Chapter N | Name | Free Web Novel" — the chapter name is usually
+  pipe-separated, the **same** character as the site-name suffix, so strip the
+  branding off the *end*; splitting on the first `|` eats the name and leaves a
+  bare "Chapter N". Content `.txt`; metadata `og:novel:*`; status word form
+  ("Completed"/"Ongoing").
 - **lightnovelworld.org** (hand-written adapter, Tier 1): JS-rendered ToC, so
   discovery reads the total from `og:title` ("… - N Chapters") and generates
   sequential `/novel/<slug>/chapter/<n>/` URLs. Metadata from page elements
