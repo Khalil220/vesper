@@ -129,6 +129,14 @@ rules-of-the-road.
 - Live smoke test: export a few chapters from a novgo novel and validate the
   EPUB (unzip; check `mimetype` == `application/epub+zip`, `content.opf`, and
   that chapter XHTML holds real prose).
+- Adapter parsing is only really provable against the live site — unit tests
+  fix in whatever shape the fixture was written with, which is exactly how a
+  wrong title parse survives. `cargo run -p vesper-core --example live_titles
+  -- <novel-url> <n>...` fetches those chapters through the real adapter and
+  fetch tier and prints the parsed titles. Network-bound, so it stays out of
+  `cargo test`. Sample chapters from across a novel's range: freewebnovel
+  formats its `<title>` inconsistently, so checking only chapter 1 proves
+  little.
 
 ## Releasing
 
@@ -168,9 +176,17 @@ Cargo workspace, two crates under `crates/`:
     cover + `dc:subject` genre, "Missing Chapters" page for 404 gaps.
   - `paths` — library layout (`epub_path`, `novel_dir`).
   - `store` — SQLite persistence: novels/sources/chapters/chapter_gaps schema,
-    WAL, resume-aware insert, gap record/clear/list, normalized-title lookup.
-    rusqlite pinned to 0.31 (cfg_select workaround). Connection is not `Send`,
-    so the CLI uses a current-thread runtime.
+    WAL, resume-aware insert, gap record/clear/list, normalized-title lookup,
+    subscriptions listed in id order. `update_chapter_title` is the repair
+    hatch for chapters stored while an adapter parsed titles wrong — inserts
+    are `OR IGNORE`, so a re-sync alone can never fix them. `migrate()` is
+    additive and idempotent; the one destructive step is the `novels` rebuild
+    that adds `AUTOINCREMENT`, which runs with `foreign_keys=OFF` (`DROP
+    TABLE` otherwise cascades every chapter away), refuses to drop the
+    original unless the copied row count matches, and checks
+    `foreign_key_check` before committing. rusqlite pinned to 0.31
+    (cfg_select workaround). Connection is not `Send`, so the CLI uses a
+    current-thread runtime.
   - `config` — flat self-generating `config.ini`; tolerant, escape-disabled
     reads so Windows `C:\` paths round-trip.
   - `sync` — `sync_novel`, the shared multi-source engine behind both `fetch`
