@@ -113,7 +113,7 @@ impl Store {
         self.conn.execute_batch(
             r#"
             CREATE TABLE IF NOT EXISTS novels (
-                id             INTEGER PRIMARY KEY,
+                id             INTEGER PRIMARY KEY AUTOINCREMENT,
                 title          TEXT NOT NULL,
                 author         TEXT,
                 cover_url      TEXT,
@@ -169,6 +169,120 @@ impl Store {
         let _ = self
             .conn
             .execute("ALTER TABLE novels ADD COLUMN genre TEXT", []);
+        // Runs last: it copies a fixed column list, so every column added above
+        // has to exist first.
+        self.migrate_novels_autoincrement()?;
+        Ok(())
+    }
+
+    /// Give `novels.id` an AUTOINCREMENT high-water mark on DBs created before
+    /// it had one.
+    ///
+    /// A plain `INTEGER PRIMARY KEY` is a rowid: the next one is `max(id) + 1`
+    /// over *surviving* rows, so deleting the highest-numbered novel handed its
+    /// id straight to the next subscription (gaps in the middle persisted, which
+    /// made the recycling easy to miss). Ids are a user-facing handle —
+    /// `vesper export 14` — so a recycled id silently retargets a command at a
+    /// different novel. AUTOINCREMENT tracks the largest id ever used in
+    /// `sqlite_sequence` and never hands it out twice.
+    ///
+    /// SQLite can't add AUTOINCREMENT via `ALTER`, so `novels` gets rebuilt.
+    /// That's a handful of rows; the large `chapters` table is never touched,
+    /// and ids are copied verbatim so child foreign keys stay valid.
+    fn migrate_novels_autoincrement(&self) -> Result<()> {
+        let existing: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'novels'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?;
+        match existing {
+            // Already migrated (or created fresh with AUTOINCREMENT).
+            Some(sql) if sql.to_ascii_uppercase().contains("AUTOINCREMENT") => return Ok(()),
+            Some(_) => {}
+            None => return Ok(()),
+        }
+
+        // `DROP TABLE` performs an implicit DELETE, which fires the children's
+        // ON DELETE CASCADE and would take every chapter with it. Enforcement
+        // must be off across the swap — and it can't be toggled inside a
+        // transaction, hence out here.
+        self.conn.execute_batch("PRAGMA foreign_keys=OFF;")?;
+        let outcome = self.swap_in_autoincrement_novels();
+        self.conn.execute_batch("PRAGMA foreign_keys=ON;")?;
+        outcome.context("rebuilding the novels table with AUTOINCREMENT")
+    }
+
+    /// The rebuild proper, wrapped so a failure anywhere rolls back and leaves
+    /// the original `novels` in place.
+    fn swap_in_autoincrement_novels(&self) -> Result<()> {
+        self.conn.execute_batch("BEGIN;")?;
+        match self.copy_novels_into_autoincrement_table() {
+            Ok(()) => {
+                self.conn.execute_batch("COMMIT;")?;
+                Ok(())
+            }
+            Err(e) => {
+                let _ = self.conn.execute_batch("ROLLBACK;");
+                Err(e)
+            }
+        }
+    }
+
+    fn copy_novels_into_autoincrement_table(&self) -> Result<()> {
+        let before: i64 = self
+            .conn
+            .query_row("SELECT count(*) FROM novels", [], |r| r.get(0))?;
+
+        self.conn.execute_batch(
+            r#"
+            CREATE TABLE novels_migrate (
+                id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                title          TEXT NOT NULL,
+                author         TEXT,
+                cover_url      TEXT,
+                genre          TEXT,
+                status_hint    TEXT NOT NULL,
+                derived_state  TEXT NOT NULL,
+                export_pending INTEGER NOT NULL DEFAULT 0,
+                created_at     INTEGER NOT NULL,
+                updated_at     INTEGER NOT NULL
+            );
+
+            INSERT INTO novels_migrate
+                (id, title, author, cover_url, genre, status_hint, derived_state,
+                 export_pending, created_at, updated_at)
+            SELECT id, title, author, cover_url, genre, status_hint, derived_state,
+                   export_pending, created_at, updated_at
+            FROM novels;
+            "#,
+        )?;
+
+        // Refuse to drop the original unless every row made it across.
+        let copied: i64 = self
+            .conn
+            .query_row("SELECT count(*) FROM novels_migrate", [], |r| r.get(0))?;
+        if copied != before {
+            bail!("copied {copied} of {before} novels; leaving the original table alone");
+        }
+
+        self.conn.execute_batch(
+            "DROP TABLE novels;
+             ALTER TABLE novels_migrate RENAME TO novels;",
+        )?;
+
+        // Children reference novels(id) by name, so the rename should have left
+        // them intact — confirm before committing rather than trusting it.
+        let orphans: i64 = self
+            .conn
+            .query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| {
+                r.get(0)
+            })?;
+        if orphans != 0 {
+            bail!("{orphans} foreign key violation(s) after the rebuild");
+        }
         Ok(())
     }
 
@@ -668,6 +782,143 @@ mod tests {
 
     fn mem_store() -> Store {
         Store::open_in_memory().unwrap()
+    }
+
+    /// A DB carrying the pre-AUTOINCREMENT schema with novels, sources,
+    /// chapters and a gap already in it — so the migration is exercised the way
+    /// a real upgrade hits it, rather than on an empty table.
+    fn legacy_store() -> Store {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE novels (
+                id             INTEGER PRIMARY KEY,
+                title          TEXT NOT NULL,
+                author         TEXT,
+                cover_url      TEXT,
+                genre          TEXT,
+                status_hint    TEXT NOT NULL,
+                derived_state  TEXT NOT NULL,
+                export_pending INTEGER NOT NULL DEFAULT 0,
+                created_at     INTEGER NOT NULL,
+                updated_at     INTEGER NOT NULL
+            );
+            CREATE TABLE sources (
+                id                INTEGER PRIMARY KEY,
+                novel_id          INTEGER NOT NULL REFERENCES novels(id) ON DELETE CASCADE,
+                source_name       TEXT NOT NULL,
+                url               TEXT NOT NULL UNIQUE,
+                priority          INTEGER NOT NULL,
+                last_seen_chapter INTEGER,
+                last_synced_at    INTEGER
+            );
+            CREATE TABLE chapters (
+                novel_id    INTEGER NOT NULL REFERENCES novels(id) ON DELETE CASCADE,
+                number      INTEGER NOT NULL,
+                title       TEXT NOT NULL,
+                body        TEXT NOT NULL,
+                source_id   INTEGER REFERENCES sources(id),
+                fetched_at  INTEGER NOT NULL,
+                exported    INTEGER NOT NULL DEFAULT 0,
+                exported_at INTEGER,
+                PRIMARY KEY (novel_id, number)
+            );
+            CREATE TABLE chapter_gaps (
+                novel_id    INTEGER NOT NULL REFERENCES novels(id) ON DELETE CASCADE,
+                number      INTEGER NOT NULL,
+                detected_at INTEGER NOT NULL,
+                PRIMARY KEY (novel_id, number)
+            );
+
+            -- Note the hole at 2..4: a mid-range unsubscribe, like the real DB.
+            INSERT INTO novels (id, title, author, status_hint, derived_state, created_at, updated_at)
+            VALUES (1, 'First', 'Ann', 'ongoing', 'live', 100, 100),
+                   (5, 'Second', 'Bo', 'completed', 'likely_complete', 100, 100);
+            INSERT INTO sources (id, novel_id, source_name, url, priority)
+            VALUES (1, 1, 'novgo', 'https://novgo.net/a.html', 1),
+                   (2, 5, 'novgo', 'https://novgo.net/b.html', 1);
+            INSERT INTO chapters (novel_id, number, title, body, source_id, fetched_at)
+            VALUES (1, 1, 'One', 'body', 1, 100),
+                   (5, 1, 'One', 'body', 2, 100),
+                   (5, 2, 'Two', 'body', 2, 100);
+            INSERT INTO chapter_gaps (novel_id, number, detected_at) VALUES (5, 3, 100);
+            "#,
+        )
+        .unwrap();
+        let store = Store { conn };
+        store.migrate().unwrap();
+        store
+    }
+
+    fn novels_ddl(store: &Store) -> String {
+        store
+            .conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'novels'",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn legacy_db_gains_autoincrement_without_losing_data() {
+        let s = legacy_store();
+        assert!(novels_ddl(&s).to_ascii_uppercase().contains("AUTOINCREMENT"));
+
+        // Novels kept their ids, including the 2..4 hole.
+        let ids: Vec<i64> = s.list_subscriptions().unwrap().iter().map(|n| n.id).collect();
+        assert_eq!(ids, vec![1, 5]);
+
+        // Chapters, sources and gaps all survived the table swap.
+        assert_eq!(s.load_chapters(1).unwrap().len(), 1);
+        assert_eq!(s.load_chapters(5).unwrap().len(), 2);
+        assert_eq!(s.unfilled_gaps(5).unwrap(), BTreeSet::from([3]));
+        let novel = s.find_novel("5").unwrap().unwrap();
+        assert_eq!(novel.author.as_deref(), Some("Bo"));
+        assert_eq!(novel.sources.len(), 1);
+        assert_eq!(novel.derived_state, DerivedState::LikelyComplete);
+    }
+
+    /// The rename must leave the children's foreign keys pointing at the new
+    /// table, or unsubscribing would silently orphan chapters instead of
+    /// cascading.
+    #[test]
+    fn cascade_still_works_after_the_rebuild() {
+        let s = legacy_store();
+        s.remove_subscription(5).unwrap();
+        assert!(s.load_chapters(5).unwrap().is_empty());
+        assert!(s.unfilled_gaps(5).unwrap().is_empty());
+        // The untouched novel is unaffected.
+        assert_eq!(s.load_chapters(1).unwrap().len(), 1);
+    }
+
+    /// The point of the whole migration: the highest id used to be recycled.
+    #[test]
+    fn top_id_is_never_reused_after_unsubscribe() {
+        let s = mem_store();
+        let a = s.subscribe(&sample_meta("https://novgo.net/a.html"), "novgo").unwrap();
+        let mut second = sample_meta("https://novgo.net/b.html");
+        second.title = "Another Novel".into();
+        let b = s.subscribe(&second, "novgo").unwrap();
+        assert_eq!((a, b), (1, 2));
+
+        s.remove_subscription(b).unwrap();
+        let mut third = sample_meta("https://novgo.net/c.html");
+        third.title = "Third Novel".into();
+        let c = s.subscribe(&third, "novgo").unwrap();
+        assert_eq!(c, 3, "id {b} was handed out twice");
+    }
+
+    /// A migrated DB carries its high-water mark across too, so the first new
+    /// subscription continues past the old maximum rather than filling the hole.
+    #[test]
+    fn migrated_db_continues_past_the_old_maximum() {
+        let s = legacy_store();
+        let mut fresh = sample_meta("https://novgo.net/new.html");
+        fresh.title = "Brand New".into();
+        assert_eq!(s.subscribe(&fresh, "novgo").unwrap(), 6);
     }
 
     fn sample_meta(url: &str) -> NovelMeta {

@@ -29,6 +29,13 @@ rules-of-the-road.
   and points at `add-source`; `--force` overrides. **Active fallback:** sync
   gap-fills chapters the primary lacks from fallbacks by priority; primary is
   authoritative for content. Schema: `novels` / `sources` / `chapters`.
+- **Novel ids are permanent handles, never reused.** They're what the user
+  types (`vesper export 14`) and what the sync log records, so a recycled id
+  would silently retarget a command at a different novel. `novels.id` is
+  `AUTOINCREMENT` for exactly that reason — a plain rowid is `max(id)+1` over
+  *surviving* rows, which hands the highest id to the next subscription once
+  it's deleted. Unsubscribing leaves a permanent hole in the numbering; that's
+  intended, not something to compact.
 - **Tiered fetcher behind a trait.** Tier 1 = `ReqwestFetcher` (browser UA +
   headers). Tier 2 = `CurlFetcher` (shells out to system `curl`; GET and form
   POST), for hosts where Tier 1 gets challenged (freewebnovel, scribblehub).

@@ -14,6 +14,12 @@
   before the fix. Sync inserts are `OR IGNORE`, so a re-sync can't do this.
 - `vesper subs` and `vesper status` list novels in id order, so the printed
   `#N` labels run in sequence instead of being sorted by title.
+- Novel ids are never reused. `novels.id` was a plain rowid, so while a
+  mid-range unsubscribe left a permanent gap, deleting the *highest*-numbered
+  novel handed that id to the next subscription — and ids are what you type
+  (`vesper export 14`), so a recycled one silently retargets a command.
+  `novels.id` is now `AUTOINCREMENT`; existing libraries are migrated in place
+  on first run, preserving every id.
 
 ## 1.0.0
 
