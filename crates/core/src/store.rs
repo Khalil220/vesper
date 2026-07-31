@@ -276,10 +276,11 @@ impl Store {
         Ok(None)
     }
 
-    /// All subscriptions, ordered by title.
+    /// All subscriptions, ordered by id — so the `#N` labels `subs` and `status`
+    /// print run in sequence and stay put as titles come and go.
     pub fn list_subscriptions(&self) -> Result<Vec<StoredNovel>> {
         let ids: Vec<i64> = {
-            let mut stmt = self.conn.prepare("SELECT id FROM novels ORDER BY lower(title)")?;
+            let mut stmt = self.conn.prepare("SELECT id FROM novels ORDER BY id")?;
             let rows = stmt.query_map([], |r| r.get::<_, i64>(0))?;
             rows.collect::<rusqlite::Result<_>>()?
         };
@@ -691,6 +692,23 @@ mod tests {
         s.subscribe(&sample_meta("https://novgo.net/a.html"), "novgo").unwrap();
         let err = s.subscribe(&sample_meta("https://novgo.net/a.html"), "novgo").unwrap_err();
         assert!(err.to_string().contains("already subscribed"));
+    }
+
+    /// `subs` prints `#<id>` per line, so the listing has to come back in id
+    /// order — sorting by title made those numbers jump around.
+    #[test]
+    fn subscriptions_list_in_id_order() {
+        let s = mem_store();
+        let mut zed = sample_meta("https://novgo.net/z.html");
+        zed.title = "Zebra Chronicles".into();
+        let mut abe = sample_meta("https://novgo.net/a.html");
+        abe.title = "Abacus Diaries".into();
+
+        let first = s.subscribe(&zed, "novgo").unwrap();
+        let second = s.subscribe(&abe, "novgo").unwrap();
+
+        let ids: Vec<i64> = s.list_subscriptions().unwrap().iter().map(|n| n.id).collect();
+        assert_eq!(ids, vec![first, second]);
     }
 
     #[test]
