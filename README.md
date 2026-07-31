@@ -150,13 +150,20 @@ full crawl, so a sync where nothing changed is fast and light on the sites.
 ### refresh
 
 ```
-vesper refresh <novel|all>
+vesper refresh <novel|all> [--titles]
 ```
 
 Re-fetch a novel's metadata — author, cover, genre, status — from its main
 source, leaving chapters alone. Useful when the author field was empty at
 subscribe time (some sites are slow to fill these in) or a novel finally
 flipped to "Completed". `all` does every subscription.
+
+`--titles` additionally re-reads the *chapter* titles of everything already
+downloaded and overwrites the ones that differ. A normal sync never revisits a
+chapter it already has, so this is the way to repair titles that were saved
+while a site's parsing was wrong. It costs one request per stored chapter, so
+it's slow on a long novel — expect it to take a while and be gentle with it.
+Re-export afterwards to get the corrected titles into the EPUB.
 
 ### unsubscribe
 

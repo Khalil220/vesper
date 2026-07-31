@@ -517,6 +517,20 @@ impl Store {
         Ok(())
     }
 
+    /// Overwrite a stored chapter's title, leaving its body and source alone.
+    /// Repair hatch for chapters saved while an adapter's title parsing was
+    /// wrong — sync inserts are `OR IGNORE`, so a re-sync can't fix them.
+    /// Returns whether the title actually changed; clears `exported` when it did
+    /// so the next export rebuilds the EPUB.
+    pub fn update_chapter_title(&self, novel_id: i64, number: u32, title: &str) -> Result<bool> {
+        let changed = self.conn.execute(
+            "UPDATE chapters SET title = ?3, exported = 0, exported_at = NULL
+             WHERE novel_id = ?1 AND number = ?2 AND title != ?3",
+            params![novel_id, number, title],
+        )?;
+        Ok(changed > 0)
+    }
+
     /// Record a source's progress after a sync pass.
     pub fn update_source_progress(&self, source_id: i64, last_seen_chapter: u32) -> Result<()> {
         self.conn.execute(
@@ -737,6 +751,27 @@ mod tests {
         let loaded = s.load_chapters(id).unwrap();
         assert_eq!(loaded.len(), 2);
         assert_eq!(loaded[0].paragraphs, vec!["Para one.", "Para two."]);
+    }
+
+    /// Sync inserts are `OR IGNORE`, so chapters stored with a bad title need an
+    /// explicit overwrite; a corrected title must also un-export the chapter.
+    #[test]
+    fn retitle_overwrites_and_marks_for_re_export() {
+        let s = mem_store();
+        let id = s.subscribe(&sample_meta("https://novgo.net/a.html"), "novgo").unwrap();
+        let src = s.find_novel(&id.to_string()).unwrap().unwrap().primary_source().unwrap().id;
+        s.insert_chapter_if_absent(id, src, &chapter(1)).unwrap();
+        s.mark_all_exported(id).unwrap();
+
+        assert!(s.update_chapter_title(id, 1, "The Three Wives").unwrap());
+        assert_eq!(s.load_chapters(id).unwrap()[0].title, "The Three Wives");
+        // Body survived the retitle.
+        assert_eq!(s.load_chapters(id).unwrap()[0].paragraphs, vec!["Para one.", "Para two."]);
+
+        // Same title again is a no-op, so a repeat pass reports nothing changed.
+        assert!(!s.update_chapter_title(id, 1, "The Three Wives").unwrap());
+        // Unknown chapter number is a no-op, not an error.
+        assert!(!s.update_chapter_title(id, 99, "Nope").unwrap());
     }
 
     #[test]

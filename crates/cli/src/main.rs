@@ -65,6 +65,11 @@ enum Command {
         /// Novel to refresh: its id (from `vesper subs`) or exact title (quote if
         /// it has spaces), or `all` for every subscription.
         novel: String,
+        /// Also re-read every stored chapter's title from the source. Slow (one
+        /// request per chapter) — for repairing titles saved before an adapter
+        /// fix; a normal sync never revisits a chapter it already has.
+        #[arg(long)]
+        titles: bool,
         /// Override the request delay, in milliseconds (default: config value).
         #[arg(long)]
         delay_ms: Option<u64>,
@@ -160,7 +165,9 @@ async fn main() -> Result<()> {
             add_source(&config, novel, url, delay_ms).await
         }
         Command::Subs { gaps } => subs(gaps),
-        Command::Refresh { novel, delay_ms } => refresh(&config, novel, delay_ms).await,
+        Command::Refresh { novel, titles, delay_ms } => {
+            refresh(&config, novel, titles, delay_ms).await
+        }
         Command::Unsubscribe { novel } => unsubscribe(novel),
         Command::Fetch { novel, limit, delay_ms } => fetch(&config, novel, limit, delay_ms).await,
         Command::Export { novel, out } => export(&config, novel, out).await,
@@ -488,7 +495,49 @@ async fn refresh_one(store: &Store, novel: &StoredNovel, delay_ms: u64) -> Resul
     Ok((old != new).then_some((old, new)))
 }
 
-async fn refresh(config: &Config, novel: String, delay_ms: Option<u64>) -> Result<()> {
+/// Re-read every stored chapter's title from the primary source and overwrite
+/// the ones that differ. One request per chapter, so it's deliberately opt-in.
+async fn retitle_one(store: &Store, novel: &StoredNovel, delay_ms: u64) -> Result<usize> {
+    let primary = novel
+        .primary_source()
+        .ok_or_else(|| anyhow!("\"{}\" has no source to re-read titles from", novel.title))?;
+    let source = source_for(&primary.url, delay_ms)?;
+
+    let have = store.stored_chapter_numbers(novel.id)?;
+    if have.is_empty() {
+        return Ok(0);
+    }
+    // Discovery gives us the per-chapter URLs; only chapters we actually store
+    // are worth a request.
+    let refs = source.discover_chapters(&primary.url, None).await?;
+    let mut progress = ProgressBar::new();
+    let total = have.len();
+    let mut done = 0usize;
+    let mut fixed = 0usize;
+
+    for r in refs.iter().filter(|r| have.contains(&r.number)) {
+        done += 1;
+        progress.update(SyncProgress::Upgrading { done, total });
+        match source.fetch_chapter(r).await {
+            Ok(ch) => {
+                if store.update_chapter_title(novel.id, ch.number, &ch.title)? {
+                    fixed += 1;
+                }
+            }
+            // A chapter that 404s now keeps whatever title it already has.
+            Err(e) => eprintln!("\n  ! chapter {} — {e}", r.number),
+        }
+    }
+    progress.finish();
+    Ok(fixed)
+}
+
+async fn refresh(
+    config: &Config,
+    novel: String,
+    titles: bool,
+    delay_ms: Option<u64>,
+) -> Result<()> {
     let store = Store::open_default()?;
     let delay = delay_ms.unwrap_or(config.request_delay_ms);
 
@@ -500,6 +549,7 @@ async fn refresh(config: &Config, novel: String, delay_ms: Option<u64>) -> Resul
         }
         eprintln!("Refreshing metadata for {} subscription(s)...", novels.len());
         let mut changed = 0usize;
+        let mut retitled = 0usize;
         for n in &novels {
             match refresh_one(&store, n, delay).await {
                 Ok(Some((old, new))) => {
@@ -509,12 +559,25 @@ async fn refresh(config: &Config, novel: String, delay_ms: Option<u64>) -> Resul
                 Ok(None) => println!("  {} — no author change", n.title),
                 Err(e) => eprintln!("  ! {} — {e}", n.title),
             }
+            if titles {
+                match retitle_one(&store, n, delay).await {
+                    Ok(0) => println!("  {} — chapter titles already correct", n.title),
+                    Ok(fixed) => {
+                        println!("  {} — {fixed} chapter title(s) corrected", n.title);
+                        retitled += fixed;
+                    }
+                    Err(e) => eprintln!("  ! {} — titles: {e}", n.title),
+                }
+            }
         }
         if changed > 0 {
             println!(
                 "\n{changed} author(s) changed — re-export those novels \
                  (`vesper export <id>`) to move their EPUBs into the new folders."
             );
+        }
+        if retitled > 0 {
+            println!("\n{retitled} chapter title(s) corrected — re-export to update the EPUBs.");
         }
         return Ok(());
     }
@@ -532,6 +595,16 @@ async fn refresh(config: &Config, novel: String, delay_ms: Option<u64>) -> Resul
             );
         }
         None => println!("Refreshed \"{}\": author unchanged.", found.title),
+    }
+    if titles {
+        eprintln!("Re-reading chapter titles for \"{}\" (one request each)...", found.title);
+        match retitle_one(&store, &found, delay).await? {
+            0 => println!("Chapter titles already correct."),
+            fixed => {
+                println!("Corrected {fixed} chapter title(s).");
+                println!("Run `vesper export {}` to rebuild the EPUB.", found.id);
+            }
+        }
     }
     Ok(())
 }
