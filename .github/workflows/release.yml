@@ -87,6 +87,29 @@ jobs:
             echo "No CHANGELOG.md entry for $GITHUB_REF_NAME" >&2
             exit 1
           fi
+      # Release bodies render with hard line breaks — unlike files browsed in
+      # the repo, where a single newline is a soft break that reflows. So the
+      # wrapping that keeps CHANGELOG.md readable in an editor and clean in
+      # diffs would otherwise show up as a break mid-sentence at every wrap
+      # point. Rejoin wrapped prose, leaving blank lines, headings, list item
+      # boundaries and fenced code blocks exactly as they are. POSIX awk only:
+      # the runner's awk is mawk, so no interval regexes or [[:classes:]].
+      - name: Unwrap prose for release-note rendering
+        run: |
+          awk '
+            function flush() { if (buf != "") { print buf; buf = "" } }
+            /^```/                  { flush(); print; fence = 1 - fence; next }
+            fence == 1              { print; next }
+            /^[ \t]*$/              { flush(); print ""; next }
+            /^#+ /                  { flush(); print; next }
+            /^[ \t]*[-*+][ \t]/     { flush(); buf = $0; next }
+            /^[ \t]*[0-9]+\.[ \t]/  { flush(); buf = $0; next }
+                                    { sub(/^[ \t]+/, ""); buf = (buf == "" ? $0 : buf " " $0) }
+            END { flush() }
+          ' notes.md > notes.unwrapped.md
+          mv notes.unwrapped.md notes.md
+          echo "--- release body ---"
+          cat notes.md
       - uses: softprops/action-gh-release@v2
         with:
           files: dist/*
