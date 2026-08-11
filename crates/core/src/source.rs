@@ -168,10 +168,19 @@ fn sel(selector: &str) -> Result<Selector> {
     Selector::parse(selector).map_err(|e| anyhow!("invalid selector {selector:?}: {e:?}"))
 }
 
-/// Interpret an `og:novel:status` value across sites (numeric or word form).
+/// Interpret a site's status label (numeric or word form) across sources.
+///
+/// Everything unrecognised — notably "hiatus", "cancelled" and "dropped" —
+/// stays `Unknown` on purpose. Only `Completed` lowers the poll cadence and
+/// makes a novel eligible for retention purging, and none of those three mean
+/// the story finished; a hiatus can end, and a dropped novel that gets picked
+/// up again would have been purged. The label is a hint either way (see
+/// DESIGN.md): observed activity decides.
 pub(crate) fn parse_status_hint(raw: &str) -> NovelStatus {
     match raw.trim().to_ascii_lowercase().as_str() {
-        "1" | "ongoing" | "on going" | "serializing" | "active" => NovelStatus::Ongoing,
+        "1" | "ongoing" | "on going" | "serializing" | "active" | "releasing" => {
+            NovelStatus::Ongoing
+        }
         "2" | "completed" | "complete" | "finished" => NovelStatus::Completed,
         _ => NovelStatus::Unknown,
     }
@@ -321,6 +330,22 @@ mod tests {
         assert_eq!(meta.author.as_deref(), Some("MyLittleBrother"));
         assert_eq!(meta.cover_url.as_deref(), Some("https://novgo.net/cover.jpg"));
         assert_eq!(meta.status_hint, NovelStatus::Ongoing);
+    }
+
+    /// The label only ever lowers the poll cadence, and only `Completed` makes
+    /// a novel purgeable — so a paused or abandoned novel must not map to it.
+    #[test]
+    fn only_finished_labels_count_as_completed() {
+        assert_eq!(parse_status_hint("releasing"), NovelStatus::Ongoing);
+        assert_eq!(parse_status_hint("Ongoing"), NovelStatus::Ongoing);
+        assert_eq!(parse_status_hint("completed"), NovelStatus::Completed);
+        for paused in ["hiatus", "cancelled", "dropped", ""] {
+            assert_eq!(
+                parse_status_hint(paused),
+                NovelStatus::Unknown,
+                "{paused:?} must not be treated as completed"
+            );
+        }
     }
 
     #[test]

@@ -34,6 +34,32 @@ impl<F: Fetcher> LightNovelWorldSource<F> {
     }
 }
 
+pub const HOST: &str = "lightnovelworld.org";
+
+/// Whether `url` points at lightnovelworld (bare domain or `www.`). Used by the
+/// chikari migration to spot subscriptions that need moving.
+pub fn is_lightnovelworld_url(url: &str) -> bool {
+    Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(|h| h.trim_start_matches("www.").eq_ignore_ascii_case(HOST)))
+        .unwrap_or(false)
+}
+
+/// The novel slug from a lightnovelworld URL (`/novel/<slug>/...`).
+///
+/// chikari inherited lightnovelworld's slugs verbatim, so this is what the
+/// migration hands to `chikari::novel_url` to find the same novel's new home.
+pub fn slug_from_url(url: &str) -> Option<String> {
+    let parsed = Url::parse(url).ok()?;
+    let mut segments = parsed.path_segments()?.filter(|s| !s.is_empty());
+    match segments.next()? {
+        "novel" | "novels" => {}
+        _ => return None,
+    }
+    let slug = segments.next()?;
+    (!slug.is_empty()).then(|| slug.to_string())
+}
+
 fn novel_base(url: &str) -> String {
     match Url::parse(url) {
         Ok(mut u) => {
@@ -209,6 +235,25 @@ mod tests {
     #[test]
     fn reads_total_chapters() {
         assert_eq!(parse_total_chapters(NOVEL_HTML), Some(3105));
+    }
+
+    #[test]
+    fn recognizes_its_own_urls_and_slugs() {
+        assert!(is_lightnovelworld_url("https://lightnovelworld.org/novel/shadow-slave/"));
+        assert!(is_lightnovelworld_url("https://www.lightnovelworld.org/novel/x/"));
+        assert!(!is_lightnovelworld_url("https://chikari.moe/novels/shadow-slave"));
+        assert!(!is_lightnovelworld_url("not a url"));
+
+        assert_eq!(
+            slug_from_url("https://lightnovelworld.org/novel/shadow-slave/").as_deref(),
+            Some("shadow-slave")
+        );
+        assert_eq!(
+            slug_from_url("https://lightnovelworld.org/novel/shadow-slave/chapter/12/").as_deref(),
+            Some("shadow-slave")
+        );
+        assert_eq!(slug_from_url("https://lightnovelworld.org/").as_deref(), None);
+        assert_eq!(slug_from_url("https://lightnovelworld.org/search/x").as_deref(), None);
     }
 
     #[test]

@@ -2,6 +2,7 @@
 //! extraction, and EPUB packaging. See DESIGN.md for the architecture and the
 //! decisions behind it.
 
+pub mod chikari;
 pub mod config;
 pub mod epub;
 pub mod fetch;
@@ -17,6 +18,7 @@ pub mod store;
 pub mod sync;
 pub mod util;
 
+pub use chikari::ChikariSource;
 pub use config::Config;
 pub use epub::{build_epub, download_cover, Cover};
 pub use fetch::{is_not_found, CurlFetcher, FetchConfig, Fetcher, NotFound, ReqwestFetcher};
@@ -38,6 +40,12 @@ pub use util::sanitize_filename;
 pub fn build_source(url: &str, delay: std::time::Duration) -> Option<Box<dyn Source>> {
     let host = ::url::Url::parse(url).ok()?.host_str()?.to_ascii_lowercase();
     match host.as_str() {
+        // chikari serves plain JSON through its public API, so Tier 1 is enough
+        // (its Cloudflare front doesn't challenge a normal browser header set).
+        "chikari.moe" | "www.chikari.moe" => {
+            let fetcher = ReqwestFetcher::new(delay).ok()?;
+            Some(Box::new(ChikariSource::new(fetcher)))
+        }
         "freewebnovel.com" | "www.freewebnovel.com" => Some(Box::new(FreewebnovelSource::new(
             CurlFetcher::new(delay),
         ))),
