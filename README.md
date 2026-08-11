@@ -12,16 +12,6 @@ sites as fallbacks. Chapters that are missing or dead on the main site get
 quietly filled in from the others, and you still end up with one EPUB, not
 three copies of the same book.
 
-Light Novel World's novel library has moved to chikari.moe, and that site is
-shutting down. If you followed novels there, Vesper points those
-subscriptions at chikari by itself the first time you run it after upgrading;
-nothing is re-downloaded and no chapter is touched.
-
-A few novels didn't make the move — Light Novel World's own notice says the
-long tail of low-traffic titles was dropped rather than migrated. Vesper names
-those instead of pretending they still work, and everything you already
-downloaded of them stays in your library and exports as usual.
-
 Everything you download is cached in a local SQLite database. Exporting,
 re-exporting, splitting into volumes — none of that ever hits the network
 again.
@@ -109,8 +99,7 @@ Chapters you already downloaded are kept and re-attributed to the new main
 source, so nothing is re-fetched. Vesper does not reorder sources on its own
 when a site starts failing: a site being down for an hour looks exactly like
 a site being gone, and guessing wrong would mean re-downloading a whole novel
-twice. The one exception is the Light Novel World shutdown, where the site
-told us outright which novels were dropped.
+twice. Deciding a site is really gone is your call, not a guess.
 
 ### subs
 
