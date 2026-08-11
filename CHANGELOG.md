@@ -2,16 +2,11 @@
 
 ## 1.2.0
 
-- Support chikari.moe, where Light Novel World's novel library has moved.
-- Move existing lightnovelworld subscriptions to chikari automatically, the
+- Light Novel World's novel library has moved to chikari.moe, and Vesper has
+  moved with it. The novels you already follow are pointed at the new site the
   first time Vesper runs after the upgrade. Nothing is re-downloaded and no
-  chapter is touched: the subscription is repointed at the new site, and the
-  chapters already in your library stay exactly as they are.
-- Stop missing chapters happening on this source at all. Vesper now reads
-  chikari's real chapter list instead of guessing that a novel runs from 1 to
-  N, so it never asks for a chapter number the site doesn't have — the holes
-  that used to show up as permanently missing chapters on lightnovelworld.
-- Record genres for novels from chikari, so exported books carry them.
+  chapter is touched — the chapters already in your library stay exactly as
+  they are.
 
 ### Upgrading
 
