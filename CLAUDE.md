@@ -56,9 +56,25 @@ rules-of-the-road.
   stops the content-upgrade pass from re-fetching the dead primary URL every
   sync. User-facing surfaces show only **unfilled** gaps
   (`store::unfilled_gaps`): `subs`/`status` list them, and the EPUB gets a
-  front "Missing Chapters" page. Re-probing a known gap is silent. Matters most
-  for URL-generating adapters (lightnovelworld, freewebnovel) whose id
-  sequences have holes.
+  front "Missing Chapters" page. Re-probing a known gap is silent. Only
+  *URL-generating* adapters (freewebnovel) produce these: an adapter that reads
+  the site's real chapter list (chikari, royalroad, scribblehub) never asks for
+  a number the site doesn't have, so it yields no gaps at all. Prefer reading a
+  list over generating a range whenever the site offers one.
+- **A stored chapter is never revisited, so a bad one needs an explicit
+  repair.** `insert_chapter_if_absent` is `OR IGNORE`: once a chapter is
+  stored, no amount of syncing will correct it. Hence
+  `store::update_chapter_title` for titles and `core::repair` (`vesper repair`)
+  for bodies. The case that motivates the latter: a gated site serves a short
+  "log in to keep reading" placeholder with an ordinary 200, so the fetch
+  succeeds and the placeholder becomes the chapter's text. **Detect those on
+  the placeholder's wording, never on length alone** — a real between-arcs
+  author's note runs a few hundred characters, and length-based detection would
+  silently destroy it (there is a test pinning exactly that). Validate the
+  replacement too: refuse incoming text that is itself a placeholder, or that
+  is no longer than what is stored, so repairing against a still-gated source —
+  or re-running it while a site is having a bad day — can't overwrite good
+  prose.
 - **Promotion re-attributes, and is never automatic on failure.** Making a
   fallback primary (`store::promote_source`, `vesper set-primary`) renumbers
   priorities *and* re-attributes the old primary's chapters to the promoted
@@ -147,8 +163,9 @@ rules-of-the-road.
   The adapter stays only so a lingering subscription resolves to something
   that fails with a real message. **It is not a usable fallback**, and per the
   notice the long tail of low-traffic novels was dropped rather than migrated,
-  so those are not coming to chikari either. Historical shape below.
-  JS-rendered ToC, so
+  so those are not coming to chikari either.
+  Its historical shape, kept because the migration reasons about it: JS-rendered
+  ToC, so
   discovery reads the total from `og:title` ("… - N Chapters") and generates
   sequential `/novel/<slug>/chapter/<n>/` URLs. Metadata from page elements
   (`h1.novel-title`, `p.novel-author` — text after the "Author:" label, so
@@ -239,6 +256,10 @@ Cargo workspace, two crates under `crates/`:
     Generic over `Fetcher`, which is the seam the tests feed canned JSON
     through; `resolve_on_chikari` is public so `examples/live_migration` can
     preview a real library without writing to it.
+  - `repair` — re-fetch chapters stored as a site's gating placeholder (see the
+    invariant above). `looks_like_gate_stub` and the replacement check are pure
+    and unit-tested, including the short-author's-note case that length-based
+    detection would eat; `repair_novel` drives them over a novel's sources.
   - `profiles` — built-in profiles plus user `.ini` files from
     `<config_dir>/profiles/` (bad files skipped with a warning).
     `crate::build_source` (lib.rs) resolves a URL to adapter + fetch tier.
@@ -248,11 +269,16 @@ Cargo workspace, two crates under `crates/`:
     cover + `dc:subject` genre, "Missing Chapters" page for 404 gaps.
   - `paths` — library layout (`epub_path`, `novel_dir`).
   - `store` — SQLite persistence: novels/sources/chapters/chapter_gaps/meta
-    schema,
-    WAL, resume-aware insert, gap record/clear/list, normalized-title lookup,
-    subscriptions listed in id order. `update_chapter_title` is the repair
-    hatch for chapters stored while an adapter parsed titles wrong — inserts
-    are `OR IGNORE`, so a re-sync alone can never fix them. `migrate()` is
+    schema, WAL, resume-aware insert, gap record/clear/list, normalized-title
+    lookup, subscriptions listed in id order. `update_chapter_title` is the
+    repair hatch for chapters stored while an adapter parsed titles wrong —
+    inserts are `OR IGNORE`, so a re-sync alone can never fix them;
+    `update_chapter_content` is the body equivalent, used by both the
+    content-upgrade pass and `repair`. `repoint_source` (site moved) and
+    `promote_source` (fallback takes over) both keep stored chapters
+    attributed to a live source — see their invariants above.
+    `chapters_shorter_than` narrows the placeholder scan. `meta` is the
+    key/value table one-shot migrations mark themselves done in. `migrate()` is
     additive and idempotent; the one destructive step is the `novels` rebuild
     that adds `AUTOINCREMENT`, which runs with `foreign_keys=OFF` (`DROP
     TABLE` otherwise cascades every chapter away), refuses to drop the

@@ -75,6 +75,21 @@ enum Command {
         #[arg(long)]
         delay_ms: Option<u64>,
     },
+    /// Re-fetch chapters stored as a site's "log in to read" placeholder.
+    Repair {
+        /// Novel to repair: its id (from `vesper subs`) or exact title (quote if
+        /// it has spaces), or `all` for every subscription.
+        novel: String,
+        /// Repair one specific chapter, whatever its stored text looks like.
+        #[arg(long)]
+        chapter: Option<u32>,
+        /// Report what would be repaired without changing anything.
+        #[arg(long)]
+        dry_run: bool,
+        /// Override the request delay, in milliseconds (default: config value).
+        #[arg(long)]
+        delay_ms: Option<u64>,
+    },
     /// Make one of a novel's sources its primary (e.g. after a site shuts down).
     SetPrimary {
         /// Novel: its id (from `vesper subs`), or the exact title (quote it if
@@ -183,6 +198,9 @@ async fn main() -> Result<()> {
         Command::Subs { gaps } => subs(gaps),
         Command::Refresh { novel, titles, delay_ms } => {
             refresh(&config, novel, titles, delay_ms).await
+        }
+        Command::Repair { novel, chapter, dry_run, delay_ms } => {
+            repair(&config, novel, chapter, dry_run, delay_ms).await
         }
         Command::SetPrimary { novel, source } => set_primary(novel, source),
         Command::Unsubscribe { novel } => unsubscribe(novel),
@@ -405,16 +423,27 @@ fn local_timestamp() -> String {
 }
 
 /// One-line summary of a novel's unavailable (404-gap) chapters, or "" if none.
+/// A capped, comma-separated chapter-number list ("1, 2, 3, … (+9 more)").
+/// Kept separate from any wording about *why* the numbers are interesting, so
+/// callers don't inherit a caption that doesn't apply to them.
+fn describe_numbers(numbers: &BTreeSet<u32>) -> String {
+    const CAP: usize = 15;
+    let mut list = numbers.iter().take(CAP).map(|n| n.to_string()).collect::<Vec<_>>().join(", ");
+    if numbers.len() > CAP {
+        list.push_str(&format!(", … (+{} more)", numbers.len() - CAP));
+    }
+    list
+}
+
 fn describe_gaps(gaps: &BTreeSet<u32>) -> String {
     if gaps.is_empty() {
         return String::new();
     }
-    const CAP: usize = 15;
-    let mut list = gaps.iter().take(CAP).map(|n| n.to_string()).collect::<Vec<_>>().join(", ");
-    if gaps.len() > CAP {
-        list.push_str(&format!(", … (+{} more)", gaps.len() - CAP));
-    }
-    format!("{} unavailable at source (404): ch. {}", gaps.len(), list)
+    format!(
+        "{} unavailable at source (404): ch. {}",
+        gaps.len(),
+        describe_numbers(gaps)
+    )
 }
 
 /// A single-line, self-overwriting `n/m` progress indicator on stderr. It draws
@@ -736,6 +765,80 @@ fn subs(gaps_only: bool) -> Result<()> {
     }
     if gaps_only && shown == 0 {
         println!("No subscriptions have missing chapters.");
+    }
+    Ok(())
+}
+
+/// Re-fetch placeholder chapters for one novel, or every subscription.
+async fn repair(
+    config: &Config,
+    novel: String,
+    chapter: Option<u32>,
+    dry_run: bool,
+    delay_ms: Option<u64>,
+) -> Result<()> {
+    let store = Store::open_default()?;
+    let delay = delay_ms.unwrap_or(config.request_delay_ms);
+
+    let novels = if novel.eq_ignore_ascii_case("all") {
+        ensure!(chapter.is_none(), "--chapter needs a single novel, not `all`");
+        store.list_subscriptions()?
+    } else {
+        vec![store
+            .find_novel(&novel)?
+            .ok_or_else(|| anyhow!("no subscription matches \"{novel}\""))?]
+    };
+
+    let mut total_repaired = 0usize;
+    for n in &novels {
+        let sources = build_sources(n, delay)?;
+        let report = vesper_core::repair_novel(
+            &store,
+            n.id,
+            &sources,
+            chapter,
+            dry_run,
+            |number, done, total| {
+                eprintln!("  {} — ch.{number} ({done}/{total})", n.title);
+            },
+        )
+        .await;
+
+        match report {
+            Ok(r) if r.is_empty() => {
+                // Staying quiet for `all` keeps the healthy majority off screen.
+                if novels.len() == 1 {
+                    println!("{}: nothing to repair.", n.title);
+                }
+            }
+            Ok(r) => {
+                if !r.repaired.is_empty() {
+                    total_repaired += r.repaired.len();
+                    println!(
+                        "{}: {} chapter(s) {}: ch. {}",
+                        n.title,
+                        r.repaired.len(),
+                        if dry_run { "would be repaired" } else { "repaired" },
+                        describe_numbers(&r.repaired.iter().copied().collect())
+                    );
+                }
+                for (number, why) in &r.skipped {
+                    if *number == 0 {
+                        eprintln!("  ! {}: {why}", n.title);
+                    } else {
+                        eprintln!("  ! {} ch.{number} left as-is — {why}", n.title);
+                    }
+                }
+            }
+            Err(e) => eprintln!("  ! {} — {e}", n.title),
+        }
+    }
+
+    if total_repaired > 0 && !dry_run {
+        println!(
+            "\n{total_repaired} chapter(s) replaced — re-export to update the EPUB \
+             (`vesper export <novel>`)."
+        );
     }
     Ok(())
 }

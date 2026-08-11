@@ -762,6 +762,27 @@ impl Store {
             .optional()?)
     }
 
+    /// Stored chapters whose body is shorter than `max_chars`. Narrows the scan
+    /// for placeholder text (see `crate::repair`) to a handful of rows instead
+    /// of loading a novel's whole back catalogue into memory.
+    pub fn chapters_shorter_than(&self, novel_id: i64, max_chars: usize) -> Result<Vec<Chapter>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT number, title, body FROM chapters
+             WHERE novel_id = ?1 AND length(body) < ?2 ORDER BY number",
+        )?;
+        let rows = stmt.query_map(params![novel_id, max_chars as i64], |r| {
+            let number: i64 = r.get(0)?;
+            let title: String = r.get(1)?;
+            let body: String = r.get(2)?;
+            Ok(Chapter {
+                number: number as u32,
+                title,
+                paragraphs: body.split("\n\n").map(str::to_string).collect(),
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     /// Chapter numbers currently sourced from something other than
     /// `primary_source_id` — candidates to upgrade if the primary now has them.
     pub fn chapters_from_other_sources(

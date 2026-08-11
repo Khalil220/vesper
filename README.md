@@ -186,6 +186,28 @@ while a site's parsing was wrong. It costs one request per stored chapter, so
 it's slow on a long novel — expect it to take a while and be gentle with it.
 Re-export afterwards to get the corrected titles into the EPUB.
 
+### repair
+
+```
+vesper repair <novel|all> [--chapter N] [--dry-run]
+```
+
+Re-download chapters that were saved as a site's "log in to keep reading"
+placeholder instead of the actual chapter. Sites that gate part of their
+catalogue serve those with an ordinary success response, so the download looks
+like it worked and the placeholder ends up stored as the chapter's text. A
+normal sync will never fix it — it doesn't revisit chapters you already have.
+
+Vesper finds them by their wording, not by how short they are, so a genuinely
+brief chapter (an author's note between arcs, say) is left alone. Use
+`--chapter N` to force a single chapter that this doesn't recognise, and
+`--dry-run` to see what it would touch first.
+
+A replacement is rejected if it's a placeholder itself, or if it isn't longer
+than what you already have, so running this against a site that's down — or one
+that's still gating the same chapters — can't damage good chapters. Re-export
+afterwards to get the real text into the EPUB.
+
 ### unsubscribe
 
 ```
