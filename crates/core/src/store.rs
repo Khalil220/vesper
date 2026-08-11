@@ -156,6 +156,15 @@ impl Store {
                 detected_at INTEGER NOT NULL,
                 PRIMARY KEY (novel_id, number)
             );
+
+            -- Small key/value scratchpad for library-wide facts that aren't
+            -- per-novel. Currently just one-shot migration markers, so a
+            -- completed migration costs a single SELECT on later launches
+            -- instead of re-running.
+            CREATE TABLE IF NOT EXISTS meta (
+                key   TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
             "#,
         )?;
         // Upgrade older DBs (harmless no-ops if the columns already exist).
@@ -343,6 +352,79 @@ impl Store {
             params![novel_id, source_name, url, next_priority],
         )?;
         Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Read a `meta` key (see the table comment). `None` if unset.
+    pub fn meta_get(&self, key: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row("SELECT value FROM meta WHERE key = ?1", params![key], |r| {
+                r.get::<_, String>(0)
+            })
+            .optional()?)
+    }
+
+    /// Write a `meta` key, replacing any previous value.
+    pub fn meta_set(&self, key: &str, value: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO meta (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, value],
+        )?;
+        Ok(())
+    }
+
+    /// Every source in the library, paired with its novel's id and title.
+    /// Site-agnostic on purpose: callers that care about a particular host
+    /// (a site migration) filter it themselves.
+    pub fn all_sources(&self) -> Result<Vec<(i64, String, StoredSource)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT n.id, n.title, s.id, s.source_name, s.url, s.priority, s.last_seen_chapter
+             FROM sources s JOIN novels n ON n.id = s.novel_id
+             ORDER BY n.id, s.priority",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                StoredSource {
+                    id: r.get(2)?,
+                    name: r.get(3)?,
+                    url: r.get(4)?,
+                    priority: r.get(5)?,
+                    last_seen_chapter: r.get::<_, Option<i64>>(6)?.map(|n| n as u32),
+                },
+            ))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Point an existing source row at a new site, in place.
+    ///
+    /// This is how a site *move* is recorded, and it is deliberately not
+    /// "remove the old source, add a new one": keeping the same `sources.id`
+    /// keeps every already-downloaded chapter attributed to it, so nothing is
+    /// re-downloaded and the priority ordering is untouched. Dropping and
+    /// re-adding would orphan that attribution and make the content-upgrade
+    /// pass re-fetch the novel's entire back catalogue from the new primary.
+    ///
+    /// Errors if `url` is already in the library on some *other* source row
+    /// (`sources.url` is UNIQUE); repointing a row at the URL it already holds
+    /// is a no-op.
+    pub fn repoint_source(&self, source_id: i64, source_name: &str, url: &str) -> Result<()> {
+        if let Some(existing) = self.source_id_for_url(url)? {
+            if existing != source_id {
+                bail!("{url} is already attached to another subscription");
+            }
+        }
+        let changed = self.conn.execute(
+            "UPDATE sources SET source_name = ?2, url = ?3 WHERE id = ?1",
+            params![source_id, source_name, url],
+        )?;
+        if changed == 0 {
+            bail!("no source #{source_id} to repoint");
+        }
+        Ok(())
     }
 
     fn source_id_for_url(&self, url: &str) -> Result<Option<i64>> {
@@ -590,6 +672,26 @@ impl Store {
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Load a single stored chapter by number, if present.
+    pub fn load_chapter(&self, novel_id: i64, number: u32) -> Result<Option<Chapter>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT title, body FROM chapters WHERE novel_id = ?1 AND number = ?2",
+                params![novel_id, number],
+                |r| {
+                    let title: String = r.get(0)?;
+                    let body: String = r.get(1)?;
+                    Ok(Chapter {
+                        number,
+                        title,
+                        paragraphs: body.split("\n\n").map(str::to_string).collect(),
+                    })
+                },
+            )
+            .optional()?)
     }
 
     /// Chapter numbers currently sourced from something other than
