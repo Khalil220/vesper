@@ -5,12 +5,17 @@ URL, it tracks the story, fetches chapters at a polite pace, and keeps an
 EPUB in your library up to date — on demand, or on a schedule in the
 background if you set it up that way.
 
-It currently understands novgo.net, freewebnovel.com, lightnovelworld.org,
-royalroad.com and scribblehub.com. A nice side effect of supporting several
-sites: if a novel exists on more than one of them, you can attach the extra
-sites as fallbacks. Chapters that are missing or dead on the main site get
-quietly filled in from the others, and you still end up with one EPUB, not
-three copies of the same book.
+It currently understands novgo.net, chikari.moe, freewebnovel.com,
+lightnovelworld.org, royalroad.com and scribblehub.com. A nice side effect
+of supporting several sites: if a novel exists on more than one of them, you
+can attach the extra sites as fallbacks. Chapters that are missing or dead on
+the main site get quietly filled in from the others, and you still end up with
+one EPUB, not three copies of the same book.
+
+Light Novel World's novel library has moved to chikari.moe. If you follow
+novels from there, Vesper points those subscriptions at the new site by
+itself the first time you run it after upgrading — nothing is re-downloaded,
+and anything chikari doesn't carry keeps working from the old site.
 
 Everything you download is cached in a local SQLite database. Exporting,
 re-exporting, splitting into volumes — none of that ever hits the network
@@ -90,9 +95,10 @@ vesper subs [--gaps]
 List everything you follow: each novel, its main source, its fallbacks, and
 any chapters that are permanently missing. "Permanently missing" means the
 main site returns a hard 404 for that chapter number and no fallback has it
-either — some sites (lightnovelworld is the main offender) have holes in
-their chapter numbering where chapters were deleted or merged, and there's
-simply nothing there to download. `--gaps` filters the list down to novels
+either — some sites have holes in their chapter numbering where chapters were
+deleted or merged, and there's simply nothing there to download. (chikari is
+the exception: it publishes its real chapter list, so Vesper never asks it for
+a chapter that isn't there.) `--gaps` filters the list down to novels
 that have such holes, which is handy for deciding where an extra source
 would actually help.
 

@@ -59,6 +59,21 @@ rules-of-the-road.
   front "Missing Chapters" page. Re-probing a known gap is silent. Matters most
   for URL-generating adapters (lightnovelworld, freewebnovel) whose id
   sequences have holes.
+- **Sites move; subscriptions follow them in place.** When a site relocates
+  (lightnovelworld -> chikari.moe), the fix is a one-shot migration that
+  **repoints the existing `sources` row** (`store::repoint_source`), not a new
+  source row. Keeping the same `sources.id` keeps every stored chapter
+  attributed to it, so nothing is re-downloaded and priorities are untouched;
+  adding a new primary instead makes the content-upgrade pass re-fetch the
+  whole back catalogue for identical prose. A move is only applied once the new
+  site *confirms* the novel (slug, else exact normalized-title search) — a slug
+  that resolves to a different novel is refused, and an unreachable site is
+  never read as "not there": the marker stays unset and it retries next launch.
+  Migrations live in `core::migrate`, are guarded by a key in the `meta` table,
+  and run from `main()` before the command — but only for commands that touch
+  the library. **Repointing is only safe because the two sites share a chapter
+  number-space**; verify that with `examples/live_migration` before assuming it
+  for the next move.
 - **Retention resolves delete-vs-append:** ongoing novels keep chapters in the
   DB (append = regenerate-from-DB); only *Likely complete* novels (labeled
   complete AND quiet for the grace window AND exported) get purged. Never on
@@ -89,7 +104,30 @@ rules-of-the-road.
   branding off the *end*; splitting on the first `|` eats the name and leaves a
   bare "Chapter N". Content `.txt`; metadata `og:novel:*`; status word form
   ("Completed"/"Ongoing").
-- **lightnovelworld.org** (hand-written adapter, Tier 1): JS-rendered ToC, so
+- **chikari.moe** (hand-written adapter, Tier 1): where lightnovelworld's novel
+  library moved. A SvelteKit app whose chapter pages are **client-rendered**
+  (the HTML for `/novels/<slug>/<n>` is an empty app shell), so there is nothing
+  to scrape — but it publishes the JSON API its own front end calls, described
+  at `/api/openapi.json`. Read that, not the HTML. `GET /api/novels/<slug>` =
+  metadata (`title`, `authors[]` — prefer `role == "author"`, `cover_url`,
+  `status`, `genres[]`); `GET /api/novels/<slug>/chapters?order=asc&limit=500
+  &offset=N` = the real ToC (`limit` is **server-clamped to 500**, so page it);
+  `GET /api/novels/<slug>/chapters/<n>/read` = one chapter, `body` being plain
+  text with newline-separated paragraphs. **Discovery reads the list, never
+  generates `1..=N`** — the numbering has holes (`latest_number` runs ahead of
+  `stored_chapter_count` for about half the catalogue) that 404 on read, but the
+  listing omits them, so this source yields **no 404 gaps at all**. Bodies carry
+  literal inline markup (`<em>`, `<br>`, ...) that must be stripped, since EPUB
+  paragraphs are XML-escaped; a stray `<` in dialogue is prose and must survive.
+  Status words: `releasing` / `completed` / `hiatus` / `cancelled` / `dropped`.
+  A `locked` chapter is early access — a *retryable* error, not a 404 gap.
+  Chapter `number` is typed as a float; a non-integral one is skipped, never
+  rounded into a neighbour's slot. Note a chapter's *displayed* label often
+  differs from its canonical number ("Chapter 1176" at number 1200) — that also
+  held on lightnovelworld, which is part of why the number-spaces line up.
+- **lightnovelworld.org** (hand-written adapter, Tier 1) — **superseded by
+  chikari.moe**; still functional, kept as a fallback and for novels chikari
+  lacks. JS-rendered ToC, so
   discovery reads the total from `og:title` ("… - N Chapters") and generates
   sequential `/novel/<slug>/chapter/<n>/` URLs. Metadata from page elements
   (`h1.novel-title`, `p.novel-author` — text after the "Author:" label, so
@@ -137,6 +175,13 @@ rules-of-the-road.
   `cargo test`. Sample chapters from across a novel's range: freewebnovel
   formats its `<title>` inconsistently, so checking only chapter 1 proves
   little.
+- Site *moves* need the same treatment on a real library: `cargo run -p
+  vesper-core --example live_migration -- <path-to-library.db> [--apply]`
+  resolves each stale subscription on the new site and compares stored chapter
+  text against the same numbers there, so a numbering mismatch surfaces before
+  anything is written. Preview-only without `--apply`, and it refuses to apply
+  when a sample disagrees. **Point it at a copy of a library, never the live
+  one** — `%LOCALAPPDATA%/vesper/data/library.db`.
 
 ## Releasing
 
@@ -165,8 +210,14 @@ Cargo workspace, two crates under `crates/`:
     adapter, shared HTML extraction reused by hand-written adapters. Keep
     parsing synchronous so the non-`Send` `scraper::Html` never crosses an
     `.await`.
-  - `freewebnovel` / `lightnovelworld` / `royalroad` / `scribblehub` —
-    hand-written adapters (site details above).
+  - `chikari` / `freewebnovel` / `lightnovelworld` / `royalroad` /
+    `scribblehub` — hand-written adapters (site details above). `chikari` reads
+    a JSON API rather than HTML, so it uses `serde_json` and no `scraper`.
+  - `migrate` — one-shot library migrations, guarded by a `meta` key.
+    Currently `migrate_lightnovelworld` (see the site-move invariant above).
+    Generic over `Fetcher`, which is the seam the tests feed canned JSON
+    through; `resolve_on_chikari` is public so `examples/live_migration` can
+    preview a real library without writing to it.
   - `profiles` — built-in profiles plus user `.ini` files from
     `<config_dir>/profiles/` (bad files skipped with a warning).
     `crate::build_source` (lib.rs) resolves a URL to adapter + fetch tier.
@@ -175,7 +226,8 @@ Cargo workspace, two crates under `crates/`:
   - `epub` — EPUB packaging: reconstructed XHTML, atomic temp-file+rename,
     cover + `dc:subject` genre, "Missing Chapters" page for 404 gaps.
   - `paths` — library layout (`epub_path`, `novel_dir`).
-  - `store` — SQLite persistence: novels/sources/chapters/chapter_gaps schema,
+  - `store` — SQLite persistence: novels/sources/chapters/chapter_gaps/meta
+    schema,
     WAL, resume-aware insert, gap record/clear/list, normalized-title lookup,
     subscriptions listed in id order. `update_chapter_title` is the repair
     hatch for chapters stored while an adapter parsed titles wrong — inserts
