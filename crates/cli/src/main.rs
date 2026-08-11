@@ -17,8 +17,9 @@ use std::time::Duration;
 use anyhow::{anyhow, bail, ensure, Result};
 use clap::{Parser, Subcommand};
 use vesper_core::{
-    build_epub, build_source, download_cover, epub_path, sync_novel, Config, DerivedState, Source,
-    Store, StoredNovel, StoredSource, SyncProgress, SyncReport,
+    build_epub, build_source, download_cover, epub_path, migrate_lightnovelworld, sync_novel,
+    Config, DerivedState, MigrationOutcome, MigrationReport, Source, Store, StoredNovel,
+    StoredSource, SyncProgress, SyncReport,
 };
 
 #[derive(Parser)]
@@ -157,6 +158,13 @@ async fn main() -> Result<()> {
     // Loading also generates config.ini with defaults on first run.
     let config = Config::load_or_create()?;
 
+    // One-shot library migrations, before the command runs so it sees the
+    // migrated library. Skipped for commands that don't touch it, so `config`
+    // or `service status` never pays for a network probe.
+    if cli.cmd.touches_library() {
+        run_pending_migrations(&config).await;
+    }
+
     match cli.cmd {
         Command::Subscribe { url, force, delay_ms } => {
             subscribe(&config, url, force, delay_ms).await
@@ -184,6 +192,75 @@ async fn main() -> Result<()> {
         Command::Status => status(&config),
         Command::Profiles => profiles_show(),
         Command::List { url, delay_ms } => list(&config, url, delay_ms).await,
+    }
+}
+
+impl Command {
+    /// Whether this command reads or writes the library DB. Migrations only run
+    /// for those — there's no reason for `vesper config` to open the library,
+    /// let alone go to the network.
+    fn touches_library(&self) -> bool {
+        !matches!(
+            self,
+            Command::Config | Command::Profiles | Command::Service { .. } | Command::List { .. }
+        )
+    }
+}
+
+/// Apply any pending one-shot library migration, reporting what changed.
+///
+/// Best-effort by design: a migration that can't finish (offline, site down)
+/// must never stop the command the user actually asked for. It leaves its
+/// marker unset and runs again next launch.
+async fn run_pending_migrations(config: &Config) {
+    let store = match Store::open_default() {
+        Ok(s) => s,
+        // The command is about to open the library itself and will report the
+        // real error with proper context; don't pre-empt it with a duplicate.
+        Err(_) => return,
+    };
+    let delay = Duration::from_millis(config.request_delay_ms);
+    match migrate_lightnovelworld(&store, delay).await {
+        Ok(Some(report)) => report_migration(&report),
+        Ok(None) => {}
+        Err(e) => eprintln!("  (library migration deferred: {e}; it will retry next run)"),
+    }
+}
+
+/// Print what the lightnovelworld -> chikari migration did. Quiet when there
+/// was nothing to move.
+fn report_migration(report: &MigrationReport) {
+    if report.is_empty() {
+        return;
+    }
+    let moved = report.moved().count();
+    if moved > 0 {
+        eprintln!(
+            "Light Novel World has moved to chikari.moe; \
+             updated {moved} subscription{} to the new site.",
+            if moved == 1 { "" } else { "s" }
+        );
+    }
+    for outcome in &report.outcomes {
+        match outcome {
+            MigrationOutcome::Moved { novel_id, title, via_title_search, .. } => {
+                let note = if *via_title_search {
+                    " (matched by title — its address changed)"
+                } else {
+                    ""
+                };
+                eprintln!("  #{novel_id} {title}{note}");
+            }
+            MigrationOutcome::NotOnChikari { novel_id, title } => eprintln!(
+                "  #{novel_id} {title}: not found on chikari.moe, so it is still \
+                 syncing from lightnovelworld.org. If it turns up there later, run \
+                 `vesper add-source {novel_id} <chikari url>`."
+            ),
+            MigrationOutcome::Undetermined { novel_id, title, reason } => eprintln!(
+                "  #{novel_id} {title}: could not be checked ({reason}); \
+                 left as-is and will be retried next run."
+            ),
+        }
     }
 }
 
@@ -1027,6 +1104,21 @@ mod tests {
         assert_eq!(&ts[16..17], ":");
         assert!(ts[0..4].parse::<u32>().is_ok(), "year: {ts}");
         assert!(ts[11..13].parse::<u32>().is_ok(), "hour: {ts}");
+    }
+
+    /// Migrations run before library commands and are skipped for the rest —
+    /// `vesper config` must not open the library or reach the network.
+    #[test]
+    fn only_library_commands_trigger_migrations() {
+        assert!(Command::Subs { gaps: false }.touches_library());
+        assert!(Command::Sync { limit: 0, delay_ms: None }.touches_library());
+        assert!(Command::Export { novel: "x".into(), out: None }.touches_library());
+        assert!(Command::Status.touches_library());
+
+        assert!(!Command::Config.touches_library());
+        assert!(!Command::Profiles.touches_library());
+        assert!(!Command::Service { action: ServiceAction::Status }.touches_library());
+        assert!(!Command::List { url: "x".into(), delay_ms: None }.touches_library());
     }
 
     #[test]
