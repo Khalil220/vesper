@@ -208,6 +208,11 @@ than what you already have, so running this against a site that's down — or on
 that's still gating the same chapters — can't damage good chapters. Re-export
 afterwards to get the real text into the EPUB.
 
+Fallbacks are used. Repair tries each of a novel's sources in turn, so if the
+main site is still gating a chapter but a fallback carries it in full, the
+fallback is what you get. That's a good reason to attach one
+(`vesper add-source`) before repairing a novel whose main site gates chapters.
+
 ### unsubscribe
 
 ```

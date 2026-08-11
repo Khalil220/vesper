@@ -74,7 +74,16 @@ rules-of-the-road.
   replacement too: refuse incoming text that is itself a placeholder, or that
   is no longer than what is stored, so repairing against a still-gated source —
   or re-running it while a site is having a bad day — can't overwrite good
-  prose.
+  prose. `repair` tries every attached source in priority order and falls
+  through on a rejected answer, so a gated primary still gets repaired from a
+  fallback that has the real text. **Sync's content-upgrade pass carries the
+  same guard**, and must: a chapter repaired from a fallback is
+  fallback-attributed, so the upgrade pass re-fetches it from the gated primary
+  next sync and would overwrite the real text with the placeholder — silently
+  undoing the repair. A placeholder from the primary is recorded as a gap
+  instead (the primary genuinely cannot provide that chapter), which also stops
+  it being retried every sync; the chapter is stored, so `unfilled_gaps` never
+  shows it to the user.
 - **Promotion re-attributes, and is never automatic on failure.** Making a
   fallback primary (`store::promote_source`, `vesper set-primary`) renumbers
   priorities *and* re-attributes the old primary's chapters to the promoted

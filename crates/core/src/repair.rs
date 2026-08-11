@@ -208,6 +208,159 @@ mod tests {
         }
     }
 
+    /// A source serving canned bodies per chapter number.
+    struct MockSource {
+        name: String,
+        bodies: std::collections::BTreeMap<u32, String>,
+    }
+
+    impl MockSource {
+        fn new(name: &str, bodies: &[(u32, &str)]) -> Self {
+            Self {
+                name: name.into(),
+                bodies: bodies.iter().map(|(n, b)| (*n, b.to_string())).collect(),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Source for MockSource {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn matches(&self, _url: &str) -> bool {
+            true
+        }
+        async fn fetch_novel(&self, url: &str) -> Result<crate::model::NovelMeta> {
+            Ok(crate::model::NovelMeta {
+                title: "Mock".into(),
+                author: None,
+                cover_url: None,
+                genre: None,
+                status_hint: crate::model::NovelStatus::Unknown,
+                source_url: url.into(),
+            })
+        }
+        async fn discover_chapters(
+            &self,
+            _url: &str,
+            _needed: Option<usize>,
+        ) -> Result<Vec<crate::model::ChapterRef>> {
+            Ok(self
+                .bodies
+                .keys()
+                .map(|n| crate::model::ChapterRef {
+                    number: *n,
+                    title: format!("Ch {n}"),
+                    url: format!("mock://{}/{n}", self.name),
+                })
+                .collect())
+        }
+        async fn fetch_chapter(&self, c: &crate::model::ChapterRef) -> Result<Chapter> {
+            let body = self
+                .bodies
+                .get(&c.number)
+                .ok_or_else(|| anyhow!("mock lacks ch.{}", c.number))?;
+            Ok(chapter(c.number, body))
+        }
+    }
+
+    const GATED: &str = "This chapter requires a free account to read. \
+                         Sign up or log in to continue reading \"Mock Novel\".";
+    const REAL: &str = "The morning broke over the ruined city, and Sunny woke to \
+                        the sound of the Nightmare Spell calling his name again.";
+
+    fn store_with_gated_chapter() -> (Store, i64, i64) {
+        let store = Store::open_in_memory().unwrap();
+        let meta = crate::model::NovelMeta {
+            title: "Mock Novel".into(),
+            author: Some("A".into()),
+            cover_url: None,
+            genre: None,
+            status_hint: crate::model::NovelStatus::Ongoing,
+            source_url: "https://primary.example/n".into(),
+        };
+        let id = store.subscribe(&meta, "primary").unwrap();
+        let primary = store.find_novel("1").unwrap().unwrap().primary_source().unwrap().id;
+        store.insert_chapter_if_absent(id, primary, &chapter(1, GATED)).unwrap();
+        (store, id, primary)
+    }
+
+    /// The question this answers: if the primary is still gated but a fallback
+    /// carries the full text, does repair reach the fallback? It must — falling
+    /// through on a rejected replacement is the whole point of trying each
+    /// source in turn.
+    #[tokio::test]
+    async fn falls_through_to_a_fallback_when_the_primary_is_still_gated() {
+        let (store, id, _) = store_with_gated_chapter();
+        store.add_source(id, "fallback", "https://fallback.example/n").unwrap();
+        let novel = store.find_novel(&id.to_string()).unwrap().unwrap();
+        let sources: Vec<(StoredSource, Box<dyn Source>)> = novel
+            .sources
+            .into_iter()
+            .zip(vec![
+                Box::new(MockSource::new("primary", &[(1, GATED)])) as Box<dyn Source>,
+                Box::new(MockSource::new("fallback", &[(1, REAL)])),
+            ])
+            .collect();
+
+        let report = repair_novel(&store, id, &sources, None, false, |_, _, _| {})
+            .await
+            .unwrap();
+
+        assert_eq!(report.repaired, vec![1], "repaired from the fallback");
+        let stored = store.load_chapter(id, 1).unwrap().unwrap();
+        assert_eq!(stored.paragraphs.join(" "), REAL);
+    }
+
+    /// With every source gated there is nothing to repair from, and the stored
+    /// chapter must be left exactly as it was rather than churned.
+    #[tokio::test]
+    async fn leaves_the_chapter_alone_when_every_source_is_gated() {
+        let (store, id, _) = store_with_gated_chapter();
+        store.add_source(id, "fallback", "https://fallback.example/n").unwrap();
+        let novel = store.find_novel(&id.to_string()).unwrap().unwrap();
+        let sources: Vec<(StoredSource, Box<dyn Source>)> = novel
+            .sources
+            .into_iter()
+            .zip(vec![
+                Box::new(MockSource::new("primary", &[(1, GATED)])) as Box<dyn Source>,
+                Box::new(MockSource::new("fallback", &[(1, GATED)])),
+            ])
+            .collect();
+
+        let report = repair_novel(&store, id, &sources, None, false, |_, _, _| {})
+            .await
+            .unwrap();
+
+        assert!(report.repaired.is_empty());
+        assert_eq!(report.skipped.len(), 1);
+        assert!(report.skipped[0].1.contains("placeholder"), "{:?}", report.skipped);
+        assert_eq!(store.load_chapter(id, 1).unwrap().unwrap().paragraphs.join(" "), GATED);
+    }
+
+    /// A dry run reports what it would do and writes nothing.
+    #[tokio::test]
+    async fn dry_run_changes_nothing() {
+        let (store, id, _) = store_with_gated_chapter();
+        let novel = store.find_novel(&id.to_string()).unwrap().unwrap();
+        let sources: Vec<(StoredSource, Box<dyn Source>)> = novel
+            .sources
+            .into_iter()
+            .zip(vec![Box::new(MockSource::new("primary", &[(1, REAL)])) as Box<dyn Source>])
+            .collect();
+
+        let report = repair_novel(&store, id, &sources, None, true, |_, _, _| {})
+            .await
+            .unwrap();
+        assert_eq!(report.repaired, vec![1]);
+        assert_eq!(
+            store.load_chapter(id, 1).unwrap().unwrap().paragraphs.join(" "),
+            GATED,
+            "dry run must not write"
+        );
+    }
+
     #[test]
     fn refuses_to_overwrite_prose_with_a_placeholder() {
         let stored = chapter(1, "A real chapter with actual prose in it.");

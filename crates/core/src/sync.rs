@@ -271,6 +271,19 @@ pub async fn sync_novel(
                     break;
                 }
                 match psrc.fetch_chapter(cref).await {
+                    // The primary is authoritative for *content*, not for
+                    // "log in to keep reading" placeholders. A gated primary
+                    // answers 200 with a stub, which would overwrite the real
+                    // chapter a fallback supplied — silently undoing a
+                    // `vesper repair`. Treat it exactly like the 404 case: the
+                    // primary cannot provide this chapter, so record the gap
+                    // and stop re-trying it every sync. The chapter is stored,
+                    // so `unfilled_gaps` still won't show it to the user.
+                    Ok(chapter) if crate::repair::looks_like_gate_stub(&chapter.paragraphs) => {
+                        if gaps.insert(num) {
+                            store.record_gap(novel_id, num)?;
+                        }
+                    }
                     Ok(chapter) => {
                         store.update_chapter_content(novel_id, pmeta.id, &chapter)?;
                         report.upgraded += 1;
@@ -367,6 +380,12 @@ mod tests {
         /// Discovered chapters that 404 on fetch (permanent site holes).
         fn with_holes(mut self, holes: &[u32]) -> Self {
             self.holes = holes.iter().copied().collect();
+            self
+        }
+
+        /// Serve a specific body for a chapter (e.g. a gating placeholder).
+        fn with_body(mut self, number: u32, body: &str) -> Self {
+            self.bodies.insert(number, body.to_string());
             self
         }
 
@@ -823,6 +842,78 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(r3.upgraded, 0);
+    }
+
+    /// A gated primary answers 200 with a "log in to keep reading" stub. The
+    /// upgrade pass must not treat that as authoritative content and overwrite
+    /// the real chapter a fallback supplied — that would silently undo a
+    /// `vesper repair` on the next sync.
+    #[tokio::test]
+    async fn a_gated_primary_does_not_clobber_a_real_fallback_chapter() {
+        const STUB: &str = "This chapter requires a free account to read. \
+                            Sign up or log in to continue reading.";
+        let store = Store::open_in_memory().unwrap();
+        let id = subscribe(&store);
+        store.add_source(id, "fallback", "https://fallback.example/n").unwrap();
+
+        // Backfill: the primary doesn't have ch.2 yet, so the fallback fills it.
+        let backfill = pair(
+            &store,
+            id,
+            vec![
+                Box::new(MockSource::new("primary", &[1])),
+                Box::new(MockSource::new("fallback", &[1, 2])),
+            ],
+        );
+        let r1 = sync_novel(&store, id, DerivedState::Backfilling, &backfill, 0, |_| {
+            ControlFlow::Continue(())
+        })
+        .await
+        .unwrap();
+        assert_eq!(r1.from_fallback, 1, "ch.2 came from the fallback");
+
+        // Now the primary lists ch.2 — but serves the gating placeholder.
+        let gated = pair(
+            &store,
+            id,
+            vec![
+                Box::new(MockSource::new("primary", &[1, 2]).with_body(2, STUB)),
+                Box::new(MockSource::new("fallback", &[1, 2])),
+            ],
+        );
+        let r2 = sync_novel(&store, id, DerivedState::Live, &gated, 0, |_| {
+            ControlFlow::Continue(())
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(r2.upgraded, 0, "the placeholder is not an upgrade");
+        let ch2 = store.load_chapters(id).unwrap().into_iter().find(|c| c.number == 2).unwrap();
+        assert_eq!(ch2.paragraphs, vec!["fallback body 2"], "real chapter survived");
+
+        // Recorded as a primary hole so it stops being retried every sync...
+        assert!(store.gaps(id).unwrap().contains(&2));
+        // ...but it is stored, so the user is never told a chapter is missing.
+        assert!(store.unfilled_gaps(id).unwrap().is_empty());
+        assert!(r2.gaps.is_empty());
+
+        // And a third sync makes no further attempt at it.
+        let again = pair(
+            &store,
+            id,
+            vec![
+                Box::new(MockSource::new("primary", &[1, 2]).with_body(2, STUB)),
+                Box::new(MockSource::new("fallback", &[1, 2])),
+            ],
+        );
+        let r3 = sync_novel(&store, id, DerivedState::Live, &again, 0, |_| {
+            ControlFlow::Continue(())
+        })
+        .await
+        .unwrap();
+        assert_eq!(r3.upgraded, 0);
+        let ch2 = store.load_chapters(id).unwrap().into_iter().find(|c| c.number == 2).unwrap();
+        assert_eq!(ch2.paragraphs, vec!["fallback body 2"]);
     }
 
     #[tokio::test]
