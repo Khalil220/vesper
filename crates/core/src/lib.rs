@@ -51,6 +51,9 @@ pub fn build_source(url: &str, delay: std::time::Duration) -> Option<Box<dyn Sou
         "freewebnovel.com" | "www.freewebnovel.com" => Some(Box::new(FreewebnovelSource::new(
             CurlFetcher::new(delay),
         ))),
+        // Kept so a lingering subscription still resolves to an adapter and
+        // fails with a real message, but the site is frozen and shutting down
+        // (see the site-notice redirect in `lightnovelworld`).
         "lightnovelworld.org" | "www.lightnovelworld.org" => {
             let fetcher = ReqwestFetcher::new(delay).ok()?;
             Some(Box::new(LightNovelWorldSource::new(fetcher)))

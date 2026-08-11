@@ -252,9 +252,10 @@ fn report_migration(report: &MigrationReport) {
                 eprintln!("  #{novel_id} {title}{note}");
             }
             MigrationOutcome::NotOnChikari { novel_id, title } => eprintln!(
-                "  #{novel_id} {title}: not found on chikari.moe, so it is still \
-                 syncing from lightnovelworld.org. If it turns up there later, run \
-                 `vesper add-source {novel_id} <chikari url>`."
+                "  #{novel_id} {title}: did not make the move to chikari.moe. \
+                 lightnovelworld.org is shutting down, so this novel will stop \
+                 updating; the chapters you already have are safe. Export it while \
+                 you can: `vesper export {novel_id}`."
             ),
             MigrationOutcome::Undetermined { novel_id, title, reason } => eprintln!(
                 "  #{novel_id} {title}: could not be checked ({reason}); \

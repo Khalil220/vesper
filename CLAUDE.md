@@ -126,8 +126,17 @@ rules-of-the-road.
   differs from its canonical number ("Chapter 1176" at number 1200) — that also
   held on lightnovelworld, which is part of why the number-spaces line up.
 - **lightnovelworld.org** (hand-written adapter, Tier 1) — **superseded by
-  chikari.moe**; still functional, kept as a fallback and for novels chikari
-  lacks. JS-rendered ToC, so
+  chikari.moe and shutting down**. It now 302s to `/site-notice/` (a merge
+  announcement), so the adapter fails: Tier 1 follows the redirect and reports
+  "could not read the chapter count" because the notice has no `og:title`
+  count; the curl tier, which doesn't follow redirects, fails on the 302
+  itself. Don't try to fix that — the site is frozen (its notice says updates
+  are paused and it stays up only days), so chasing the redirect buys nothing.
+  The adapter stays only so a lingering subscription resolves to something
+  that fails with a real message. **It is not a usable fallback**, and per the
+  notice the long tail of low-traffic novels was dropped rather than migrated,
+  so those are not coming to chikari either. Historical shape below.
+  JS-rendered ToC, so
   discovery reads the total from `og:title` ("… - N Chapters") and generates
   sequential `/novel/<slug>/chapter/<n>/` URLs. Metadata from page elements
   (`h1.novel-title`, `p.novel-author` — text after the "Author:" label, so

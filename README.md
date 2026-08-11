@@ -6,16 +6,21 @@ EPUB in your library up to date — on demand, or on a schedule in the
 background if you set it up that way.
 
 It currently understands novgo.net, chikari.moe, freewebnovel.com,
-lightnovelworld.org, royalroad.com and scribblehub.com. A nice side effect
-of supporting several sites: if a novel exists on more than one of them, you
-can attach the extra sites as fallbacks. Chapters that are missing or dead on
-the main site get quietly filled in from the others, and you still end up with
-one EPUB, not three copies of the same book.
+royalroad.com and scribblehub.com. A nice side effect of supporting several
+sites: if a novel exists on more than one of them, you can attach the extra
+sites as fallbacks. Chapters that are missing or dead on the main site get
+quietly filled in from the others, and you still end up with one EPUB, not
+three copies of the same book.
 
-Light Novel World's novel library has moved to chikari.moe. If you follow
-novels from there, Vesper points those subscriptions at the new site by
-itself the first time you run it after upgrading — nothing is re-downloaded,
-and anything chikari doesn't carry keeps working from the old site.
+Light Novel World's novel library has moved to chikari.moe, and that site is
+shutting down. If you followed novels there, Vesper points those
+subscriptions at chikari by itself the first time you run it after upgrading;
+nothing is re-downloaded and no chapter is touched.
+
+A few novels didn't make the move — Light Novel World's own notice says the
+long tail of low-traffic titles was dropped rather than migrated. Vesper names
+those instead of pretending they still work, and everything you already
+downloaded of them stays in your library and exports as usual.
 
 Everything you download is cached in a local SQLite database. Exporting,
 re-exporting, splitting into volumes — none of that ever hits the network

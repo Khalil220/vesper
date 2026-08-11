@@ -26,9 +26,16 @@
 //!
 //! A subscription is only moved once chikari has confirmed the novel exists
 //! there, by slug or — if the slug didn't carry over — by an exact normalized
-//! title match in its search. Anything else is left pointing at
-//! lightnovelworld, which still works, and reported so the user can decide.
-//! A novel is never bound to a merely similar title.
+//! title match in its search. A novel is never bound to a merely similar title.
+//!
+//! Anything unconfirmed is left pointing at lightnovelworld and reported. That
+//! is not a working fallback: lightnovelworld is frozen and shutting down (it
+//! 302s every novel page to a merge notice), and its own announcement says the
+//! long tail of low-traffic novels was dropped rather than migrated, so those
+//! titles are not going to turn up on chikari later. Leaving the row alone is
+//! simply the least-destructive option — the chapters already downloaded stay
+//! readable and exportable — and the CLI tells the user to export while they
+//! can rather than implying the subscription will keep updating.
 
 use std::time::Duration;
 
@@ -379,8 +386,10 @@ mod tests {
         assert_eq!(source_url(&store, 1), "https://chikari.moe/novels/reverend-insanity");
     }
 
-    /// A novel chikari genuinely doesn't carry stays on lightnovelworld, which
-    /// still works — losing the subscription would be worse than not moving it.
+    /// A novel chikari genuinely doesn't carry stays put. lightnovelworld is
+    /// shutting down, so this isn't a working fallback — but dropping the
+    /// subscription would take its downloaded chapters with it, and those are
+    /// still readable and exportable. Least destructive wins.
     #[tokio::test]
     async fn leaves_a_novel_chikari_lacks_alone() {
         let store = store_with(&[("Obscure Web Serial", "https://lightnovelworld.org/novel/obscure-web-serial/")]);

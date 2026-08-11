@@ -13,12 +13,16 @@
 Nothing to do. The first command you run after upgrading moves your Light
 Novel World subscriptions across and tells you what it changed.
 
-A novel chikari doesn't carry is left on lightnovelworld, which still works,
-and named in that report. If it appears on chikari later:
+Light Novel World is shutting down, so a novel that didn't make the move is a
+dead end rather than a fallback. Vesper names those in the report; export what
+you already have while you can:
 
 ```
-vesper add-source <novel> <chikari url>
+vesper export <novel>
 ```
+
+Its own notice says the long tail of low-traffic titles was dropped
+deliberately and won't be appearing on chikari later.
 
 If the site can't be reached when you upgrade, nothing is changed and Vesper
 tries again the next time it runs.
