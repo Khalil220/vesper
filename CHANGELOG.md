@@ -7,6 +7,10 @@
   first time Vesper runs after the upgrade. Nothing is re-downloaded and no
   chapter is touched — the chapters already in your library stay exactly as
   they are.
+- Add `vesper set-primary <novel> <source>`, which promotes one of a novel's
+  sources to be its main one. Useful when a site shuts down and the novel has
+  a fallback that can take over. Chapters you already have are kept and
+  nothing is re-fetched.
 
 ### Upgrading
 
@@ -14,7 +18,9 @@ Nothing to do. The first command you run after upgrading moves your Light
 Novel World subscriptions across and tells you what it changed.
 
 Light Novel World is shutting down, so a novel that didn't make the move is a
-dead end rather than a fallback. Vesper names those in the report; export what
+dead end. If such a novel has another site attached, Vesper hands it over to
+that one automatically and tells you so — again without re-downloading
+anything. If it has nowhere to go, Vesper names it, and you should export what
 you already have while you can:
 
 ```

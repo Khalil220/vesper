@@ -75,6 +75,14 @@ enum Command {
         #[arg(long)]
         delay_ms: Option<u64>,
     },
+    /// Make one of a novel's sources its primary (e.g. after a site shuts down).
+    SetPrimary {
+        /// Novel: its id (from `vesper subs`), or the exact title (quote it if
+        /// it contains spaces).
+        novel: String,
+        /// Source to promote: its URL, or its site name as shown by `vesper subs`.
+        source: String,
+    },
     /// Remove a subscription and its downloaded chapters.
     Unsubscribe {
         /// Novel to remove: its id (from `vesper subs`), or the exact title
@@ -176,6 +184,7 @@ async fn main() -> Result<()> {
         Command::Refresh { novel, titles, delay_ms } => {
             refresh(&config, novel, titles, delay_ms).await
         }
+        Command::SetPrimary { novel, source } => set_primary(novel, source),
         Command::Unsubscribe { novel } => unsubscribe(novel),
         Command::Fetch { novel, limit, delay_ms } => fetch(&config, novel, limit, delay_ms).await,
         Command::Export { novel, out } => export(&config, novel, out).await,
@@ -251,10 +260,16 @@ fn report_migration(report: &MigrationReport) {
                 };
                 eprintln!("  #{novel_id} {title}{note}");
             }
-            MigrationOutcome::NotOnChikari { novel_id, title } => eprintln!(
-                "  #{novel_id} {title}: did not make the move to chikari.moe. \
-                 lightnovelworld.org is shutting down, so this novel will stop \
-                 updating; the chapters you already have are safe. Export it while \
+            MigrationOutcome::NotOnChikari { novel_id, title, promoted: Some(source) } => {
+                eprintln!(
+                    "  #{novel_id} {title}: did not make the move to chikari.moe, so \
+                     {source} is now its primary source. Nothing was re-downloaded."
+                )
+            }
+            MigrationOutcome::NotOnChikari { novel_id, title, promoted: None } => eprintln!(
+                "  #{novel_id} {title}: did not make the move to chikari.moe, and has no \
+                 other source. lightnovelworld.org is shutting down, so this novel will \
+                 stop updating; the chapters you already have are safe. Export it while \
                  you can: `vesper export {novel_id}`."
             ),
             MigrationOutcome::Undetermined { novel_id, title, reason } => eprintln!(
@@ -725,6 +740,65 @@ fn subs(gaps_only: bool) -> Result<()> {
     Ok(())
 }
 
+/// Pick the source a `set-primary` argument names: the stored URL first, then
+/// the site name, so either column of `vesper subs` works. An ambiguous name
+/// (the same site attached twice) is refused rather than guessed at — choosing
+/// wrong would change which source is authoritative for the novel's text.
+fn resolve_source<'a>(sources: &'a [StoredSource], needle: &str) -> Result<&'a StoredSource> {
+    let needle = needle.trim();
+    if let Some(exact) = sources.iter().find(|s| s.url == needle) {
+        return Ok(exact);
+    }
+    let by_name: Vec<&StoredSource> = sources
+        .iter()
+        .filter(|s| s.name.eq_ignore_ascii_case(needle))
+        .collect();
+    match by_name.as_slice() {
+        [one] => Ok(one),
+        [] => {
+            let available = sources
+                .iter()
+                .map(|s| format!("{} ({})", s.name, s.url))
+                .collect::<Vec<_>>()
+                .join(", ");
+            bail!("\"{needle}\" is not a source; available: {available}")
+        }
+        many => {
+            let urls = many.iter().map(|s| s.url.as_str()).collect::<Vec<_>>().join(", ");
+            bail!("\"{needle}\" matches {} sources; name one by URL: {urls}", many.len())
+        }
+    }
+}
+
+/// Promote one of a novel's sources to primary. `source` is matched against the
+/// stored URL first, then the site name, so either column of `vesper subs`
+/// works. An ambiguous name (the same site twice) is refused rather than
+/// guessed at — picking the wrong one changes which source is authoritative.
+fn set_primary(novel: String, source: String) -> Result<()> {
+    let store = Store::open_default()?;
+    let found = store
+        .find_novel(&novel)?
+        .ok_or_else(|| anyhow!("no subscription matches \"{novel}\""))?;
+
+    let chosen = resolve_source(&found.sources, &source)
+        .map_err(|e| anyhow!("{e} for \"{}\"", found.title))?;
+
+    let previous = found.primary_source().map(|s| s.name.clone());
+    if !store.promote_source(found.id, chosen.id)? {
+        println!("\"{}\" is already the primary source for \"{}\".", chosen.name, found.title);
+        return Ok(());
+    }
+    println!(
+        "\"{}\" is now the primary source for \"{}\" (novel #{}){}.",
+        chosen.name,
+        found.title,
+        found.id,
+        previous.map(|p| format!("; {p} is now a fallback")).unwrap_or_default()
+    );
+    println!("  Stored chapters were kept and re-attributed, so nothing will be re-downloaded.");
+    Ok(())
+}
+
 fn unsubscribe(novel: String) -> Result<()> {
     let store = Store::open_default()?;
     let found = store
@@ -1105,6 +1179,53 @@ mod tests {
         assert_eq!(&ts[16..17], ":");
         assert!(ts[0..4].parse::<u32>().is_ok(), "year: {ts}");
         assert!(ts[11..13].parse::<u32>().is_ok(), "hour: {ts}");
+    }
+
+    fn source(name: &str, url: &str, priority: i64) -> StoredSource {
+        StoredSource {
+            id: priority,
+            name: name.into(),
+            url: url.into(),
+            priority,
+            last_seen_chapter: None,
+        }
+    }
+
+    #[test]
+    fn set_primary_accepts_either_column_of_subs() {
+        let sources = vec![
+            source("lightnovelworld", "https://lightnovelworld.org/novel/a/", 1),
+            source("freewebnovel", "https://freewebnovel.com/novel/a", 2),
+        ];
+        // By site name, case-insensitively...
+        assert_eq!(resolve_source(&sources, "freewebnovel").unwrap().priority, 2);
+        assert_eq!(resolve_source(&sources, "FreeWebNovel").unwrap().priority, 2);
+        // ...or by the URL printed beside it.
+        assert_eq!(
+            resolve_source(&sources, "https://freewebnovel.com/novel/a").unwrap().priority,
+            2
+        );
+        // An unknown name lists what is actually there.
+        let err = resolve_source(&sources, "novgo").unwrap_err().to_string();
+        assert!(err.contains("freewebnovel"), "{err}");
+    }
+
+    /// The same site attached twice can't be disambiguated by name, and picking
+    /// the wrong one would change which source is authoritative.
+    #[test]
+    fn set_primary_refuses_an_ambiguous_site_name() {
+        let sources = vec![
+            source("novgo", "https://novgo.net/a.html", 1),
+            source("freewebnovel", "https://freewebnovel.com/novel/a", 2),
+            source("freewebnovel", "https://freewebnovel.com/novel/a-alt", 3),
+        ];
+        let err = resolve_source(&sources, "freewebnovel").unwrap_err().to_string();
+        assert!(err.contains("matches 2 sources"), "{err}");
+        // The URL still resolves it unambiguously.
+        assert_eq!(
+            resolve_source(&sources, "https://freewebnovel.com/novel/a-alt").unwrap().priority,
+            3
+        );
     }
 
     /// Migrations run before library commands and are skipped for the rest —

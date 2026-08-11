@@ -61,10 +61,13 @@ pub enum MigrationOutcome {
         /// The slug changed and was recovered by title search.
         via_title_search: bool,
     },
-    /// chikari doesn't have this novel. Left on lightnovelworld.
+    /// chikari doesn't have this novel. If it had another working source, that
+    /// one was promoted to primary (`promoted` names it); otherwise the
+    /// subscription is left on lightnovelworld with nowhere to go.
     NotOnChikari {
         novel_id: i64,
         title: String,
+        promoted: Option<String>,
     },
     /// Couldn't tell (network error, or the URL didn't yield a slug). Left
     /// alone, and the migration will be retried on the next launch.
@@ -179,6 +182,9 @@ async fn migrate_one<F: Fetcher>(
         Ok(None) => MigrationOutcome::NotOnChikari {
             novel_id,
             title: title.to_string(),
+            // Nothing to move it to, but the novel may have another source that
+            // can take over from the site that's going away.
+            promoted: promote_surviving_source(store, novel_id, source.id).unwrap_or(None),
         },
         Err(e) => MigrationOutcome::Undetermined {
             novel_id,
@@ -186,6 +192,36 @@ async fn migrate_one<F: Fetcher>(
             reason: e.to_string(),
         },
     }
+}
+
+/// Hand a novel that didn't make the move to whatever other source it has.
+///
+/// Only when the dead lightnovelworld source is the *primary* — a
+/// lightnovelworld fallback behind a working primary changes nothing. Any
+/// other lightnovelworld source is skipped as a candidate for the obvious
+/// reason. Best-effort: failing to promote must not fail the migration, so the
+/// caller treats an error as "nothing promoted".
+fn promote_surviving_source(
+    store: &Store,
+    novel_id: i64,
+    dead_source_id: i64,
+) -> Result<Option<String>> {
+    let Some(novel) = store.find_novel(&novel_id.to_string())? else {
+        return Ok(None);
+    };
+    if novel.primary_source().map(|s| s.id) != Some(dead_source_id) {
+        return Ok(None);
+    }
+    let candidate = novel
+        .sources
+        .iter()
+        .filter(|s| s.id != dead_source_id && !lightnovelworld::is_lightnovelworld_url(&s.url))
+        .min_by_key(|s| s.priority);
+    let Some(alt) = candidate else {
+        return Ok(None);
+    };
+    store.promote_source(novel_id, alt.id)?;
+    Ok(Some(alt.name.clone()))
 }
 
 /// Find the novel's slug on chikari: the inherited one if it still resolves,
@@ -287,6 +323,22 @@ mod tests {
         }
     }
 
+    /// Adapter name for a URL's host, matching how the real adapters are named
+    /// ("novgo.net" -> "novgo"). Derived rather than hard-coded so a fixture
+    /// can't quietly label a novgo URL "lightnovelworld".
+    fn source_name_for(url: &str) -> String {
+        ::url::Url::parse(url)
+            .ok()
+            .and_then(|u| u.host_str().map(str::to_string))
+            .and_then(|h| {
+                h.trim_start_matches("www.")
+                    .split('.')
+                    .next()
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(|| "other".into())
+    }
+
     fn store_with(subs: &[(&str, &str)]) -> Store {
         let store = Store::open_in_memory().unwrap();
         for (title, url) in subs {
@@ -298,9 +350,19 @@ mod tests {
                 status_hint: NovelStatus::Ongoing,
                 source_url: (*url).to_string(),
             };
-            store.subscribe(&meta, "lightnovelworld").unwrap();
+            store.subscribe(&meta, &source_name_for(url)).unwrap();
         }
         store
+    }
+
+    fn primary_id(store: &Store, novel_id: i64) -> i64 {
+        store
+            .find_novel(&novel_id.to_string())
+            .unwrap()
+            .unwrap()
+            .primary_source()
+            .unwrap()
+            .id
     }
 
     fn source_url(store: &Store, novel_id: i64) -> String {
@@ -407,6 +469,87 @@ mod tests {
             "https://lightnovelworld.org/novel/obscure-web-serial/",
             "left working on the old site"
         );
+    }
+
+    /// A novel that didn't make the move but has another source hands over to
+    /// it, rather than sitting behind a primary that is going away.
+    #[tokio::test]
+    async fn a_novel_left_behind_promotes_its_surviving_source() {
+        let store = store_with(&[("Obscure Serial", "https://lightnovelworld.org/novel/obscure-serial/")]);
+        let dead = primary_id(&store, 1);
+        store
+            .add_source(1, "freewebnovel", "https://freewebnovel.com/novel/obscure-serial")
+            .unwrap();
+        for n in 1..=3 {
+            store
+                .insert_chapter_if_absent(1, dead, &crate::model::Chapter {
+                    number: n,
+                    title: format!("Ch {n}"),
+                    paragraphs: vec!["prose".into()],
+                })
+                .unwrap();
+        }
+        let chikari = ChikariSource::new(CannedFetcher::new().with(
+            "https://chikari.moe/api/novels/search?q=Obscure+Serial&limit=20",
+            "[]",
+        ));
+
+        let report = migrate_with(&store, &chikari).await.unwrap();
+        assert!(matches!(
+            report.outcomes[0],
+            MigrationOutcome::NotOnChikari { promoted: Some(ref s), .. } if s == "freewebnovel"
+        ));
+
+        let novel = store.find_novel("1").unwrap().unwrap();
+        let primary = novel.primary_source().unwrap();
+        assert_eq!(primary.name, "freewebnovel");
+        assert_eq!(novel.chapter_count, 3, "chapters kept");
+        assert!(
+            store.chapters_from_other_sources(1, primary.id).unwrap().is_empty(),
+            "and not queued for a pointless re-download"
+        );
+        // The dead source is demoted, not deleted — its URL stays on record.
+        assert_eq!(novel.sources.len(), 2);
+        assert!(novel.sources.iter().any(|s| s.priority == 2 && s.url.contains("lightnovelworld")));
+    }
+
+    /// With nowhere to go, the subscription is left intact — its downloaded
+    /// chapters are still readable and exportable.
+    #[tokio::test]
+    async fn a_novel_left_behind_with_no_other_source_is_untouched() {
+        let store = store_with(&[("Only Here", "https://lightnovelworld.org/novel/only-here/")]);
+        let chikari = ChikariSource::new(
+            CannedFetcher::new()
+                .with("https://chikari.moe/api/novels/search?q=Only+Here&limit=20", "[]"),
+        );
+
+        let report = migrate_with(&store, &chikari).await.unwrap();
+        assert!(matches!(
+            report.outcomes[0],
+            MigrationOutcome::NotOnChikari { promoted: None, .. }
+        ));
+        assert_eq!(source_url(&store, 1), "https://lightnovelworld.org/novel/only-here/");
+    }
+
+    /// A lightnovelworld *fallback* that can't move leaves the working primary
+    /// alone — there is nothing to promote.
+    #[tokio::test]
+    async fn a_dead_fallback_does_not_disturb_a_working_primary() {
+        let store = store_with(&[("Kept", "https://novgo.net/kept.html")]);
+        store
+            .add_source(1, "lightnovelworld", "https://lightnovelworld.org/novel/kept/")
+            .unwrap();
+        let chikari = ChikariSource::new(
+            CannedFetcher::new().with("https://chikari.moe/api/novels/search?q=Kept&limit=20", "[]"),
+        );
+
+        let report = migrate_with(&store, &chikari).await.unwrap();
+        assert!(matches!(
+            report.outcomes[0],
+            MigrationOutcome::NotOnChikari { promoted: None, .. }
+        ));
+        let novel = store.find_novel("1").unwrap().unwrap();
+        assert_eq!(novel.primary_source().unwrap().name, "novgo");
     }
 
     /// A slug that resolves to a *different* novel must not be taken at face

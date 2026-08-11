@@ -59,6 +59,18 @@ rules-of-the-road.
   front "Missing Chapters" page. Re-probing a known gap is silent. Matters most
   for URL-generating adapters (lightnovelworld, freewebnovel) whose id
   sequences have holes.
+- **Promotion re-attributes, and is never automatic on failure.** Making a
+  fallback primary (`store::promote_source`, `vesper set-primary`) renumbers
+  priorities *and* re-attributes the old primary's chapters to the promoted
+  source. Skipping that re-attribution makes every stored chapter an upgrade
+  candidate (`chapters_from_other_sources`), so the next sync re-downloads the
+  whole back catalogue — the same storm the in-place site move avoids. Sync
+  does **not** promote on its own: at one pass a transient outage is
+  indistinguishable from a site being dropped, and flipping content authority
+  and back costs a full re-download each way. A dead primary already costs
+  nothing but a warning, because `sync::discover` skips a failed source and the
+  fallbacks still fetch. The migration is the one place promotion happens
+  automatically, because the site *said* which novels it dropped.
 - **Sites move; subscriptions follow them in place.** When a site relocates
   (lightnovelworld -> chikari.moe), the fix is a one-shot migration that
   **repoints the existing `sources` row** (`store::repoint_source`), not a new

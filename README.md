@@ -91,6 +91,27 @@ If the novel had permanently missing chapters (see `subs --gaps` below),
 adding a source re-opens the backfill so the new site gets a chance to
 provide them.
 
+### set-primary
+
+```
+vesper set-primary <novel> <source>
+```
+
+Promote one of a novel's sources to be the main one, demoting the current
+main source to a fallback. This is what you want when a site shuts down and
+the novel has somewhere else to go.
+
+Name the source however it appears in `vesper subs` — either its site name
+(`freewebnovel`) or its URL. If you have the same site attached twice, the
+name is ambiguous and you'll be asked for the URL instead.
+
+Chapters you already downloaded are kept and re-attributed to the new main
+source, so nothing is re-fetched. Vesper does not reorder sources on its own
+when a site starts failing: a site being down for an hour looks exactly like
+a site being gone, and guessing wrong would mean re-downloading a whole novel
+twice. The one exception is the Light Novel World shutdown, where the site
+told us outright which novels were dropped.
+
 ### subs
 
 ```

@@ -427,6 +427,74 @@ impl Store {
         Ok(())
     }
 
+    /// Make `source_id` its novel's primary, demoting the others while keeping
+    /// their relative order. Returns whether anything changed.
+    ///
+    /// Chapters held from the *previous* primary are re-attributed to the
+    /// promoted source. That is not cosmetic: `chapters_from_other_sources`
+    /// treats anything not attributed to the primary as an upgrade candidate,
+    /// so without it the content-upgrade pass would re-download the novel's
+    /// entire back catalogue from the new primary — thousands of requests for
+    /// prose already on disk, and typically from a site that is being promoted
+    /// precisely because the old one is gone. The `source_id` column records
+    /// which source is authoritative for a chapter's text, and after a
+    /// promotion the promoted source is exactly that.
+    pub fn promote_source(&self, novel_id: i64, source_id: i64) -> Result<bool> {
+        let sources = self.sources_for(novel_id)?;
+        if !sources.iter().any(|s| s.id == source_id) {
+            bail!("source #{source_id} does not belong to novel #{novel_id}");
+        }
+        let Some(old_primary) = sources.iter().min_by_key(|s| s.priority).map(|s| s.id) else {
+            return Ok(false);
+        };
+        if old_primary == source_id {
+            return Ok(false);
+        }
+
+        self.conn.execute_batch("BEGIN;")?;
+        let outcome = self.reorder_for_primary(novel_id, source_id, old_primary, &sources);
+        match outcome {
+            Ok(()) => {
+                self.conn.execute_batch("COMMIT;")?;
+                Ok(true)
+            }
+            Err(e) => {
+                let _ = self.conn.execute_batch("ROLLBACK;");
+                Err(e)
+            }
+        }
+    }
+
+    fn reorder_for_primary(
+        &self,
+        novel_id: i64,
+        source_id: i64,
+        old_primary: i64,
+        sources: &[StoredSource],
+    ) -> Result<()> {
+        // `sources` arrives in priority order, so demoting in sequence preserves
+        // the existing ranking among the remaining fallbacks.
+        let mut next = 2i64;
+        for s in sources {
+            let priority = if s.id == source_id {
+                1
+            } else {
+                let p = next;
+                next += 1;
+                p
+            };
+            self.conn.execute(
+                "UPDATE sources SET priority = ?2 WHERE id = ?1",
+                params![s.id, priority],
+            )?;
+        }
+        self.conn.execute(
+            "UPDATE chapters SET source_id = ?3 WHERE novel_id = ?1 AND source_id = ?2",
+            params![novel_id, old_primary, source_id],
+        )?;
+        Ok(())
+    }
+
     fn source_id_for_url(&self, url: &str) -> Result<Option<i64>> {
         Ok(self
             .conn
@@ -1144,6 +1212,69 @@ mod tests {
             .add_source(id, "novgo", "https://novgo.net/a.html")
             .unwrap_err();
         assert!(err.to_string().contains("already in the library"));
+    }
+
+    #[test]
+    fn promote_makes_a_fallback_primary_and_keeps_the_rest_in_order() {
+        let s = mem_store();
+        let id = s.subscribe(&sample_meta("https://novgo.net/a.html"), "novgo").unwrap();
+        s.add_source(id, "freewebnovel", "https://freewebnovel.com/novel/a").unwrap();
+        s.add_source(id, "royalroad", "https://royalroad.com/fiction/1/a").unwrap();
+
+        let fwn = s.find_novel(&id.to_string()).unwrap().unwrap().sources[1].id;
+        assert!(s.promote_source(id, fwn).unwrap());
+
+        let novel = s.find_novel(&id.to_string()).unwrap().unwrap();
+        assert_eq!(novel.primary_source().unwrap().name, "freewebnovel");
+        // The demoted sources keep their relative order behind the new primary.
+        let order: Vec<&str> = novel.sources.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(order, vec!["freewebnovel", "novgo", "royalroad"]);
+        assert_eq!(novel.sources.iter().map(|s| s.priority).collect::<Vec<_>>(), vec![1, 2, 3]);
+
+        // Promoting the current primary again is a no-op.
+        assert!(!s.promote_source(id, fwn).unwrap());
+    }
+
+    /// The point of re-attributing: a promotion must not turn the whole stored
+    /// back catalogue into upgrade candidates, or the next sync re-downloads it.
+    #[test]
+    fn promote_does_not_leave_stored_chapters_pending_re_download() {
+        let s = mem_store();
+        let id = s.subscribe(&sample_meta("https://novgo.net/a.html"), "novgo").unwrap();
+        let old_primary = primary_source_id(&s, id);
+        s.add_source(id, "freewebnovel", "https://freewebnovel.com/novel/a").unwrap();
+        for n in 1..=3 {
+            s.insert_chapter_if_absent(id, old_primary, &chapter(n)).unwrap();
+        }
+        let fwn = s.find_novel(&id.to_string()).unwrap().unwrap().sources[1].id;
+
+        // Before: nothing to upgrade, since every chapter is from the primary.
+        assert!(s.chapters_from_other_sources(id, old_primary).unwrap().is_empty());
+
+        s.promote_source(id, fwn).unwrap();
+
+        assert!(
+            s.chapters_from_other_sources(id, fwn).unwrap().is_empty(),
+            "chapters were re-attributed, so the upgrade pass has nothing to do"
+        );
+        // The prose itself is untouched.
+        assert_eq!(s.load_chapters(id).unwrap().len(), 3);
+        assert_eq!(s.load_chapters(id).unwrap()[0].paragraphs, vec!["Para one.", "Para two."]);
+    }
+
+    #[test]
+    fn promote_rejects_a_source_from_another_novel() {
+        let s = mem_store();
+        let a = s.subscribe(&sample_meta("https://novgo.net/a.html"), "novgo").unwrap();
+        let mut other = sample_meta("https://novgo.net/b.html");
+        other.title = "Other Novel".into();
+        let b = s.subscribe(&other, "novgo").unwrap();
+        let b_source = primary_source_id(&s, b);
+
+        let err = s.promote_source(a, b_source).unwrap_err();
+        assert!(err.to_string().contains("does not belong"), "{err}");
+        // The rejected call changed nothing.
+        assert_eq!(s.find_novel(&b.to_string()).unwrap().unwrap().sources[0].priority, 1);
     }
 
     #[test]
