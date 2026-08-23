@@ -265,6 +265,15 @@ fn strip_inline_markup(s: &str) -> String {
     while i < s.len() {
         if bytes[i] == b'<' {
             if let Some(end) = inline_tag_end(s, i) {
+                // chikari's import dropped whitespace that sat beside inline
+                // markup, so bodies arrive with `have a<strong>[+1]</strong>next
+                // to it` where the words need separating. Put a space back only
+                // where two *word* characters would otherwise weld together —
+                // never around punctuation, which is where the site's text is
+                // already right (`Vance</strong>'s`, `[Lv 2]</strong>,`).
+                if welds_words(out.chars().next_back(), s[end..].chars().next()) {
+                    out.push(' ');
+                }
                 i = end;
                 continue;
             }
@@ -275,6 +284,56 @@ fn strip_inline_markup(s: &str) -> String {
         i += ch.len_utf8();
     }
     out
+}
+
+/// Whether dropping a tag between these two characters would run two words
+/// together, so a space belongs in its place.
+///
+/// Only between characters that can start or end a word. Punctuation is
+/// excluded on the side it hugs, because that is where chikari's text is
+/// already correct: a space inserted there produces `Vance 's` or `[Lv 2] ,`.
+/// Note the same chapters downloaded from lightnovelworld *do* carry those
+/// artifacts — it space-joined mechanically — so matching its output is not
+/// the goal here and would make the text worse.
+///
+/// CJK is excluded entirely: it separates no words with spaces, so inserting
+/// one is corruption rather than repair. Korean does use spaces but sits above
+/// the same cutoff, so it keeps chikari's spacing rather than risking a wrong
+/// one.
+fn welds_words(before: Option<char>, after: Option<char>) -> bool {
+    let (Some(b), Some(a)) = (before, after) else {
+        return false;
+    };
+    if b.is_whitespace() || a.is_whitespace() {
+        return false;
+    }
+    if !is_space_separated(b) || !is_space_separated(a) {
+        return false;
+    }
+    !hugs_what_precedes(a) && !hugs_what_follows(b)
+}
+
+/// Punctuation that attaches to the word before it, so nothing may be inserted
+/// in front of it: `word</em>,` must not become `word ,`.
+fn hugs_what_precedes(c: char) -> bool {
+    matches!(
+        c,
+        '.' | ',' | '!' | '?' | ';' | ':' | ')' | ']' | '}' | '%'
+            | '\u{2019}' | '\u{201d}' | '\u{00bb}' | '\u{2026}' | '\u{2014}' | '\u{2013}'
+    )
+}
+
+/// Punctuation that attaches to the word after it, so nothing may be inserted
+/// behind it: `(<em>word` must not become `( word`.
+fn hugs_what_follows(c: char) -> bool {
+    matches!(
+        c,
+        '(' | '[' | '{' | '\u{201c}' | '\u{2018}' | '\u{00ab}' | '\u{00bf}' | '\u{00a1}'
+    )
+}
+
+fn is_space_separated(c: char) -> bool {
+    (c as u32) < 0x2E80
 }
 
 /// If `s[start..]` opens a recognised inline tag, the index just past its `>`.
@@ -615,5 +674,60 @@ mod tests {
         assert!(src.matches("https://www.chikari.moe/novels/x"));
         assert!(!src.matches("https://lightnovelworld.org/novel/x/"));
         assert!(!src.matches("https://notchikari.moe/novels/x"));
+    }
+
+    /// chikari's import dropped whitespace next to inline markup, so stripping
+    /// a tag has to put it back or words weld together — `</em>Devon` where the
+    /// original read `</em> Devon`.
+    #[test]
+    fn restores_the_space_the_site_dropped_beside_markup() {
+        let v = json!({
+            "number": 5.0,
+            "title": "Chapter 5",
+            "body": "He said <em>\u{201c}no\u{201d}</em>Devon thought.\nAlready <em>spaced</em> here."
+        });
+        let ch = parse_read(&v, &a_ref(5)).unwrap();
+        assert_eq!(
+            ch.paragraphs,
+            vec![
+                "He said \u{201c}no\u{201d} Devon thought.",
+                "Already spaced here.",
+            ]
+        );
+    }
+
+    /// ...but CJK separates no words with spaces, so it must not gain any.
+    #[test]
+    fn does_not_inject_spaces_into_cjk_prose() {
+        let v = json!({
+            "number": 6.0,
+            "title": "Chapter 6",
+            "body": "\u{300c}\u{3053}\u{3093}\u{306b}\u{3061}\u{306f}\u{300d}\u{3068}<b>\u{8a00}\u{3063}\u{305f}</b>\u{3002}"
+        });
+        let ch = parse_read(&v, &a_ref(6)).unwrap();
+        assert_eq!(
+            ch.paragraphs,
+            vec!["\u{300c}\u{3053}\u{3093}\u{306b}\u{3061}\u{306f}\u{300d}\u{3068}\u{8a00}\u{3063}\u{305f}\u{3002}"]
+        );
+    }
+
+    /// Patterns taken from real chapters. The rule has to separate welded
+    /// words without touching punctuation the site already gets right.
+    #[test]
+    fn spacing_matches_what_the_prose_actually_needs() {
+        let cases = [
+            // Words welded by stripped markup gain a space...
+            ("to finally have a<strong>[+1]</strong>next to it.", "to finally have a [+1] next to it."),
+            ("<strong>[Name:</strong>Lisa", "[Name: Lisa"),
+            ("<strong>Level:</strong>03", "Level: 03"),
+            // ...but punctuation keeps hugging its word.
+            ("hologram,<strong>Isabella Vance</strong>\u{2019}s heart", "hologram, Isabella Vance\u{2019}s heart"),
+            ("with<strong>[Aptitude Lv 2]</strong>, he heard", "with [Aptitude Lv 2], he heard"),
+            ("<strong>Status:</strong>Online<strong>]</strong>", "Status: Online]"),
+            ("She said <i>no</i>.", "She said no."),
+        ];
+        for (raw, want) in cases {
+            assert_eq!(strip_inline_markup(raw), want, "input: {raw:?}");
+        }
     }
 }
