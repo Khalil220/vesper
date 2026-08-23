@@ -828,7 +828,12 @@ async fn refetch(
             .ok_or_else(|| anyhow!("no subscription matches \"{novel}\""))?]
     };
 
-    if every {
+    if every && drop_missing && dry_run {
+        eprintln!(
+            "Checking which chapters {} novel(s) no longer have...",
+            novels.len()
+        );
+    } else if every {
         let total: i64 = novels.iter().map(|n| n.chapter_count).sum();
         eprintln!(
             "Re-downloading {total} stored chapter(s) across {} novel(s){}. \
@@ -841,15 +846,19 @@ async fn refetch(
     let mut changed = Vec::new();
     for n in &novels {
         if !every {
-            let scope = match &targets {
-                Some(t) => format!("{} chapter(s)", t.len()),
-                None => format!("all {} stored chapter(s)", n.chapter_count),
-            };
-            eprintln!(
-                "Re-downloading {scope} of \"{}\"{}...",
-                n.title,
-                if dry_run { " (dry run)" } else { "" }
-            );
+            if drop_missing && dry_run {
+                eprintln!("Checking which chapters \"{}\" no longer has...", n.title);
+            } else {
+                let scope = match &targets {
+                    Some(t) => format!("{} chapter(s)", t.len()),
+                    None => format!("all {} stored chapter(s)", n.chapter_count),
+                };
+                eprintln!(
+                    "Re-downloading {scope} of \"{}\"{}...",
+                    n.title,
+                    if dry_run { " (dry run)" } else { "" }
+                );
+            }
         }
 
         let sources = build_sources(n, delay)?;
@@ -882,7 +891,11 @@ async fn refetch(
     }
 
     if changed.is_empty() {
-        println!("Nothing to change.");
+        if drop_missing && dry_run {
+            println!("Nothing to delete. (Rewrites were not checked — see above.)");
+        } else {
+            println!("Nothing to change.");
+        }
     } else if !dry_run {
         println!();
         for (id, title) in &changed {
@@ -933,6 +946,11 @@ fn report_refetch(report: &RefetchReport, novel: &StoredNovel, quiet: bool, dry_
         } else {
             eprintln!("  ! ch.{number} left as-is — {why}");
         }
+    }
+    if !report.rewrites_checked {
+        println!(
+            "  (deletions only; omit --drop-missing to also preview which chapters differ)"
+        );
     }
 }
 

@@ -93,7 +93,11 @@ rules-of-the-road.
   discovery **succeeded** (a failed fetch is never evidence a chapter is gone),
   and nothing is deleted before its replacement is in hand. A target the sources
   list but nobody could serve puts the novel back to `Backfilling`, since a
-  delta check would skip straight past a mid-range hole.
+  delta check would skip straight past a mid-range hole. The deletion set is
+  computed from discovery *before* the fetch loop, so `--drop-missing
+  --dry-run` returns in seconds without downloading anything; it sets
+  `RefetchReport::rewrites_checked = false` so the caller says "deletions only"
+  rather than implying nothing differs.
 - **Promotion re-attributes, and is never automatic on failure.** Making a
   fallback primary (`store::promote_source`, `vesper set-primary`) renumbers
   priorities *and* re-attributes the old primary's chapters to the promoted

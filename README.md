@@ -212,6 +212,11 @@ Chapters whose text already matches the site are left alone rather than
 rewritten, so a refetch that finds nothing new costs you nothing but the
 requests.
 
+Pairing `--drop-missing` with `--dry-run` is cheap: what would be deleted falls
+out of the chapter list on its own, so it answers in seconds without
+downloading anything. It can't tell you which stored chapters merely *differ*
+in that mode — that genuinely needs the downloads — and it says so.
+
 `--drop-missing` also deletes stored chapters that no source lists any more.
 That is for the other kind of fix: a site that *removed* chapters and
 renumbered around them, leaving you with rows at numbers that no longer exist.

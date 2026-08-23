@@ -43,6 +43,10 @@ pub struct RefetchReport {
     pub removed: Vec<u32>,
     /// Left as they were, with why.
     pub skipped: Vec<(u32, String)>,
+    /// Whether chapters were actually downloaded and compared. False for a
+    /// `drop_missing` dry run, which answers from the chapter list alone and so
+    /// cannot know which stored chapters *differ* — only which are gone.
+    pub rewrites_checked: bool,
 }
 
 impl RefetchReport {
@@ -66,7 +70,10 @@ pub async fn refetch_novel(
     dry_run: bool,
     mut on_progress: impl FnMut(u32, usize, usize),
 ) -> Result<RefetchReport> {
-    let mut report = RefetchReport::default();
+    let mut report = RefetchReport {
+        rewrites_checked: true,
+        ..Default::default()
+    };
     if sources.is_empty() {
         return Err(anyhow!("no usable source to re-download from"));
     }
@@ -105,6 +112,21 @@ pub async fn refetch_novel(
         None => stored.union(&listed).copied().collect(),
     };
 
+    // Which stored chapters the sources no longer carry. This falls out of the
+    // chapter list alone, so it costs nothing beyond the discovery already done
+    // — and a dry run asking only about deletions can stop right here instead
+    // of downloading the whole novel to answer a question it never needed.
+    let gone: BTreeSet<u32> = targets
+        .iter()
+        .copied()
+        .filter(|n| stored.contains(n) && !listed.contains(n))
+        .collect();
+    if drop_missing && dry_run {
+        report.removed.extend(gone);
+        report.rewrites_checked = false;
+        return Ok(report);
+    }
+
     let total = targets.len();
     let mut still_absent = Vec::new();
     for (i, number) in targets.iter().copied().enumerate() {
@@ -137,20 +159,11 @@ pub async fn refetch_novel(
         }
     }
 
-    // Only now, with a chapter list actually in hand, is it safe to say a
-    // stored chapter is gone rather than merely unfetchable this minute.
-    if drop_missing {
-        let gone: BTreeSet<u32> = targets
-            .iter()
-            .copied()
-            .filter(|n| stored.contains(n) && !listed.contains(n))
-            .collect();
-        if !gone.is_empty() {
-            if !dry_run {
-                store.delete_chapters(novel_id, &gone)?;
-            }
-            report.removed.extend(gone);
-        }
+    // Safe because `gone` came from a chapter list we actually read, never from
+    // a fetch that happened to fail.
+    if drop_missing && !gone.is_empty() {
+        store.delete_chapters(novel_id, &gone)?;
+        report.removed.extend(gone);
     }
 
     // A target the sources list but nothing could serve leaves a real hole. Put
@@ -211,6 +224,7 @@ mod tests {
         bodies: BTreeMap<u32, String>,
         broken: BTreeSet<u32>,
         dead: bool,
+        fetches: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     }
 
     impl MockSource {
@@ -220,6 +234,7 @@ mod tests {
                 bodies: bodies.iter().map(|(n, b)| (*n, b.to_string())).collect(),
                 broken: BTreeSet::new(),
                 dead: false,
+                fetches: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             }
         }
 
@@ -236,6 +251,7 @@ mod tests {
                 bodies: BTreeMap::new(),
                 broken: BTreeSet::new(),
                 dead: true,
+                fetches: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             }
         }
     }
@@ -277,6 +293,7 @@ mod tests {
                 .collect())
         }
         async fn fetch_chapter(&self, c: &ChapterRef) -> Result<Chapter> {
+            self.fetches.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if self.broken.contains(&c.number) {
                 return Err(anyhow!("ch.{} timed out", c.number));
             }
@@ -501,5 +518,49 @@ mod tests {
 
         let novel = store.find_novel(&id.to_string()).unwrap().unwrap();
         assert_eq!(novel.derived_state, DerivedState::Backfilling);
+    }
+
+    /// A dry run that only asks what `--drop-missing` would delete can answer
+    /// from the chapter list, so it must not download the novel to do it. The
+    /// trade is that it cannot know which stored chapters merely *differ*.
+    #[tokio::test]
+    async fn a_drop_missing_dry_run_costs_no_downloads() {
+        let (store, id, _) = setup(&[(1, "one"), (2, "two"), (3, "three")]);
+        let mock = MockSource::new("primary", &[(1, "one v2"), (2, "two")]);
+        let counter = mock.fetches.clone();
+        let sources = pair(&store, id, vec![Box::new(mock)]);
+
+        let r = refetch_novel(&store, id, &sources, None, true, true, |_, _, _| {})
+            .await
+            .unwrap();
+
+        assert_eq!(r.removed, vec![3], "ch.3 is no longer listed");
+        assert!(!r.rewrites_checked, "and it says so rather than implying none differ");
+        assert!(r.replaced.is_empty());
+        assert_eq!(
+            counter.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "no chapter was downloaded to answer this"
+        );
+        // Nothing was written, dry run or not.
+        assert_eq!(store.stored_chapter_numbers(id).unwrap().len(), 3);
+        assert_eq!(body_of(&store, id, 1), "one");
+    }
+
+    /// A dry run *without* --drop-missing still downloads, because "which
+    /// chapters differ" cannot be answered any other way.
+    #[tokio::test]
+    async fn a_plain_dry_run_still_compares_text() {
+        let (store, id, _) = setup(&[(1, "one")]);
+        let mock = MockSource::new("primary", &[(1, "one v2")]);
+        let counter = mock.fetches.clone();
+        let sources = pair(&store, id, vec![Box::new(mock)]);
+
+        let r = refetch_novel(&store, id, &sources, None, false, true, |_, _, _| {})
+            .await
+            .unwrap();
+        assert_eq!(r.replaced, vec![1]);
+        assert!(r.rewrites_checked);
+        assert_eq!(counter.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 }
