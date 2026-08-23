@@ -118,6 +118,53 @@ pub fn parse_chapter_number(url: &str) -> Option<u32> {
     digits.parse().ok()
 }
 
+/// Parse a chapter selection like `"152"`, `"152-154"` or `"1,5,10-20"` into
+/// the set of numbers it names.
+///
+/// Ranges are inclusive, because that is how a reader refers to chapters:
+/// "152-154" means all three. Chapter numbering starts at 1, so 0 is rejected
+/// rather than silently dropped — a spec that doesn't mean what the user typed
+/// should fail loudly, since the commands built on this rewrite stored text.
+pub fn parse_chapter_spec(spec: &str) -> Result<std::collections::BTreeSet<u32>, String> {
+    let mut out = std::collections::BTreeSet::new();
+    for part in spec.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        // Split on the *last* '-' so a leading minus reads as a bad number
+        // rather than an open range.
+        match part.split_once('-') {
+            Some((lo, hi)) => {
+                let lo: u32 = parse_number(lo)?;
+                let hi: u32 = parse_number(hi)?;
+                if lo > hi {
+                    return Err(format!("range {part:?} counts backwards"));
+                }
+                out.extend(lo..=hi);
+            }
+            None => {
+                out.insert(parse_number(part)?);
+            }
+        }
+    }
+    if out.is_empty() {
+        return Err(format!("{spec:?} names no chapters"));
+    }
+    Ok(out)
+}
+
+fn parse_number(raw: &str) -> Result<u32, String> {
+    let t = raw.trim();
+    let n: u32 = t
+        .parse()
+        .map_err(|_| format!("{t:?} is not a chapter number"))?;
+    if n == 0 {
+        return Err("chapter numbers start at 1".to_string());
+    }
+    Ok(n)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -191,5 +238,28 @@ mod tests {
             Some(1)
         );
         assert_eq!(parse_chapter_number("/no-chapter-here/index.html"), None);
+    }
+
+    #[test]
+    fn parses_chapter_specs() {
+        let set = |v: &[u32]| v.iter().copied().collect::<std::collections::BTreeSet<u32>>();
+        assert_eq!(parse_chapter_spec("152").unwrap(), set(&[152]));
+        // Ranges are inclusive at both ends.
+        assert_eq!(parse_chapter_spec("152-154").unwrap(), set(&[152, 153, 154]));
+        assert_eq!(parse_chapter_spec("1,5,10-12").unwrap(), set(&[1, 5, 10, 11, 12]));
+        // Whitespace and overlap are tolerated; the result is a set.
+        assert_eq!(parse_chapter_spec(" 3 , 1-3 ").unwrap(), set(&[1, 2, 3]));
+        // A single-number "range" is just that number.
+        assert_eq!(parse_chapter_spec("7-7").unwrap(), set(&[7]));
+    }
+
+    #[test]
+    fn rejects_specs_that_would_not_mean_what_was_typed() {
+        for bad in ["", "  ", ",", "abc", "1-", "-5", "0", "0-3", "5-1", "1,x"] {
+            assert!(
+                parse_chapter_spec(bad).is_err(),
+                "{bad:?} should be rejected, not silently reinterpreted"
+            );
+        }
     }
 }

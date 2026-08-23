@@ -75,6 +75,25 @@ enum Command {
         #[arg(long)]
         delay_ms: Option<u64>,
     },
+    /// Re-download chapters that are already stored, replacing their text.
+    Refetch {
+        /// Novel to re-download: its id (from `vesper subs`), or the exact title
+        /// (quote it if it contains spaces).
+        novel: String,
+        /// Which chapters, e.g. "152", "152-154" or "1,5,10-20". Default: all.
+        #[arg(long)]
+        chapters: Option<String>,
+        /// Also delete stored chapters no source lists any more (use when the
+        /// site removed chapters and renumbered around them).
+        #[arg(long)]
+        drop_missing: bool,
+        /// Report what would change without writing anything.
+        #[arg(long)]
+        dry_run: bool,
+        /// Override the request delay, in milliseconds (default: config value).
+        #[arg(long)]
+        delay_ms: Option<u64>,
+    },
     /// Re-fetch chapters stored as a site's "log in to read" placeholder.
     Repair {
         /// Novel to repair: its id (from `vesper subs`) or exact title (quote if
@@ -198,6 +217,9 @@ async fn main() -> Result<()> {
         Command::Subs { gaps } => subs(gaps),
         Command::Refresh { novel, titles, delay_ms } => {
             refresh(&config, novel, titles, delay_ms).await
+        }
+        Command::Refetch { novel, chapters, drop_missing, dry_run, delay_ms } => {
+            refetch(&config, novel, chapters, drop_missing, dry_run, delay_ms).await
         }
         Command::Repair { novel, chapter, dry_run, delay_ms } => {
             repair(&config, novel, chapter, dry_run, delay_ms).await
@@ -765,6 +787,101 @@ fn subs(gaps_only: bool) -> Result<()> {
     }
     if gaps_only && shown == 0 {
         println!("No subscriptions have missing chapters.");
+    }
+    Ok(())
+}
+
+/// Re-download stored chapters, replacing their text with the source's current
+/// version. This is the escape hatch for a site that changed under us — a run
+/// of duplicated chapters since corrected, or a chapter updated with text it
+/// was missing — which an ordinary sync can never pick up, because it never
+/// revisits a chapter it already has.
+async fn refetch(
+    config: &Config,
+    novel: String,
+    chapters: Option<String>,
+    drop_missing: bool,
+    dry_run: bool,
+    delay_ms: Option<u64>,
+) -> Result<()> {
+    let store = Store::open_default()?;
+    let delay = delay_ms.unwrap_or(config.request_delay_ms);
+    let found = store
+        .find_novel(&novel)?
+        .ok_or_else(|| anyhow!("no subscription matches \"{novel}\""))?;
+
+    let targets = match chapters.as_deref() {
+        Some(spec) => Some(vesper_core::util::parse_chapter_spec(spec).map_err(|e| anyhow!("{e}"))?),
+        None => None,
+    };
+    let scope = match &targets {
+        Some(t) => format!("{} chapter(s)", t.len()),
+        None => format!("all {} stored chapter(s)", found.chapter_count),
+    };
+    eprintln!(
+        "Re-downloading {scope} of \"{}\"{}...",
+        found.title,
+        if dry_run { " (dry run)" } else { "" }
+    );
+
+    let sources = build_sources(&found, delay)?;
+    let mut bar = ProgressBar::new();
+    let report = vesper_core::refetch_novel(
+        &store,
+        found.id,
+        &sources,
+        targets.as_ref(),
+        drop_missing,
+        dry_run,
+        |_, done, total| bar.update(SyncProgress::Fetching { done, total }),
+    )
+    .await;
+    bar.finish();
+    let report = report?;
+
+    let verb = if dry_run { "would be " } else { "" };
+    if !report.replaced.is_empty() {
+        println!(
+            "  {} {verb}rewritten: ch. {}",
+            report.replaced.len(),
+            describe_numbers(&report.replaced.iter().copied().collect())
+        );
+    }
+    if !report.added.is_empty() {
+        println!(
+            "  {} {verb}added: ch. {}",
+            report.added.len(),
+            describe_numbers(&report.added.iter().copied().collect())
+        );
+    }
+    if !report.removed.is_empty() {
+        println!(
+            "  {} {verb}removed (no source lists them any more): ch. {}",
+            report.removed.len(),
+            describe_numbers(&report.removed.iter().copied().collect())
+        );
+    }
+    if !report.unchanged.is_empty() {
+        println!("  {} already matched the source", report.unchanged.len());
+    }
+    for (number, why) in &report.skipped {
+        if *number == 0 {
+            eprintln!("  ! {why}");
+        } else {
+            eprintln!("  ! ch.{number} left as-is — {why}");
+        }
+    }
+
+    if !report.changed() {
+        println!("Nothing to change.");
+    } else if !dry_run {
+        println!("
+Re-export to update the EPUB (`vesper export {}`).", found.id);
+    }
+    if !drop_missing && !report.skipped.is_empty() {
+        eprintln!(
+            "  (chapters the site has dropped entirely need --drop-missing;              a fetch that merely failed is never treated as a deletion)"
+        );
     }
     Ok(())
 }

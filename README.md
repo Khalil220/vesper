@@ -186,6 +186,37 @@ while a site's parsing was wrong. It costs one request per stored chapter, so
 it's slow on a long novel — expect it to take a while and be gentle with it.
 Re-export afterwards to get the corrected titles into the EPUB.
 
+### refetch
+
+```
+vesper refetch <novel> [--chapters 152-154] [--drop-missing] [--dry-run]
+```
+
+Re-download chapters you already have and replace their text. Normal syncing
+never revisits a chapter it has, so this is the way to pick up a change the
+site made after you downloaded it — a run of chapters that were accidentally
+duplicates and have since been corrected, or a chapter that was updated with
+text it was missing.
+
+`--chapters` takes a single number, a range, or a list: `152`, `152-154`,
+`1,5,10-20`. Ranges include both ends. Without it, the whole novel is
+re-downloaded, which on a long novel is a lot of requests — `--dry-run` first
+if you want to see what would change.
+
+Chapters whose text already matches the site are left alone rather than
+rewritten, so a refetch that finds nothing new costs you nothing but the
+requests.
+
+`--drop-missing` also deletes stored chapters that no source lists any more.
+That is for the other kind of fix: a site that *removed* chapters and
+renumbered around them, leaving you with rows at numbers that no longer exist.
+It only ever deletes when the chapter list was read successfully — a chapter
+that merely failed to download is never mistaken for one that's gone — so a
+site being down can't cost you anything. Everything you already downloaded of
+a novel the site has since dropped entirely stays put.
+
+Re-export afterwards to get the new text into the EPUB.
+
 ### repair
 
 ```
