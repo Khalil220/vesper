@@ -18,8 +18,8 @@ use anyhow::{anyhow, bail, ensure, Result};
 use clap::{Parser, Subcommand};
 use vesper_core::{
     build_epub, build_source, download_cover, epub_path, migrate_lightnovelworld, sync_novel,
-    Config, DerivedState, MigrationOutcome, MigrationReport, Source, Store, StoredNovel,
-    StoredSource, SyncProgress, SyncReport,
+    Config, DerivedState, MigrationOutcome, MigrationReport, RefetchReport, Source, Store,
+    StoredNovel, StoredSource, SyncProgress, SyncReport,
 };
 
 #[derive(Parser)]
@@ -806,40 +806,103 @@ async fn refetch(
 ) -> Result<()> {
     let store = Store::open_default()?;
     let delay = delay_ms.unwrap_or(config.request_delay_ms);
-    let found = store
-        .find_novel(&novel)?
-        .ok_or_else(|| anyhow!("no subscription matches \"{novel}\""))?;
+    let every = novel.eq_ignore_ascii_case("all");
 
     let targets = match chapters.as_deref() {
-        Some(spec) => Some(vesper_core::util::parse_chapter_spec(spec).map_err(|e| anyhow!("{e}"))?),
+        Some(spec) => {
+            // Chapter 152 is a different chapter in every novel, so a range
+            // across the whole library is a mistake rather than a shortcut.
+            ensure!(!every, "--chapters needs a single novel, not `all`");
+            Some(vesper_core::util::parse_chapter_spec(spec).map_err(|e| anyhow!("{e}"))?)
+        }
         None => None,
     };
-    let scope = match &targets {
-        Some(t) => format!("{} chapter(s)", t.len()),
-        None => format!("all {} stored chapter(s)", found.chapter_count),
+
+    let novels = if every {
+        let subs = store.list_subscriptions()?;
+        ensure!(!subs.is_empty(), "no subscriptions to re-download");
+        subs
+    } else {
+        vec![store
+            .find_novel(&novel)?
+            .ok_or_else(|| anyhow!("no subscription matches \"{novel}\""))?]
     };
-    eprintln!(
-        "Re-downloading {scope} of \"{}\"{}...",
-        found.title,
-        if dry_run { " (dry run)" } else { "" }
-    );
 
-    let sources = build_sources(&found, delay)?;
-    let mut bar = ProgressBar::new();
-    let report = vesper_core::refetch_novel(
-        &store,
-        found.id,
-        &sources,
-        targets.as_ref(),
-        drop_missing,
-        dry_run,
-        |_, done, total| bar.update(SyncProgress::Fetching { done, total }),
-    )
-    .await;
-    bar.finish();
-    let report = report?;
+    if every {
+        let total: i64 = novels.iter().map(|n| n.chapter_count).sum();
+        eprintln!(
+            "Re-downloading {total} stored chapter(s) across {} novel(s){}. \
+             This is one request per chapter — expect it to take a while.",
+            novels.len(),
+            if dry_run { " (dry run)" } else { "" }
+        );
+    }
 
+    let mut changed = Vec::new();
+    for n in &novels {
+        if !every {
+            let scope = match &targets {
+                Some(t) => format!("{} chapter(s)", t.len()),
+                None => format!("all {} stored chapter(s)", n.chapter_count),
+            };
+            eprintln!(
+                "Re-downloading {scope} of \"{}\"{}...",
+                n.title,
+                if dry_run { " (dry run)" } else { "" }
+            );
+        }
+
+        let sources = build_sources(n, delay)?;
+        let mut bar = ProgressBar::new();
+        let report = vesper_core::refetch_novel(
+            &store,
+            n.id,
+            &sources,
+            targets.as_ref(),
+            drop_missing,
+            dry_run,
+            |_, done, total| bar.update(SyncProgress::Fetching { done, total }),
+        )
+        .await;
+        bar.finish();
+
+        let report = match report {
+            Ok(r) => r,
+            // One unreachable novel shouldn't abandon the rest of the library.
+            Err(e) if every => {
+                eprintln!("  ! {} — {e}", n.title);
+                continue;
+            }
+            Err(e) => return Err(e),
+        };
+        if report.changed() {
+            changed.push((n.id, n.title.clone()));
+        }
+        report_refetch(&report, n, every, dry_run);
+    }
+
+    if changed.is_empty() {
+        println!("Nothing to change.");
+    } else if !dry_run {
+        println!();
+        for (id, title) in &changed {
+            println!("Re-export {title} to update its EPUB: `vesper export {id}`");
+        }
+    }
+    Ok(())
+}
+
+/// Print one novel's refetch result. Under `all`, a novel with nothing to say
+/// stays silent so the handful that changed are actually visible.
+fn report_refetch(report: &RefetchReport, novel: &StoredNovel, quiet: bool, dry_run: bool) {
     let verb = if dry_run { "would be " } else { "" };
+    let interesting = report.changed() || !report.skipped.is_empty();
+    if quiet && !interesting {
+        return;
+    }
+    if quiet {
+        println!("{}", novel.title);
+    }
     if !report.replaced.is_empty() {
         println!(
             "  {} {verb}rewritten: ch. {}",
@@ -861,7 +924,7 @@ async fn refetch(
             describe_numbers(&report.removed.iter().copied().collect())
         );
     }
-    if !report.unchanged.is_empty() {
+    if !report.unchanged.is_empty() && !quiet {
         println!("  {} already matched the source", report.unchanged.len());
     }
     for (number, why) in &report.skipped {
@@ -871,19 +934,6 @@ async fn refetch(
             eprintln!("  ! ch.{number} left as-is — {why}");
         }
     }
-
-    if !report.changed() {
-        println!("Nothing to change.");
-    } else if !dry_run {
-        println!("
-Re-export to update the EPUB (`vesper export {}`).", found.id);
-    }
-    if !drop_missing && !report.skipped.is_empty() {
-        eprintln!(
-            "  (chapters the site has dropped entirely need --drop-missing;              a fetch that merely failed is never treated as a deletion)"
-        );
-    }
-    Ok(())
 }
 
 /// Re-fetch placeholder chapters for one novel, or every subscription.

@@ -189,7 +189,7 @@ Re-export afterwards to get the corrected titles into the EPUB.
 ### refetch
 
 ```
-vesper refetch <novel> [--chapters 152-154] [--drop-missing] [--dry-run]
+vesper refetch <novel|all> [--chapters 152-154] [--drop-missing] [--dry-run]
 ```
 
 Re-download chapters you already have and replace their text. Normal syncing
@@ -202,6 +202,11 @@ text it was missing.
 `1,5,10-20`. Ranges include both ends. Without it, the whole novel is
 re-downloaded, which on a long novel is a lot of requests — `--dry-run` first
 if you want to see what would change.
+
+`all` does every subscription, one request per stored chapter, so it is a long
+job on a real library. It isn't combined with `--chapters`: chapter 152 is a
+different chapter in every novel. A novel whose site can't be reached is
+reported and skipped rather than stopping the rest.
 
 Chapters whose text already matches the site are left alone rather than
 rewritten, so a refetch that finds nothing new costs you nothing but the
