@@ -783,31 +783,6 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    /// Delete specific chapters of a novel, returning how many rows went.
-    ///
-    /// The only caller is `refetch --purge`, and the only reason it exists is
-    /// the case an in-place rewrite cannot reach: a site that *removed*
-    /// chapters (say a run of accidental duplicates) and renumbered around
-    /// them, leaving stored rows at numbers the source no longer has. Deleting
-    /// is otherwise against the grain here — downloaded text is the thing
-    /// Vesper exists to keep — so it is opt-in and never a fallback for a
-    /// failed fetch.
-    pub fn delete_chapters(&self, novel_id: i64, numbers: &BTreeSet<u32>) -> Result<usize> {
-        if numbers.is_empty() {
-            return Ok(0);
-        }
-        let tx = self.conn.unchecked_transaction()?;
-        let mut removed = 0usize;
-        {
-            let mut stmt = tx.prepare("DELETE FROM chapters WHERE novel_id = ?1 AND number = ?2")?;
-            for n in numbers {
-                removed += stmt.execute(params![novel_id, n])?;
-            }
-        }
-        tx.commit()?;
-        Ok(removed)
-    }
-
     /// Chapter numbers currently sourced from something other than
     /// `primary_source_id` — candidates to upgrade if the primary now has them.
     pub fn chapters_from_other_sources(
@@ -1434,23 +1409,4 @@ mod tests {
         assert!(s.stored_chapter_numbers(id).unwrap().is_empty());
     }
 
-    #[test]
-    fn delete_chapters_removes_only_what_is_named() {
-        let s = mem_store();
-        let id = s.subscribe(&sample_meta("https://novgo.net/a.html"), "novgo").unwrap();
-        let src = primary_source_id(&s, id);
-        for n in 1..=5 {
-            s.insert_chapter_if_absent(id, src, &chapter(n)).unwrap();
-        }
-
-        let removed = s.delete_chapters(id, &[2u32, 3].into_iter().collect()).unwrap();
-        assert_eq!(removed, 2);
-        assert_eq!(s.stored_chapter_numbers(id).unwrap(), [1, 4, 5].into_iter().collect());
-
-        // Numbers that aren't stored are a no-op, not an error.
-        assert_eq!(s.delete_chapters(id, &[99u32].into_iter().collect()).unwrap(), 0);
-        assert_eq!(s.delete_chapters(id, &BTreeSet::new()).unwrap(), 0);
-        // The novel and its sources are untouched.
-        assert_eq!(s.find_novel(&id.to_string()).unwrap().unwrap().sources.len(), 1);
-    }
 }

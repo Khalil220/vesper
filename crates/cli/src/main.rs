@@ -83,10 +83,6 @@ enum Command {
         /// Which chapters, e.g. "152", "152-154" or "1,5,10-20". Default: all.
         #[arg(long)]
         chapters: Option<String>,
-        /// Also delete stored chapters no source lists any more (use when the
-        /// site removed chapters and renumbered around them).
-        #[arg(long)]
-        drop_missing: bool,
         /// Report what would change without writing anything.
         #[arg(long)]
         dry_run: bool,
@@ -218,8 +214,8 @@ async fn main() -> Result<()> {
         Command::Refresh { novel, titles, delay_ms } => {
             refresh(&config, novel, titles, delay_ms).await
         }
-        Command::Refetch { novel, chapters, drop_missing, dry_run, delay_ms } => {
-            refetch(&config, novel, chapters, drop_missing, dry_run, delay_ms).await
+        Command::Refetch { novel, chapters, dry_run, delay_ms } => {
+            refetch(&config, novel, chapters, dry_run, delay_ms).await
         }
         Command::Repair { novel, chapter, dry_run, delay_ms } => {
             repair(&config, novel, chapter, dry_run, delay_ms).await
@@ -800,7 +796,6 @@ async fn refetch(
     config: &Config,
     novel: String,
     chapters: Option<String>,
-    drop_missing: bool,
     dry_run: bool,
     delay_ms: Option<u64>,
 ) -> Result<()> {
@@ -828,12 +823,7 @@ async fn refetch(
             .ok_or_else(|| anyhow!("no subscription matches \"{novel}\""))?]
     };
 
-    if every && drop_missing && dry_run {
-        eprintln!(
-            "Checking which chapters {} novel(s) no longer have...",
-            novels.len()
-        );
-    } else if every {
+    if every {
         let total: i64 = novels.iter().map(|n| n.chapter_count).sum();
         eprintln!(
             "Re-downloading {total} stored chapter(s) across {} novel(s){}. \
@@ -846,19 +836,15 @@ async fn refetch(
     let mut changed = Vec::new();
     for n in &novels {
         if !every {
-            if drop_missing && dry_run {
-                eprintln!("Checking which chapters \"{}\" no longer has...", n.title);
-            } else {
-                let scope = match &targets {
-                    Some(t) => format!("{} chapter(s)", t.len()),
-                    None => format!("all {} stored chapter(s)", n.chapter_count),
-                };
-                eprintln!(
-                    "Re-downloading {scope} of \"{}\"{}...",
-                    n.title,
-                    if dry_run { " (dry run)" } else { "" }
-                );
-            }
+            let scope = match &targets {
+                Some(t) => format!("{} chapter(s)", t.len()),
+                None => format!("all {} stored chapter(s)", n.chapter_count),
+            };
+            eprintln!(
+                "Re-downloading {scope} of \"{}\"{}...",
+                n.title,
+                if dry_run { " (dry run)" } else { "" }
+            );
         }
 
         let sources = build_sources(n, delay)?;
@@ -868,7 +854,6 @@ async fn refetch(
             n.id,
             &sources,
             targets.as_ref(),
-            drop_missing,
             dry_run,
             |_, done, total| bar.update(SyncProgress::Fetching { done, total }),
         )
@@ -891,11 +876,7 @@ async fn refetch(
     }
 
     if changed.is_empty() {
-        if drop_missing && dry_run {
-            println!("Nothing to delete. (Rewrites were not checked — see above.)");
-        } else {
-            println!("Nothing to change.");
-        }
+        println!("Nothing to change.");
     } else if !dry_run {
         println!();
         for (id, title) in &changed {
@@ -930,13 +911,6 @@ fn report_refetch(report: &RefetchReport, novel: &StoredNovel, quiet: bool, dry_
             describe_numbers(&report.added.iter().copied().collect())
         );
     }
-    if !report.removed.is_empty() {
-        println!(
-            "  {} {verb}removed (no source lists them any more): ch. {}",
-            report.removed.len(),
-            describe_numbers(&report.removed.iter().copied().collect())
-        );
-    }
     if !report.unchanged.is_empty() && !quiet {
         println!("  {} already matched the source", report.unchanged.len());
     }
@@ -946,11 +920,6 @@ fn report_refetch(report: &RefetchReport, novel: &StoredNovel, quiet: bool, dry_
         } else {
             eprintln!("  ! ch.{number} left as-is — {why}");
         }
-    }
-    if !report.rewrites_checked {
-        println!(
-            "  (deletions only; omit --drop-missing to also preview which chapters differ)"
-        );
     }
 }
 

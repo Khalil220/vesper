@@ -189,7 +189,7 @@ Re-export afterwards to get the corrected titles into the EPUB.
 ### refetch
 
 ```
-vesper refetch <novel|all> [--chapters 152-154] [--drop-missing] [--dry-run]
+vesper refetch <novel|all> [--chapters 152-154] [--dry-run]
 ```
 
 Re-download chapters you already have and replace their text. Normal syncing
@@ -212,18 +212,9 @@ Chapters whose text already matches the site are left alone rather than
 rewritten, so a refetch that finds nothing new costs you nothing but the
 requests.
 
-Pairing `--drop-missing` with `--dry-run` is cheap: what would be deleted falls
-out of the chapter list on its own, so it answers in seconds without
-downloading anything. It can't tell you which stored chapters merely *differ*
-in that mode — that genuinely needs the downloads — and it says so.
-
-`--drop-missing` also deletes stored chapters that no source lists any more.
-That is for the other kind of fix: a site that *removed* chapters and
-renumbered around them, leaving you with rows at numbers that no longer exist.
-It only ever deletes when the chapter list was read successfully — a chapter
-that merely failed to download is never mistaken for one that's gone — so a
-site being down can't cost you anything. Everything you already downloaded of
-a novel the site has since dropped entirely stays put.
+Refetch only ever overwrites. It has no way to delete a chapter, so a run that
+goes wrong costs you nothing but the requests. If a site drops a chapter after
+you downloaded it, your copy stays.
 
 Re-export afterwards to get the new text into the EPUB.
 

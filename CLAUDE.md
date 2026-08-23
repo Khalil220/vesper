@@ -84,20 +84,24 @@ rules-of-the-road.
   instead (the primary genuinely cannot provide that chapter), which also stops
   it being retried every sync; the chapter is stored, so `unfilled_gaps` never
   shows it to the user.
-- **A refetch may overwrite, but deletes only on proof.** `refetch` re-downloads
-  stored chapters and replaces their text — the escape hatch for a site that
-  changed under us (a duplicated run since corrected, a chapter updated with
-  missing text), which sync can never see. `--drop-missing` additionally removes
-  stored chapters no source lists any more, for when a site *deleted* chapters
-  and renumbered. Two rules keep that honest: nothing is dropped unless
-  discovery **succeeded** (a failed fetch is never evidence a chapter is gone),
-  and nothing is deleted before its replacement is in hand. A target the sources
-  list but nobody could serve puts the novel back to `Backfilling`, since a
-  delta check would skip straight past a mid-range hole. The deletion set is
-  computed from discovery *before* the fetch loop, so `--drop-missing
-  --dry-run` returns in seconds without downloading anything; it sets
-  `RefetchReport::rewrites_checked = false` so the caller says "deletions only"
-  rather than implying nothing differs.
+- **Refetch overwrites; it never deletes.** `refetch` re-downloads stored
+  chapters and replaces their text, which is the escape hatch for a site that
+  changed one after we saved it. Sync can't see those: a stored chapter is
+  never revisited. It deliberately has no delete path. When these sites fix a
+  chapter that came out duplicated, truncated or scrambled, they **edit the
+  body in place** and the number stays where it is. Chapters do get deleted
+  sometimes, leaving holes in the numbering, but the numbering is **never
+  compacted** afterwards, so nothing shifts underneath a stored chapter.
+  Verified on chikari: the-primal-hunter still lists 1395 chapters over
+  1..1396 with its hole at 1201 intact, and supreme-magus keeps all seven of
+  its holes. A `--drop-missing` flag existed briefly on the strength of a
+  renumbering scenario that was assumed rather than checked; it was removed
+  once the numbering was actually measured. Don't re-add one. A source listing
+  fewer chapters than the library holds is normal (a novel migrated from
+  another site keeps chapters the new one never had), so "not in the list"
+  is not evidence of anything. A target the sources list but nobody could
+  serve puts the novel back to `Backfilling`, since a delta check would skip
+  straight past a mid-range hole.
 - **Promotion re-attributes, and is never automatic on failure.** Making a
   fallback primary (`store::promote_source`, `vesper set-primary`) renumbers
   priorities *and* re-attributes the old primary's chapters to the promoted
@@ -287,7 +291,7 @@ Cargo workspace, two crates under `crates/`:
     through; `resolve_on_chikari` is public so `examples/live_migration` can
     preview a real library without writing to it.
   - `refetch` — re-download stored chapters and replace their text (see the
-    invariant above). Deletion is opt-in and gated on a successful discovery.
+    invariant above). Overwrite-only; there is no delete path by design.
   - `repair` — re-fetch chapters stored as a site's gating placeholder (see the
     invariant above). `looks_like_gate_stub` and the replacement check are pure
     and unit-tested, including the short-author's-note case that length-based
@@ -309,9 +313,8 @@ Cargo workspace, two crates under `crates/`:
     content-upgrade pass and `repair`. `repoint_source` (site moved) and
     `promote_source` (fallback takes over) both keep stored chapters
     attributed to a live source — see their invariants above.
-    `chapters_shorter_than` narrows the placeholder scan; `delete_chapters`
-    exists only for `refetch --drop-missing`. `meta` is the key/value table
-    one-shot migrations mark themselves done in. `migrate()` is
+    `chapters_shorter_than` narrows the placeholder scan. `meta` is the
+    key/value table one-shot migrations mark themselves done in. `migrate()` is
     additive and idempotent; the one destructive step is the `novels` rebuild
     that adds `AUTOINCREMENT`, which runs with `foreign_keys=OFF` (`DROP
     TABLE` otherwise cascades every chapter away), refuses to drop the
