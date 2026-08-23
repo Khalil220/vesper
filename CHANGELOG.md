@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.3.0
+
+- Add `vesper refetch <novel|all>`, which re-downloads chapters you already
+  have and replaces their text. A normal sync never revisits a stored chapter,
+  so this is the way to pick up a correction the site made after you
+  downloaded it. `--chapters 152-154` limits it to a range.
+- Add `vesper repair <novel|all>`, which re-downloads chapters that were saved
+  as a site's "log in to read" notice instead of the chapter. Those download
+  successfully, so nothing catches them at the time.
+- Fix chapters from chikari.moe running words together where the original had
+  italics, such as "have a[+1]next to it". Run `vesper refetch` on a novel to
+  correct chapters you already have.
+- Stop a sync from undoing a repair. A chapter repaired from a fallback was
+  re-downloaded from the main site on the next sync, which returned the same
+  placeholder and overwrote the real text.
+
 ## 1.2.0
 
 - Light Novel World's novel library has moved to chikari.moe, and Vesper has
