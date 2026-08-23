@@ -52,20 +52,21 @@ jobs:
           mkdir "$STAGE"
           cp "target/${{ matrix.target }}/release/vesper" README.md "$STAGE"/
           tar czf "$STAGE.tar.gz" "$STAGE"
-      - name: Package (zip)
+      # Windows ships the bare exe. There is no executable bit to protect there,
+      # so an archive only ever added an extraction step, and the file already
+      # carries the name you want on PATH. The tarballs stay because
+      # upload-artifact flattens permissions on loose files: a bare Unix binary
+      # comes back without +x, while the same file inside a tarball does not.
+      - name: Stage the binary
         if: runner.os == 'Windows'
         shell: pwsh
-        run: |
-          $stage = "vesper-${{ github.ref_name }}-${{ matrix.target }}"
-          New-Item -ItemType Directory $stage | Out-Null
-          Copy-Item "target/${{ matrix.target }}/release/vesper.exe", README.md $stage/
-          Compress-Archive -Path $stage -DestinationPath "$stage.zip"
+        run: Copy-Item "target/${{ matrix.target }}/release/vesper.exe" vesper.exe
       - uses: actions/upload-artifact@v4
         with:
           name: package-${{ matrix.target }}
           path: |
             vesper-*.tar.gz
-            vesper-*.zip
+            vesper.exe
           if-no-files-found: error
 
   release:
