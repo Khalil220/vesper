@@ -184,7 +184,8 @@ downloaded and overwrites the ones that differ. A normal sync never revisits a
 chapter it already has, so this is the way to repair titles that were saved
 while a site's parsing was wrong. It costs one request per stored chapter, so
 it's slow on a long novel — expect it to take a while and be gentle with it.
-Re-export afterwards to get the corrected titles into the EPUB.
+When `auto_append` is on, the EPUB is rebuilt for you as soon as the text
+changes. Otherwise Vesper prints the export command to run.
 
 ### refetch
 
@@ -216,7 +217,8 @@ Refetch only ever overwrites. It has no way to delete a chapter, so a run that
 goes wrong costs you nothing but the requests. If a site drops a chapter after
 you downloaded it, your copy stays.
 
-Re-export afterwards to get the new text into the EPUB.
+When `auto_append` is on, the EPUB is rebuilt for you as soon as the text
+changes. Otherwise Vesper prints the export command to run.
 
 ### repair
 
@@ -237,8 +239,10 @@ brief chapter (an author's note between arcs, say) is left alone. Use
 
 A replacement is rejected if it's a placeholder itself, or if it isn't longer
 than what you already have, so running this against a site that's down — or one
-that's still gating the same chapters — can't damage good chapters. Re-export
-afterwards to get the real text into the EPUB.
+that's still gating the same chapters — can't damage good chapters.
+
+When `auto_append` is on, the EPUB is rebuilt for you as soon as the text
+changes. Otherwise Vesper prints the export command to run.
 
 Fallbacks are used. Repair tries each of a novel's sources in turn, so if the
 main site is still gating a chapter but a fallback carries it in full, the

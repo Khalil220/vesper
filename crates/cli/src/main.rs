@@ -379,6 +379,30 @@ async fn export_novel(store: &Store, novel: &StoredNovel, config: &Config) -> Re
 }
 
 /// After a sync/fetch: re-evaluate completion and run auto-export/append.
+/// Export a novel, recording the outcome so a locked EPUB is retried by the
+/// next sync instead of being quietly skipped. Returns the files written, which
+/// is empty when the novel has no chapters or the export had to be deferred.
+///
+/// Shared by the sync path and by the commands that rewrite stored text.
+/// Rewriting a chapter clears its `exported` flag but produces no new or
+/// upgraded chapters, so a later sync would never export on its own and the
+/// EPUB would sit stale against a corrected library.
+async fn export_and_track(store: &Store, config: &Config, novel: &StoredNovel) -> Vec<PathBuf> {
+    match export_novel(store, novel, config).await {
+        Ok(paths) => {
+            if !paths.is_empty() {
+                let _ = store.set_export_pending(novel.id, false);
+            }
+            paths
+        }
+        Err(e) => {
+            let _ = store.set_export_pending(novel.id, true);
+            eprintln!("  ! export deferred (will retry next sync): {e}");
+            Vec::new()
+        }
+    }
+}
+
 async fn post_sync(
     store: &Store,
     config: &Config,
@@ -407,17 +431,13 @@ async fn post_sync(
         || novel.export_pending;
 
     if should_export {
-        match export_novel(store, &novel, config).await {
-            Ok(paths) if !paths.is_empty() => {
-                store.set_export_pending(novel_id, false)?;
-                eprintln!("  auto-exported {} file(s) to {}", paths.len(), config.output_dir.display());
-            }
-            Ok(_) => {}
-            Err(e) => {
-                // Likely the EPUB is open/locked elsewhere; retry next pass.
-                store.set_export_pending(novel_id, true)?;
-                eprintln!("  ! auto-export deferred (will retry next sync): {e}");
-            }
+        let paths = export_and_track(store, config, &novel).await;
+        if !paths.is_empty() {
+            eprintln!(
+                "  auto-exported {} file(s) to {}",
+                paths.len(),
+                config.output_dir.display()
+            );
         }
     }
     Ok(())
@@ -705,6 +725,12 @@ async fn refresh(
                     Ok(fixed) => {
                         println!("  {} — {fixed} chapter title(s) corrected", n.title);
                         retitled += fixed;
+                        if config.auto_append {
+                            let paths = export_and_track(&store, config, n).await;
+                            if !paths.is_empty() {
+                                println!("  {} — exported", n.title);
+                            }
+                        }
                     }
                     Err(e) => eprintln!("  ! {} — titles: {e}", n.title),
                 }
@@ -716,8 +742,8 @@ async fn refresh(
                  (`vesper export <id>`) to move their EPUBs into the new folders."
             );
         }
-        if retitled > 0 {
-            println!("\n{retitled} chapter title(s) corrected — re-export to update the EPUBs.");
+        if retitled > 0 && !config.auto_append {
+            println!("\n{retitled} chapter title(s) corrected. Run `vesper export <id>` to update the EPUBs.");
         }
         return Ok(());
     }
@@ -742,7 +768,14 @@ async fn refresh(
             0 => println!("Chapter titles already correct."),
             fixed => {
                 println!("Corrected {fixed} chapter title(s).");
-                println!("Run `vesper export {}` to rebuild the EPUB.", found.id);
+                if config.auto_append {
+                    let paths = export_and_track(&store, config, &found).await;
+                    if !paths.is_empty() {
+                        println!("Exported to {}", config.output_dir.display());
+                    }
+                } else {
+                    println!("Run `vesper export {}` to rebuild the EPUB.", found.id);
+                }
             }
         }
     }
@@ -880,7 +913,17 @@ async fn refetch(
     } else if !dry_run {
         println!();
         for (id, title) in &changed {
-            println!("Re-export {title} to update its EPUB: `vesper export {id}`");
+            let Some(novel) = store.find_novel(&id.to_string())? else {
+                continue;
+            };
+            if config.auto_append {
+                let paths = export_and_track(&store, config, &novel).await;
+                if !paths.is_empty() {
+                    println!("Exported {title} ({} file(s)) to {}", paths.len(), config.output_dir.display());
+                }
+            } else {
+                println!("Run `vesper export {id}` to update the EPUB for {title}.");
+            }
         }
     }
     Ok(())
@@ -975,6 +1018,12 @@ async fn repair(
                         if dry_run { "would be repaired" } else { "repaired" },
                         describe_numbers(&r.repaired.iter().copied().collect())
                     );
+                    if !dry_run && config.auto_append {
+                        let paths = export_and_track(&store, config, n).await;
+                        if !paths.is_empty() {
+                            println!("  exported to {}", config.output_dir.display());
+                        }
+                    }
                 }
                 for (number, why) in &r.skipped {
                     if *number == 0 {
@@ -988,11 +1037,9 @@ async fn repair(
         }
     }
 
-    if total_repaired > 0 && !dry_run {
-        println!(
-            "\n{total_repaired} chapter(s) replaced — re-export to update the EPUB \
-             (`vesper export <novel>`)."
-        );
+    if total_repaired > 0 && !dry_run && !config.auto_append {
+        println!("
+{total_repaired} chapter(s) replaced. Run `vesper export <novel>` to update the EPUB.");
     }
     Ok(())
 }
