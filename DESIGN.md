@@ -27,22 +27,23 @@ for depth.
 
 ## Sources (multi-site)
 
-novgo is the *first* source, not the only one. The system is built around a
-**source adapter** abstraction so new sites are added without rewriting the core.
+The system is built around a **source adapter** abstraction so new sites are
+added without rewriting the core.
 
 - A `Source` trait defines what any site must provide: match a URL to this
   source (by host), discover the chapter list, extract chapter content, extract
   metadata (title / author / cover / status), and declare its fetch tier.
 - **Two ways to implement a source:**
   1. A **generic, config-driven adapter** for the common case — server-rendered
-     pages, CSS-selectable content, `?page=N`-style ToC pagination. Most novel
-     aggregators (including novgo) fit this, so they become a declarative site
-     *profile* (selectors + pagination pattern + tier + rate limits), addable
-     without recompiling.
+     pages, CSS-selectable content, `?page=N`-style ToC pagination. A site that
+     fits becomes a declarative site *profile* (host, content selector,
+     chapter-link marker, pagination parameter), added as an `.ini` file without
+     recompiling.
   2. A **hand-written Rust adapter** implementing the same trait, for sites too
      weird for the generic one (JS-rendered, AJAX ToC, odd auth).
-- Start with the trait plus one generic config-driven adapter; **novgo is just a
-  profile** for it. Reach for a bespoke adapter only when a site earns it.
+- Reach for a bespoke adapter only when a site earns it. Every site Vesper ships
+  support for has earned one, so there are no built-in profiles; the generic
+  adapter only serves profiles users add themselves.
 - **The data model is a logical novel with one or more ranked sources**, not a
   per-source subscription. A novel (identified by author + title) is fed by a
   primary source plus optional fallbacks, ordered by preference. This revises an
@@ -128,7 +129,7 @@ lives in the DB, not in RAM — so the main thing a resident daemon would buy
 - **Tiered fetcher behind a trait.** Pick the cheapest tier that works per-site;
   `build_source` selects it by host:
   1. `ReqwestFetcher` — plain `reqwest` with a browser UA + consistent browser
-     headers (novgo needs only this).
+     headers (chikari and royalroad need only this).
   2. `CurlFetcher` — shells out to the system `curl` (built into Windows 10+).
      Used for freewebnovel and scribblehub, whose Cloudflare challenges reqwest's
      TLS ClientHello even with browser headers/HTTP-1.1 and even though both use
@@ -140,7 +141,8 @@ lives in the DB, not in RAM — so the main thing a resident daemon would buy
   3. Further escalation, if a site ever needs it: `rquest` fingerprint
      impersonation, or a headless browser / FlareSolverr used once to obtain a
      `cf_clearance` cookie handed to a fast client — never a browser per chapter.
-     Not currently needed.
+     Not built. novgo.net was dropped instead when it started challenging every
+     request (see Decided against).
 
 - **Adaptive rate control, per host.** Start at a modest delay (~1–2s) with a
   single request in flight per host and jitter on the delay. On 429/503 or a
@@ -178,7 +180,8 @@ while still receiving updates (and occasionally the reverse). So the label is a
 - Where a site exposes no status at all, "no new chapters for 30+ days" means
   *dormant*, not *complete* — a hiatus is not completion; never mark a novel
   finished on silence alone.
-- The site's status field (novgo: `og:novel:status`) still feeds this as a hint
+- The site's status field (freewebnovel's `og:novel:status`, chikari's `status`)
+  still feeds this as a hint
   — knowing which value means "completed" is useful, but it is never the sole
   basis for the *Likely complete* state or for purging (see retention).
 
@@ -248,10 +251,10 @@ export, regeneration is impossible. Resolution:
     `<novel> - Vol 01.epub`, `Vol 02`, ... inside the same novel folder; on
     append only the last, in-progress volume is rewritten.
 
-- **Metadata comes free from `og:novel:*` tags.** We extract title, author, and
-  `og:image` (cover URL, stored on the novel) plus the status hint. Genre is not
-  captured. **The cover URL is stored but not yet embedded in the EPUB** — no
-  cover image is downloaded or added to the package (see Still open).
+- **Metadata comes from each site's own markup or API.** Title, author, cover
+  URL and the status hint are stored on the novel, plus genre where the adapter
+  captures it (chikari, freewebnovel). The cover is downloaded and embedded at
+  export (see "EPUB cover embedding" under Resolved).
 
 ## Configuration
 
@@ -276,32 +279,6 @@ Because the sync runs unnoticed, it must be inspectable. **Partially implemented
   across the whole library) and a persistent log file at `log_path`. A windowless
   scheduled run discards its stderr, so a log file is the main gap for debugging
   background runs. Deferred (see Still open).
-
-## Site profile: novgo.net
-
-Verified by probing during design:
-
-- **Cloudflare is CDN-only, no bot challenge.** Even curl's default User-Agent
-  gets `200 OK` with the real page. Tier 1 (plain `reqwest`) is sufficient; no
-  fingerprint impersonation or headless browser needed. Still send a normal
-  browser UA and stay polite.
-- **Fully server-rendered** — nothing loaded by JavaScript; fetch-and-parse
-  works.
-- **Table of contents is paginated** via `?page=N`
-  (e.g. `/<novel>-novel.html?page=2`), ~50 chapters per page. Enumerate the
-  whole novel by walking pages.
-- **Chapter URLs:** `/<novel-slug>/chapter-<n>-<slug>.html` — the chapter number
-  is embedded in the URL, useful for tracking last-seen.
-- **Chapter content container:** `div#chapter-content.chapter-c`; strip the
-  `div.ads*` blocks inside it.
-- **Next-chapter link:** `a#next_chap` — enables walking the delta chain forward
-  from the last-seen chapter.
-- **Cheap delta check:** the novel's main page lists the latest chapters at the
-  top, so "is there anything new?" is a single request comparing the top chapter
-  number to last-seen.
-- **Metadata via `og:novel:*` meta tags** plus `og:image` cover.
-- **Status via `og:novel:status`** (`content="1"` seen for an Ongoing novel;
-  confirm the completed value).
 
 ## Status of deferred items
 
@@ -353,8 +330,9 @@ Verified by probing during design:
 - **External config-driven profiles.** `SiteProfile` holds owned strings and
   exposes `chapter_marker` + `page_param`; generic sites are added via `.ini`
   files in `<config_dir>/profiles/` (required: name, host, content_selector).
-  `profiles::all()` merges built-ins with loaded files; bad files skipped with a
-  warning; a `README.txt` self-documents; `vesper profiles` lists them.
+  `profiles::all()` loads them (there are no built-in profiles); bad files are
+  skipped with a warning; a `README.txt` self-documents; `vesper profiles` lists
+  them.
 - **Windowless scheduled task.** The task runs `wscript.exe sync-hidden.vbs`
   (`WScript.Shell.Run "<exe> sync", 0, False`), which hides the console. Keeps
   the no-password "only when logged on" task; uninstall removes the launcher.
@@ -365,8 +343,9 @@ Verified by probing during design:
 - **Storage crate caveat.** Pinned `rusqlite = 0.31` (bundled SQLite) to dodge
   `libsqlite3-sys 0.38.1`'s unstable `cfg_select!` on Rust 1.92; the C toolchain
   itself was never the blocker. Revisit when the crate/toolchain catch up.
-- **Status hints mapped**: novgo `og:novel:status` "1"=Ongoing/"2"=Completed and
-  freewebnovel word forms; default `poll_interval_minutes` = 60.
+- **Status hints mapped**: word forms across sites (`ongoing`/`releasing` =
+  Ongoing, `completed` = Completed; `hiatus`, `cancelled` and `dropped` stay
+  Unknown); default `poll_interval_minutes` = 60.
 
 ### Resolved (wrap-up pass)
 
@@ -466,9 +445,10 @@ Verified by probing during design:
   spurious warning. Also: the `<novel>` selector for id-or-title commands is an id
   *or the exact title* (quoted if it has spaces, since it's one arg); the help now
   says so and steers toward the id from `subs`.
-- **Genre metadata.** Captured from `og:novel:genre` (novgo, freewebnovel),
-  stored on the novel, emitted as EPUB `dc:subject`. lightnovelworld leaves it
-  `None` (genre is only in its JSON-LD, which we don't parse).
+- **Genre metadata.** Captured from `og:novel:genre` (freewebnovel) and the
+  `genres` array in chikari's API, stored on the novel, emitted as EPUB
+  `dc:subject`. lightnovelworld leaves it `None` (genre is only in its JSON-LD,
+  which we don't parse), as do royalroad and scribblehub.
 
 ### Decided against (for now)
 
@@ -480,6 +460,14 @@ Verified by probing during design:
   show the same profile name in `subs`/progress, but the URL shown beside each
   already disambiguates them and the real use case is cross-site (distinct
   names). Not worth special-casing the contrived same-site scenario.
+- **Passing Cloudflare's JavaScript challenge (novgo.net).** novgo.net was the
+  only built-in generic profile. In September 2026 it put a Cloudflare managed
+  challenge in front of every page: plain requests, the curl tier's full browser
+  header set and the real adapter all get a 403 with `cf-mitigated: challenge`
+  and the "Just a moment..." page, and only `robots.txt` still loads. Neither
+  fetch tier can pass that, and building the browser-based third tier for one
+  site wasn't worth it, so the profile was removed. A user can still write a
+  profile for it if plain requests start getting real pages again.
 
 ### Still open
 

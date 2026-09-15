@@ -5,8 +5,8 @@ URL, it tracks the story, fetches chapters at a polite pace, and keeps an
 EPUB in your library up to date — on demand, or on a schedule in the
 background if you set it up that way.
 
-It currently understands novgo.net, chikari.moe, freewebnovel.com,
-royalroad.com and scribblehub.com. A nice side effect of supporting several
+It currently understands chikari.moe, freewebnovel.com, royalroad.com and
+scribblehub.com. A nice side effect of supporting several
 sites: if a novel exists on more than one of them, you can attach the extra
 sites as fallbacks. Chapters that are missing or dead on the main site get
 quietly filled in from the others, and you still end up with one EPUB, not
@@ -378,16 +378,31 @@ sections to worry about. Here's each option, with defaults:
 
 ## Adding a site
 
-If the site is plain server-rendered HTML — the kind where the chapter list
-is real markup with page links — you don't need to touch the code. Drop an
-`.ini` profile describing the site (selectors for content and metadata, how
-the chapter list paginates) into the profiles folder and Vesper picks it up
-on the next run. The folder contains a generated README documenting the
-format, and novgo.net ships as a built-in profile you can crib from.
+If the site is plain server-rendered HTML, where the chapter list is real
+markup with `?page=N` page links, you don't need to touch the code. Drop an
+`.ini` profile describing the site into the profiles folder (`vesper profiles`
+prints where that is) and Vesper picks it up on the next run. The smallest
+profile looks like this:
+
+```
+[profile]
+name = mysite
+host = mysite.com
+content_selector = #chapter-content
+```
+
+`content_selector` is the CSS selector for the element holding the chapter
+text. The novel's title, author, genre and status are read from the page's
+`og:novel:*` meta tags and the cover from `og:image`; a page without
+`og:novel:novel_name` falls back to `og:title` or `<title>` for the title. The
+folder has a generated README.txt covering the optional keys, such as how
+chapter links are recognised and which query parameter paginates the chapter
+list. Vesper doesn't ship any profiles of its own.
 
 Sites that render their chapter list with JavaScript or need special
-request handling are hand-written adapters in the source; the five built-in
-sites cover a decent spread of examples if you want to write one.
+request handling are hand-written adapters in the source; chikari,
+freewebnovel, royalroad and scribblehub cover a decent spread of examples if
+you want to write one.
 
 ## Building
 

@@ -19,9 +19,10 @@ rules-of-the-road.
   `directories::data_local_dir`) — **never roaming `%APPDATA%`**. Store cleaned
   text/XHTML, not raw HTML.
 - **Multi-source by design.** A `Source` trait abstracts each site; a generic
-  config-driven adapter handles the common server-rendered + CSS + `?page=N`
-  case, so such sites (novgo included) are declarative profiles, no recompile.
-  Hand-written adapters only for weird sites. URL-to-source resolves by host.
+  config-driven adapter handles the server-rendered + CSS + `?page=N` case, so
+  such sites are declarative `.ini` profiles, no recompile. Every shipped site
+  has a hand-written adapter, so there are no built-in profiles. URL-to-source
+  resolves by host.
 - **One logical novel, multiple ranked sources** (not per-source
   subscriptions). A novel has a primary source plus optional fallbacks — one
   novel => one EPUB. `subscribe` blocks when the title matches an existing
@@ -146,10 +147,6 @@ rules-of-the-road.
 
 ## Site quick reference
 
-- **novgo.net** (generic profile): Cloudflare CDN-only, no challenge, Tier 1.
-  Server-rendered; ToC paginated `?page=N` (~50/page); chapter URLs
-  `/<slug>/chapter-<n>-<slug>.html`; content `div#chapter-content.chapter-c`
-  (strip `div.ads*`); metadata/cover `og:novel:*` + `og:image`; status "1"/"2".
 - **freewebnovel.com** (hand-written adapter, Tier 2 curl): AJAX/JS ToC (no
   scrapable pagination), so discovery reads `data-total-chapters` and generates
   sequential `/novel/<slug>/chapter-<n>` URLs from one request; chapter title
@@ -228,6 +225,11 @@ rules-of-the-road.
   page gives `#mypostid` + total; metadata `og:title` /
   `a[href*="/profile/"]` / `span.rnd_stats` + `og:image` (minus
   `noimagefound`); content `#chp_raw`.
+- **novgo.net**: dropped. Since September 2026 every page returns 403 with
+  `cf-mitigated: challenge` (Cloudflare's JavaScript challenge), which neither
+  fetch tier passes; only `robots.txt` still loads. It was the only built-in
+  generic profile. Don't bring it back while a plain request still gets the
+  challenge.
 
 ## Build / Test / Run
 
@@ -236,7 +238,7 @@ rules-of-the-road.
   invoking `target/debug/vesper.exe`.
 - Full command reference: `README.md`. `<novel>` args accept an id or a title.
 - DB + `sync.lock` live at `%LOCALAPPDATA%/vesper/data/`.
-- Live smoke test: export a few chapters from a novgo novel and validate the
+- Live smoke test: export a few chapters from a royalroad novel and validate the
   EPUB (unzip; check `mimetype` == `application/epub+zip`, `content.opf`, and
   that chapter XHTML holds real prose).
 - Adapter parsing is only really provable against the live site — unit tests
@@ -296,8 +298,8 @@ Cargo workspace, two crates under `crates/`:
     invariant above). `looks_like_gate_stub` and the replacement check are pure
     and unit-tested, including the short-author's-note case that length-based
     detection would eat; `repair_novel` drives them over a novel's sources.
-  - `profiles` — built-in profiles plus user `.ini` files from
-    `<config_dir>/profiles/` (bad files skipped with a warning).
+  - `profiles` — user `.ini` files from `<config_dir>/profiles/` (no built-ins;
+    bad files skipped with a warning).
     `crate::build_source` (lib.rs) resolves a URL to adapter + fetch tier.
   - `model` — domain types (`NovelMeta`, `ChapterRef`, `Chapter`,
     `NovelStatus`).
