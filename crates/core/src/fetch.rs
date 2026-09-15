@@ -60,8 +60,8 @@ pub fn is_not_found(err: &anyhow::Error) -> bool {
     err.chain().any(|c| c.is::<NotFound>())
 }
 
-/// Default browser-like User-Agent. novgo serves us fine even without this, but
-/// sending a real one is basic politeness and avoids trivial UA filters.
+/// Default browser-like User-Agent. Sending a real one is basic politeness, and
+/// freewebnovel's Cloudflare front gates on it.
 pub(crate) const DEFAULT_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) \
     AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
 
@@ -471,8 +471,8 @@ mod tests {
     #[test]
     fn extracts_host() {
         assert_eq!(
-            host_of("https://novgo.net/x/chapter-1.html").as_deref(),
-            Some("novgo.net")
+            host_of("https://chikari.moe/novels/x").as_deref(),
+            Some("chikari.moe")
         );
         assert_eq!(host_of("not a url"), None);
     }

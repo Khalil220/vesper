@@ -324,8 +324,8 @@ mod tests {
     }
 
     /// Adapter name for a URL's host, matching how the real adapters are named
-    /// ("novgo.net" -> "novgo"). Derived rather than hard-coded so a fixture
-    /// can't quietly label a novgo URL "lightnovelworld".
+    /// ("royalroad.com" -> "royalroad"). Derived rather than hard-coded so a
+    /// fixture can't quietly label a royalroad URL "lightnovelworld".
     fn source_name_for(url: &str) -> String {
         ::url::Url::parse(url)
             .ok()
@@ -535,7 +535,7 @@ mod tests {
     /// alone — there is nothing to promote.
     #[tokio::test]
     async fn a_dead_fallback_does_not_disturb_a_working_primary() {
-        let store = store_with(&[("Kept", "https://novgo.net/kept.html")]);
+        let store = store_with(&[("Kept", "https://www.royalroad.com/fiction/1/kept")]);
         store
             .add_source(1, "lightnovelworld", "https://lightnovelworld.org/novel/kept/")
             .unwrap();
@@ -549,7 +549,7 @@ mod tests {
             MigrationOutcome::NotOnChikari { promoted: None, .. }
         ));
         let novel = store.find_novel("1").unwrap().unwrap();
-        assert_eq!(novel.primary_source().unwrap().name, "novgo");
+        assert_eq!(novel.primary_source().unwrap().name, "royalroad");
     }
 
     /// A slug that resolves to a *different* novel must not be taken at face
@@ -592,7 +592,7 @@ mod tests {
     #[tokio::test]
     async fn other_sites_are_untouched_and_cost_no_requests() {
         let store = store_with(&[
-            ("A Novgo Novel", "https://novgo.net/a-novgo-novel.html"),
+            ("A ScribbleHub Novel", "https://www.scribblehub.com/series/1/a-scribblehub-novel/"),
             ("A Royal Road Novel", "https://royalroad.com/fiction/1/x"),
         ]);
         let fetcher = CannedFetcher::new();
@@ -601,13 +601,16 @@ mod tests {
         let report = migrate_with(&store, &chikari).await.unwrap();
         assert!(report.is_empty());
         assert!(report.complete);
-        assert_eq!(source_url(&store, 1), "https://novgo.net/a-novgo-novel.html");
+        assert_eq!(
+            source_url(&store, 1),
+            "https://www.scribblehub.com/series/1/a-scribblehub-novel/"
+        );
     }
 
     /// A fallback source on lightnovelworld moves too, keeping its priority.
     #[tokio::test]
     async fn a_lightnovelworld_fallback_moves_and_keeps_its_priority() {
-        let store = store_with(&[("Shadow Slave", "https://novgo.net/shadow-slave.html")]);
+        let store = store_with(&[("Shadow Slave", "https://freewebnovel.com/novel/shadow-slave")]);
         store
             .add_source(1, "lightnovelworld", "https://lightnovelworld.org/novel/shadow-slave/")
             .unwrap();
@@ -617,7 +620,7 @@ mod tests {
         assert_eq!(report.moved().count(), 1);
 
         let novel = store.find_novel("1").unwrap().unwrap();
-        assert_eq!(novel.primary_source().unwrap().url, "https://novgo.net/shadow-slave.html");
+        assert_eq!(novel.primary_source().unwrap().url, "https://freewebnovel.com/novel/shadow-slave");
         let fallback = novel.sources.iter().find(|s| s.priority == 2).unwrap();
         assert_eq!(fallback.url, "https://chikari.moe/novels/shadow-slave");
         assert_eq!(fallback.name, "chikari");

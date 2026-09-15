@@ -1027,8 +1027,8 @@ mod tests {
             VALUES (1, 'First', 'Ann', 'ongoing', 'live', 100, 100),
                    (5, 'Second', 'Bo', 'completed', 'likely_complete', 100, 100);
             INSERT INTO sources (id, novel_id, source_name, url, priority)
-            VALUES (1, 1, 'novgo', 'https://novgo.net/a.html', 1),
-                   (2, 5, 'novgo', 'https://novgo.net/b.html', 1);
+            VALUES (1, 1, 'example', 'https://example.com/a.html', 1),
+                   (2, 5, 'example', 'https://example.com/b.html', 1);
             INSERT INTO chapters (novel_id, number, title, body, source_id, fetched_at)
             VALUES (1, 1, 'One', 'body', 1, 100),
                    (5, 1, 'One', 'body', 2, 100),
@@ -1089,16 +1089,16 @@ mod tests {
     #[test]
     fn top_id_is_never_reused_after_unsubscribe() {
         let s = mem_store();
-        let a = s.subscribe(&sample_meta("https://novgo.net/a.html"), "novgo").unwrap();
-        let mut second = sample_meta("https://novgo.net/b.html");
+        let a = s.subscribe(&sample_meta("https://example.com/a.html"), "example").unwrap();
+        let mut second = sample_meta("https://example.com/b.html");
         second.title = "Another Novel".into();
-        let b = s.subscribe(&second, "novgo").unwrap();
+        let b = s.subscribe(&second, "example").unwrap();
         assert_eq!((a, b), (1, 2));
 
         s.remove_subscription(b).unwrap();
-        let mut third = sample_meta("https://novgo.net/c.html");
+        let mut third = sample_meta("https://example.com/c.html");
         third.title = "Third Novel".into();
-        let c = s.subscribe(&third, "novgo").unwrap();
+        let c = s.subscribe(&third, "example").unwrap();
         assert_eq!(c, 3, "id {b} was handed out twice");
     }
 
@@ -1107,9 +1107,9 @@ mod tests {
     #[test]
     fn migrated_db_continues_past_the_old_maximum() {
         let s = legacy_store();
-        let mut fresh = sample_meta("https://novgo.net/new.html");
+        let mut fresh = sample_meta("https://example.com/new.html");
         fresh.title = "Brand New".into();
-        assert_eq!(s.subscribe(&fresh, "novgo").unwrap(), 6);
+        assert_eq!(s.subscribe(&fresh, "example").unwrap(), 6);
     }
 
     fn sample_meta(url: &str) -> NovelMeta {
@@ -1134,7 +1134,7 @@ mod tests {
     #[test]
     fn subscribe_creates_novel_and_primary_source() {
         let s = mem_store();
-        let id = s.subscribe(&sample_meta("https://novgo.net/a.html"), "novgo").unwrap();
+        let id = s.subscribe(&sample_meta("https://example.com/a.html"), "example").unwrap();
         let novel = s.find_novel(&id.to_string()).unwrap().unwrap();
         assert_eq!(novel.title, "Test Novel");
         assert_eq!(novel.sources.len(), 1);
@@ -1145,8 +1145,8 @@ mod tests {
     #[test]
     fn duplicate_url_is_rejected() {
         let s = mem_store();
-        s.subscribe(&sample_meta("https://novgo.net/a.html"), "novgo").unwrap();
-        let err = s.subscribe(&sample_meta("https://novgo.net/a.html"), "novgo").unwrap_err();
+        s.subscribe(&sample_meta("https://example.com/a.html"), "example").unwrap();
+        let err = s.subscribe(&sample_meta("https://example.com/a.html"), "example").unwrap_err();
         assert!(err.to_string().contains("already subscribed"));
     }
 
@@ -1155,13 +1155,13 @@ mod tests {
     #[test]
     fn subscriptions_list_in_id_order() {
         let s = mem_store();
-        let mut zed = sample_meta("https://novgo.net/z.html");
+        let mut zed = sample_meta("https://example.com/z.html");
         zed.title = "Zebra Chronicles".into();
-        let mut abe = sample_meta("https://novgo.net/a.html");
+        let mut abe = sample_meta("https://example.com/a.html");
         abe.title = "Abacus Diaries".into();
 
-        let first = s.subscribe(&zed, "novgo").unwrap();
-        let second = s.subscribe(&abe, "novgo").unwrap();
+        let first = s.subscribe(&zed, "example").unwrap();
+        let second = s.subscribe(&abe, "example").unwrap();
 
         let ids: Vec<i64> = s.list_subscriptions().unwrap().iter().map(|n| n.id).collect();
         assert_eq!(ids, vec![first, second]);
@@ -1170,7 +1170,7 @@ mod tests {
     #[test]
     fn normalized_title_matches_across_formatting() {
         let s = mem_store();
-        let id = s.subscribe(&sample_meta("https://novgo.net/a.html"), "novgo").unwrap();
+        let id = s.subscribe(&sample_meta("https://example.com/a.html"), "example").unwrap();
         // "Test Novel" subscribed; a differently-formatted same title matches.
         let found = s.find_novel_by_normalized_title("test-novel!").unwrap();
         assert_eq!(found.map(|n| n.id), Some(id));
@@ -1181,7 +1181,7 @@ mod tests {
     #[test]
     fn chapters_insert_is_idempotent_for_resume() {
         let s = mem_store();
-        let id = s.subscribe(&sample_meta("https://novgo.net/a.html"), "novgo").unwrap();
+        let id = s.subscribe(&sample_meta("https://example.com/a.html"), "example").unwrap();
         let src = s.find_novel(&id.to_string()).unwrap().unwrap().primary_source().unwrap().id;
 
         assert!(s.insert_chapter_if_absent(id, src, &chapter(1)).unwrap());
@@ -1200,7 +1200,7 @@ mod tests {
     #[test]
     fn retitle_overwrites_and_marks_for_re_export() {
         let s = mem_store();
-        let id = s.subscribe(&sample_meta("https://novgo.net/a.html"), "novgo").unwrap();
+        let id = s.subscribe(&sample_meta("https://example.com/a.html"), "example").unwrap();
         let src = s.find_novel(&id.to_string()).unwrap().unwrap().primary_source().unwrap().id;
         s.insert_chapter_if_absent(id, src, &chapter(1)).unwrap();
         s.mark_all_exported(id).unwrap();
@@ -1219,7 +1219,7 @@ mod tests {
     #[test]
     fn add_source_appends_at_next_priority() {
         let s = mem_store();
-        let id = s.subscribe(&sample_meta("https://novgo.net/a.html"), "novgo").unwrap();
+        let id = s.subscribe(&sample_meta("https://example.com/a.html"), "example").unwrap();
         s.add_source(id, "othersite", "https://other.example/a.html").unwrap();
 
         let novel = s.find_novel(&id.to_string()).unwrap().unwrap();
@@ -1230,7 +1230,7 @@ mod tests {
 
         // Duplicate URL is rejected.
         let err = s
-            .add_source(id, "novgo", "https://novgo.net/a.html")
+            .add_source(id, "example", "https://example.com/a.html")
             .unwrap_err();
         assert!(err.to_string().contains("already in the library"));
     }
@@ -1238,7 +1238,7 @@ mod tests {
     #[test]
     fn promote_makes_a_fallback_primary_and_keeps_the_rest_in_order() {
         let s = mem_store();
-        let id = s.subscribe(&sample_meta("https://novgo.net/a.html"), "novgo").unwrap();
+        let id = s.subscribe(&sample_meta("https://example.com/a.html"), "example").unwrap();
         s.add_source(id, "freewebnovel", "https://freewebnovel.com/novel/a").unwrap();
         s.add_source(id, "royalroad", "https://royalroad.com/fiction/1/a").unwrap();
 
@@ -1249,7 +1249,7 @@ mod tests {
         assert_eq!(novel.primary_source().unwrap().name, "freewebnovel");
         // The demoted sources keep their relative order behind the new primary.
         let order: Vec<&str> = novel.sources.iter().map(|s| s.name.as_str()).collect();
-        assert_eq!(order, vec!["freewebnovel", "novgo", "royalroad"]);
+        assert_eq!(order, vec!["freewebnovel", "example", "royalroad"]);
         assert_eq!(novel.sources.iter().map(|s| s.priority).collect::<Vec<_>>(), vec![1, 2, 3]);
 
         // Promoting the current primary again is a no-op.
@@ -1261,7 +1261,7 @@ mod tests {
     #[test]
     fn promote_does_not_leave_stored_chapters_pending_re_download() {
         let s = mem_store();
-        let id = s.subscribe(&sample_meta("https://novgo.net/a.html"), "novgo").unwrap();
+        let id = s.subscribe(&sample_meta("https://example.com/a.html"), "example").unwrap();
         let old_primary = primary_source_id(&s, id);
         s.add_source(id, "freewebnovel", "https://freewebnovel.com/novel/a").unwrap();
         for n in 1..=3 {
@@ -1286,10 +1286,10 @@ mod tests {
     #[test]
     fn promote_rejects_a_source_from_another_novel() {
         let s = mem_store();
-        let a = s.subscribe(&sample_meta("https://novgo.net/a.html"), "novgo").unwrap();
-        let mut other = sample_meta("https://novgo.net/b.html");
+        let a = s.subscribe(&sample_meta("https://example.com/a.html"), "example").unwrap();
+        let mut other = sample_meta("https://example.com/b.html");
         other.title = "Other Novel".into();
-        let b = s.subscribe(&other, "novgo").unwrap();
+        let b = s.subscribe(&other, "example").unwrap();
         let b_source = primary_source_id(&s, b);
 
         let err = s.promote_source(a, b_source).unwrap_err();
@@ -1301,7 +1301,7 @@ mod tests {
     #[test]
     fn find_by_title_is_case_insensitive() {
         let s = mem_store();
-        s.subscribe(&sample_meta("https://novgo.net/a.html"), "novgo").unwrap();
+        s.subscribe(&sample_meta("https://example.com/a.html"), "example").unwrap();
         assert!(s.find_novel("test novel").unwrap().is_some());
         assert!(s.find_novel("NONEXISTENT").unwrap().is_none());
     }
@@ -1329,7 +1329,7 @@ mod tests {
     #[test]
     fn retention_purges_only_exported_likely_complete_chapters() {
         let s = mem_store();
-        let id = s.subscribe(&sample_meta("https://novgo.net/a.html"), "novgo").unwrap();
+        let id = s.subscribe(&sample_meta("https://example.com/a.html"), "example").unwrap();
         let src = primary_source_id(&s, id);
         s.insert_chapter_if_absent(id, src, &chapter(1)).unwrap();
         s.insert_chapter_if_absent(id, src, &chapter(2)).unwrap();
@@ -1350,7 +1350,7 @@ mod tests {
     #[test]
     fn retention_never_purges_unexported_chapters() {
         let s = mem_store();
-        let id = s.subscribe(&sample_meta("https://novgo.net/a.html"), "novgo").unwrap();
+        let id = s.subscribe(&sample_meta("https://example.com/a.html"), "example").unwrap();
         let src = primary_source_id(&s, id);
         s.insert_chapter_if_absent(id, src, &chapter(1)).unwrap();
         s.set_derived_state(id, DerivedState::LikelyComplete).unwrap();
@@ -1361,7 +1361,7 @@ mod tests {
     #[test]
     fn retention_respects_grace_days() {
         let s = mem_store();
-        let id = s.subscribe(&sample_meta("https://novgo.net/a.html"), "novgo").unwrap();
+        let id = s.subscribe(&sample_meta("https://example.com/a.html"), "example").unwrap();
         let src = primary_source_id(&s, id);
         s.insert_chapter_if_absent(id, src, &chapter(1)).unwrap();
         s.mark_all_exported(id).unwrap();
@@ -1374,7 +1374,7 @@ mod tests {
     #[test]
     fn reevaluate_marks_quiet_completed_novel() {
         let s = mem_store();
-        let id = s.subscribe(&completed_meta("https://novgo.net/done.html"), "novgo").unwrap();
+        let id = s.subscribe(&completed_meta("https://example.com/done.html"), "example").unwrap();
         s.set_derived_state(id, DerivedState::Live).unwrap();
         assert_eq!(
             s.reevaluate_completion(id, 0).unwrap(),
@@ -1386,12 +1386,12 @@ mod tests {
     fn reevaluate_keeps_ongoing_or_recent_novels_live() {
         let s = mem_store();
         // Ongoing status never becomes LikelyComplete.
-        let ongoing = s.subscribe(&sample_meta("https://novgo.net/a.html"), "novgo").unwrap();
+        let ongoing = s.subscribe(&sample_meta("https://example.com/a.html"), "example").unwrap();
         s.set_derived_state(ongoing, DerivedState::Live).unwrap();
         assert_eq!(s.reevaluate_completion(ongoing, 0).unwrap(), DerivedState::Live);
 
         // Completed but recently active with a huge grace stays Live.
-        let done = s.subscribe(&completed_meta("https://novgo.net/done.html"), "novgo").unwrap();
+        let done = s.subscribe(&completed_meta("https://example.com/done.html"), "example").unwrap();
         let src = primary_source_id(&s, done);
         s.insert_chapter_if_absent(done, src, &chapter(1)).unwrap();
         s.set_derived_state(done, DerivedState::Live).unwrap();
@@ -1401,7 +1401,7 @@ mod tests {
     #[test]
     fn remove_cascades_chapters() {
         let s = mem_store();
-        let id = s.subscribe(&sample_meta("https://novgo.net/a.html"), "novgo").unwrap();
+        let id = s.subscribe(&sample_meta("https://example.com/a.html"), "example").unwrap();
         let src = s.find_novel(&id.to_string()).unwrap().unwrap().primary_source().unwrap().id;
         s.insert_chapter_if_absent(id, src, &chapter(1)).unwrap();
         s.remove_subscription(id).unwrap();

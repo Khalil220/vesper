@@ -110,7 +110,7 @@ pub fn clean_chapter_title(raw: &str) -> String {
     t.to_string()
 }
 
-/// Extract a chapter number from a novgo-style chapter URL, e.g.
+/// Extract a chapter number from a URL with a `chapter-<n>` segment, e.g.
 /// `/novel/chapter-42-some-title.html` -> `42`.
 pub fn parse_chapter_number(url: &str) -> Option<u32> {
     let idx = url.find("chapter-")? + "chapter-".len();
@@ -234,7 +234,7 @@ mod tests {
             Some(42)
         );
         assert_eq!(
-            parse_chapter_number("https://novgo.net/x/chapter-1-cultivation-online.html"),
+            parse_chapter_number("https://example.com/x/chapter-1-cultivation-online.html"),
             Some(1)
         );
         assert_eq!(parse_chapter_number("/no-chapter-here/index.html"), None);

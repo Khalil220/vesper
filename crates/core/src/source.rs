@@ -1,10 +1,9 @@
 //! Source adapters: how Vesper understands a given site.
 //!
-//! Most novel sites are structurally identical (server-rendered HTML,
-//! CSS-selectable content, `?page=N` pagination), so they are expressed as a
-//! declarative [`SiteProfile`] driving a single [`GenericSource`]. Genuinely
-//! weird sites can implement [`Source`] by hand instead. novgo is the first
-//! profile, not special-cased code.
+//! A site with the generic shape (server-rendered HTML, CSS-selectable
+//! content, `?page=N` pagination) is expressed as a declarative
+//! [`SiteProfile`] driving a single [`GenericSource`]. Sites that don't fit
+//! implement [`Source`] by hand instead.
 
 use std::collections::BTreeMap;
 
@@ -22,7 +21,7 @@ use crate::util::{clean_chapter_title, parse_chapter_number};
 /// adapter by host.
 #[async_trait]
 pub trait Source: Send + Sync {
-    /// Human-readable adapter name (e.g. `"novgo"`).
+    /// Human-readable adapter name (e.g. `"royalroad"`).
     fn name(&self) -> &str;
 
     /// Whether this source handles the given URL (matched by host).
@@ -53,7 +52,7 @@ pub trait Source: Send + Sync {
 #[derive(Debug, Clone)]
 pub struct SiteProfile {
     pub name: String,
-    /// Host this profile handles, e.g. `"novgo.net"`.
+    /// Host this profile handles, e.g. `"mysite.com"`.
     pub host: String,
     /// CSS selector for the element containing a chapter's prose.
     pub content_selector: String,
@@ -168,7 +167,7 @@ fn sel(selector: &str) -> Result<Selector> {
     Selector::parse(selector).map_err(|e| anyhow!("invalid selector {selector:?}: {e:?}"))
 }
 
-/// Interpret a site's status label (numeric or word form) across sources.
+/// Interpret a site's status label across sources.
 ///
 /// Everything unrecognised — notably "hiatus", "cancelled" and "dropped" —
 /// stays `Unknown` on purpose. Only `Completed` lowers the poll cadence and
@@ -178,10 +177,8 @@ fn sel(selector: &str) -> Result<Selector> {
 /// DESIGN.md): observed activity decides.
 pub(crate) fn parse_status_hint(raw: &str) -> NovelStatus {
     match raw.trim().to_ascii_lowercase().as_str() {
-        "1" | "ongoing" | "on going" | "serializing" | "active" | "releasing" => {
-            NovelStatus::Ongoing
-        }
-        "2" | "completed" | "complete" | "finished" => NovelStatus::Completed,
+        "ongoing" | "on going" | "serializing" | "active" | "releasing" => NovelStatus::Ongoing,
+        "completed" | "complete" | "finished" => NovelStatus::Completed,
         _ => NovelStatus::Unknown,
     }
 }
@@ -212,8 +209,6 @@ pub(crate) fn parse_novel_meta(html: &str, source_url: &str) -> Result<NovelMeta
     let cover_url = meta_content(&doc, "og:image").filter(|s| !s.is_empty());
     let genre = meta_content(&doc, "og:novel:genre").filter(|s| !s.is_empty());
 
-    // Status is only a hint. Different sites encode it differently — novgo uses
-    // "1"/"2", freewebnovel uses "Ongoing"/"Completed" — so accept both.
     let status_hint = meta_content(&doc, "og:novel:status")
         .map(|s| parse_status_hint(&s))
         .unwrap_or(NovelStatus::Unknown);
@@ -307,8 +302,8 @@ mod tests {
         <html><head>
           <meta property="og:novel:novel_name" content="Cultivation Online">
           <meta property="og:novel:author" content="MyLittleBrother">
-          <meta property="og:image" content="https://novgo.net/cover.jpg">
-          <meta property="og:novel:status" content="1">
+          <meta property="og:image" content="https://example.com/cover.jpg">
+          <meta property="og:novel:status" content="Ongoing">
         </head><body>
           <a href="/cultivation-online-novel/chapter-1-a.html">Chapter 1 - A</a>
           <a href="/cultivation-online-novel/chapter-2-b.html">Chapter 2 - B</a>
@@ -324,11 +319,11 @@ mod tests {
 
     #[test]
     fn extracts_novel_metadata() {
-        let meta = parse_novel_meta(NOVEL_HTML, "https://novgo.net/cultivation-online-novel.html")
+        let meta = parse_novel_meta(NOVEL_HTML, "https://example.com/cultivation-online-novel.html")
             .unwrap();
         assert_eq!(meta.title, "Cultivation Online");
         assert_eq!(meta.author.as_deref(), Some("MyLittleBrother"));
-        assert_eq!(meta.cover_url.as_deref(), Some("https://novgo.net/cover.jpg"));
+        assert_eq!(meta.cover_url.as_deref(), Some("https://example.com/cover.jpg"));
         assert_eq!(meta.status_hint, NovelStatus::Ongoing);
     }
 
@@ -351,13 +346,13 @@ mod tests {
     #[test]
     fn parses_and_resolves_chapter_links() {
         let links =
-            parse_chapter_links(NOVEL_HTML, "https://novgo.net/cultivation-online-novel.html", "/chapter-")
+            parse_chapter_links(NOVEL_HTML, "https://example.com/cultivation-online-novel.html", "/chapter-")
                 .unwrap();
         // Two distinct chapters plus a duplicate; the non-chapter link is skipped.
         assert_eq!(links.len(), 3);
         assert!(links
             .iter()
-            .all(|c| c.url.starts_with("https://novgo.net/")));
+            .all(|c| c.url.starts_with("https://example.com/")));
         assert_eq!(links[0].number, 1);
     }
 }

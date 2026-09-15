@@ -1436,11 +1436,17 @@ fn profiles_show() -> Result<()> {
         println!("(see README.txt there for the format)\n");
     }
     println!("Config-driven profiles:");
+    if loaded.is_empty() {
+        println!("  (none)");
+    }
     for p in &loaded {
-        println!("  {} — {}", p.host, p.name);
+        println!("  {} ({})", p.host, p.name);
     }
     println!("Built-in hand-written adapters:");
-    println!("  freewebnovel.com — freewebnovel (Tier-2 curl)");
+    println!("  chikari.moe (chikari)");
+    println!("  freewebnovel.com (freewebnovel, Tier-2 curl)");
+    println!("  royalroad.com (royalroad)");
+    println!("  scribblehub.com (scribblehub, Tier-2 curl)");
     Ok(())
 }
 
@@ -1510,7 +1516,7 @@ mod tests {
             2
         );
         // An unknown name lists what is actually there.
-        let err = resolve_source(&sources, "novgo").unwrap_err().to_string();
+        let err = resolve_source(&sources, "royalroad").unwrap_err().to_string();
         assert!(err.contains("freewebnovel"), "{err}");
     }
 
@@ -1519,7 +1525,7 @@ mod tests {
     #[test]
     fn set_primary_refuses_an_ambiguous_site_name() {
         let sources = vec![
-            source("novgo", "https://novgo.net/a.html", 1),
+            source("royalroad", "https://www.royalroad.com/fiction/1/a", 1),
             source("freewebnovel", "https://freewebnovel.com/novel/a", 2),
             source("freewebnovel", "https://freewebnovel.com/novel/a-alt", 3),
         ];
