@@ -43,8 +43,7 @@ windowless, so you won't get a console flashing at you every hour.
 ## Commands
 
 A note before the list: wherever a command takes `<novel>`, you can pass
-either the numeric id or the title. `vesper subs` shows both, so you never
-have to guess.
+either the numeric id or the title. `vesper subs` shows both.
 
 ### subscribe
 
@@ -74,8 +73,7 @@ Attach another site's copy of the novel as a fallback. Fallbacks are ranked
 below the main source: they're only used to fill chapters the main site
 doesn't have, and if the main site later provides a chapter that a fallback
 filled in earlier, the main site's version wins. You'll get a warning if the
-titles don't match, but it goes through anyway — you presumably know what
-you're doing.
+titles don't match, but the source is still added.
 
 If the novel had permanently missing chapters (see `subs --gaps` below),
 adding a source re-opens the backfill so the new site gets a chance to
@@ -96,10 +94,10 @@ Name the source however it appears in `vesper subs` — either its site name
 name is ambiguous and you'll be asked for the URL instead.
 
 Chapters you already downloaded are kept and re-attributed to the new main
-source, so nothing is re-fetched. Vesper does not reorder sources on its own
-when a site starts failing: a site being down for an hour looks exactly like
-a site being gone, and guessing wrong would mean re-downloading a whole novel
-twice. Deciding a site is really gone is your call, not a guess.
+source, so nothing is re-fetched. Vesper never reorders sources on its own
+when a site starts failing. A site that's down for an hour looks exactly like
+one that's gone for good, and switching the main source over and back would
+cost a full download of the novel each way. You decide when a site is gone.
 
 ### subs
 
@@ -146,7 +144,7 @@ write is atomic — the file is assembled elsewhere and swapped in — so a
 crash mid-export can't leave you with a corrupt half-book. If the target
 file is locked because something else has it open (Calibre, an e-reader
 still plugged in, OneDrive doing its thing), the export is marked pending
-and retried on the next sync instead of failing loudly.
+and retried on the next sync.
 
 If the novel has permanently missing chapters, the EPUB opens with a page
 listing them, so future-you knows the gap was the site's fault and not a

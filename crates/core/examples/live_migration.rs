@@ -1,5 +1,5 @@
 //! Live check of the lightnovelworld -> chikari migration against a real
-//! library, including the assumption the whole migration rests on: that
+//! library, including what the whole migration rests on: that
 //! chikari's chapter *numbering* matches lightnovelworld's, so repointing a
 //! subscription in place leaves already-downloaded chapters correctly keyed.
 //!

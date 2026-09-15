@@ -122,9 +122,9 @@ pub fn parse_chapter_number(url: &str) -> Option<u32> {
 /// the set of numbers it names.
 ///
 /// Ranges are inclusive, because that is how a reader refers to chapters:
-/// "152-154" means all three. Chapter numbering starts at 1, so 0 is rejected
-/// rather than silently dropped — a spec that doesn't mean what the user typed
-/// should fail loudly, since the commands built on this rewrite stored text.
+/// "152-154" means all three. Chapter numbering starts at 1, so 0 is an error
+/// instead of being dropped. The commands built on this rewrite stored text, and
+/// a spec that doesn't mean what the user typed must not reach them.
 pub fn parse_chapter_spec(spec: &str) -> Result<std::collections::BTreeSet<u32>, String> {
     let mut out = std::collections::BTreeSet::new();
     for part in spec.split(',') {

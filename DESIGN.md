@@ -386,7 +386,7 @@ Because the sync runs unnoticed, it must be inspectable. **Partially implemented
   instead of a bare spawn failure. Only the two curl-tier sources (freewebnovel,
   scribblehub) need it; the other three run on Tier-1 reqwest.
 - **404 gaps no longer wedge a novel (and are surfaced, not hidden).** Adapters
-  that *generate* chapter URLs from a count (lightnovelworld, freewebnovel) assume
+  that *generate* chapter URLs from a count (lightnovelworld, freewebnovel) produce
   a contiguous `1..N`, but real id sequences have holes: lightnovelworld's
   `/chapter/N/` 404s where chapters were deleted/merged (observed live — e.g. one
   novel's URL 190 is a hard 404 between healthy 189 and 191). The old completion

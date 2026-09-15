@@ -95,9 +95,9 @@ rules-of-the-road.
   compacted** afterwards, so nothing shifts underneath a stored chapter.
   Verified on chikari: the-primal-hunter still lists 1395 chapters over
   1..1396 with its hole at 1201 intact, and supreme-magus keeps all seven of
-  its holes. A `--drop-missing` flag existed briefly on the strength of a
-  renumbering scenario that was assumed rather than checked; it was removed
-  once the numbering was actually measured. Don't re-add one. A source listing
+  its holes. A `--drop-missing` flag existed briefly for a renumbering
+  scenario that those measurements rule out, and was removed. Don't re-add one.
+  A source listing
   fewer chapters than the library holds is normal (a novel migrated from
   another site keeps chapters the new one never had), so "not in the list"
   is not evidence of anything. A target the sources list but nobody could
@@ -128,8 +128,8 @@ rules-of-the-road.
   Migrations live in `core::migrate`, are guarded by a key in the `meta` table,
   and run from `main()` before the command — but only for commands that touch
   the library. **Repointing is only safe because the two sites share a chapter
-  number-space**; verify that with `examples/live_migration` before assuming it
-  for the next move.
+  number-space**; verify that with `examples/live_migration` before relying on
+  it for the next move.
 - **Retention resolves delete-vs-append:** ongoing novels keep chapters in the
   DB (append = regenerate-from-DB); only *Likely complete* novels (labeled
   complete AND quiet for the grace window AND exported) get purged. Never on

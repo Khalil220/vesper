@@ -1046,8 +1046,8 @@ async fn repair(
 
 /// Pick the source a `set-primary` argument names: the stored URL first, then
 /// the site name, so either column of `vesper subs` works. An ambiguous name
-/// (the same site attached twice) is refused rather than guessed at — choosing
-/// wrong would change which source is authoritative for the novel's text.
+/// (the same site attached twice) is an error, since choosing wrong would change
+/// which source is authoritative for the novel's text.
 fn resolve_source<'a>(sources: &'a [StoredSource], needle: &str) -> Result<&'a StoredSource> {
     let needle = needle.trim();
     if let Some(exact) = sources.iter().find(|s| s.url == needle) {
@@ -1076,8 +1076,7 @@ fn resolve_source<'a>(sources: &'a [StoredSource], needle: &str) -> Result<&'a S
 
 /// Promote one of a novel's sources to primary. `source` is matched against the
 /// stored URL first, then the site name, so either column of `vesper subs`
-/// works. An ambiguous name (the same site twice) is refused rather than
-/// guessed at — picking the wrong one changes which source is authoritative.
+/// works. An ambiguous name (the same site twice) is an error.
 fn set_primary(novel: String, source: String) -> Result<()> {
     let store = Store::open_default()?;
     let found = store

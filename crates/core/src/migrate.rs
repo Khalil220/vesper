@@ -170,8 +170,9 @@ async fn migrate_one<F: Fetcher>(
                     to,
                     via_title_search,
                 },
-                // Almost always "you already added that chikari URL yourself".
-                // Leave both rows alone rather than guessing which to drop.
+                // `repoint_source` refuses a chikari URL another source row
+                // already holds. Both rows stay as they are and the error is
+                // reported.
                 Err(e) => MigrationOutcome::Undetermined {
                     novel_id,
                     title: title.to_string(),
