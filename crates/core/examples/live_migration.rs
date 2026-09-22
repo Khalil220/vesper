@@ -1,18 +1,3 @@
-//! Live check of the lightnovelworld -> chikari migration against a real
-//! library, including what the whole migration rests on: that
-//! chikari's chapter *numbering* matches lightnovelworld's, so repointing a
-//! subscription in place leaves already-downloaded chapters correctly keyed.
-//!
-//! Not part of `cargo test` (it hits the network and needs a real DB).
-//!
-//!   # preview only — reads the DB, writes nothing
-//!   cargo run -p vesper-core --example live_migration -- <path-to-library.db>
-//!   # actually migrate
-//!   cargo run -p vesper-core --example live_migration -- <path-to-library.db> --apply
-//!
-//! Point it at a *copy* of a library first. The preview samples stored
-//! chapters and compares them with the same numbers on chikari, so a numbering
-//! mismatch shows up as differing prose before anything is written.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -21,11 +6,8 @@ use vesper_core::chikari::{self, ChikariSource};
 use vesper_core::migrate::resolve_on_chikari;
 use vesper_core::{lightnovelworld, migrate_lightnovelworld, ReqwestFetcher, Source, Store};
 
-/// Chapters sampled per novel when checking that the numbering lines up.
 const SAMPLES: usize = 3;
 
-/// Cap on chapters fetched per novel by the post-migration sync check, so the
-/// verification stays a smoke test rather than a full backfill.
 const SYNC_LIMIT: usize = 2;
 
 #[tokio::main(flavor = "current_thread")]
@@ -91,8 +73,6 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // The last mile: actually sync a migrated novel through the normal engine,
-    // proving new chapters now arrive from chikari into the existing library.
     println!("\n--- sync check (at most {SYNC_LIMIT} chapters per novel) ---");
     for (novel_id, _, _) in &stale {
         let Some(novel) = store.find_novel(&novel_id.to_string())? else {
@@ -135,8 +115,6 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Fetch a few of the novel's already-stored chapter numbers from chikari and
-/// compare the prose. Returns how many disagreed.
 async fn verify_numbering(
     store: &Store,
     chikari: &ChikariSource<ReqwestFetcher>,
@@ -157,10 +135,6 @@ async fn verify_numbering(
         println!("  highest number: {local_max} locally, {remote_max} on chikari");
     }
 
-    // First, middle and last chapter present on *both* sides: the ends catch a
-    // whole-sequence offset, the middle catches a shift introduced partway
-    // through. Numbers chikari no longer lists are skipped — they say nothing
-    // about alignment.
     let common: Vec<u32> = stored
         .iter()
         .copied()
@@ -190,10 +164,6 @@ async fn verify_numbering(
                 continue;
             }
         };
-        // Compare as paragraph *sets*, not position by position: chapters saved
-        // by the old adapter sometimes carry the heading as their first
-        // paragraph, which would shift a positional comparison by one and read
-        // as a mismatch when the prose is identical.
         let overlap = paragraph_overlap(&local.paragraphs, &remote.paragraphs);
         if overlap >= 0.6 {
             println!(
@@ -202,10 +172,6 @@ async fn verify_numbering(
                 remote.title
             );
         } else if is_stub(&local.paragraphs) {
-            // The stored copy is a lightnovelworld "log in to read" placeholder
-            // that was saved instead of the chapter. It says nothing about
-            // whether the numbering lines up, so it isn't a mismatch — but it
-            // is worth flagging, since chikari has the real text.
             println!(
                 "  ch.{number}: stored copy is a stale lightnovelworld login stub, \
                  not prose — chikari has the real chapter  [{}]",
@@ -221,8 +187,6 @@ async fn verify_numbering(
     Ok(bad)
 }
 
-/// Whether a stored chapter is a lightnovelworld gating placeholder rather than
-/// the chapter itself — a handful of these are sitting in real libraries.
 fn is_stub(paragraphs: &[String]) -> bool {
     if paragraphs.len() > 4 {
         return false;
@@ -231,7 +195,6 @@ fn is_stub(paragraphs: &[String]) -> bool {
     text.contains("requires a free account") || text.contains("log in to continue")
 }
 
-/// Fraction of `remote`'s paragraphs that also appear in `local`.
 fn paragraph_overlap(local: &[String], remote: &[String]) -> f64 {
     if remote.is_empty() {
         return 0.0;
@@ -241,8 +204,6 @@ fn paragraph_overlap(local: &[String], remote: &[String]) -> f64 {
     hits as f64 / remote.len() as f64
 }
 
-/// Compare on letters and digits only, so punctuation or whitespace differences
-/// between the two renderings don't read as a numbering mismatch.
 fn normalize(s: &str) -> String {
     s.chars()
         .filter(|c| c.is_alphanumeric())

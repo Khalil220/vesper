@@ -1,17 +1,3 @@
-//! Syncing a novel from its ranked sources, with active fallback and a
-//! Backfilling -> Live state machine driving discovery cost.
-//!
-//! **Backfilling** (initial bulk download): full ToC discovery; once every
-//! discovered chapter is stored, the novel transitions to **Live**.
-//!
-//! **Live** (caught up): a cheap *delta* discovery — just the landing page,
-//! which lists the latest chapters — instead of re-walking the whole ToC every
-//! run. If the delta check reveals a gap (more new chapters than the landing
-//! page surfaces), it falls back to a full walk for that pass.
-//!
-//! For every not-yet-stored chapter number, the chapter is fetched from the
-//! highest-priority source that has it (primary authoritative; fallbacks fill
-//! gaps). See DESIGN.md.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::ControlFlow;
@@ -23,48 +9,27 @@ use crate::model::{ChapterRef, DerivedState};
 use crate::source::Source;
 use crate::store::{Store, StoredSource};
 
-/// A progress event emitted during a sync pass. Structured rather than a
-/// pre-formatted string so each caller renders it to suit its output — an
-/// interactive terminal draws an in-place `n/m` counter, a background run can
-/// log periodically or ignore it. `done` counts from 1 up to `total`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SyncProgress {
-    /// Downloading chapter bodies.
     Fetching { done: usize, total: usize },
-    /// Re-fetching fallback-held chapters from the (now caught-up) primary.
     Upgrading { done: usize, total: usize },
 }
 
-/// Outcome of a sync pass.
 #[derive(Debug)]
 pub struct SyncReport {
-    /// Chapters newly stored this pass.
     pub newly_fetched: u32,
-    /// Of those, how many came from a fallback (non-primary) source.
     pub from_fallback: u32,
-    /// Fallback-sourced chapters re-fetched from the primary this pass.
     pub upgraded: u32,
-    /// The novel's derived state after this pass.
     pub new_state: DerivedState,
-    /// Whether this pass used cheap delta discovery (vs a full ToC walk).
     pub delta_mode: bool,
-    /// Non-fatal notices (source divergence, per-chapter failures, gap fallback).
     pub warnings: Vec<String>,
-    /// Chapter numbers that failed *transiently* this pass (timeout/5xx) and will
-    /// be retried next time — not permanent gaps.
     pub failures: Vec<u32>,
-    /// Chapter numbers confirmed absent at the source (permanent 404 holes). These
-    /// no longer block completion; they are surfaced so the gap stays visible.
     pub gaps: Vec<u32>,
-    /// The caller asked to stop early (e.g. Ctrl+C); fetched chapters are saved
-    /// and the run can be resumed. The state machine stays put (no transition).
     pub interrupted: bool,
 }
 
 type Discovered<'a> = Vec<(&'a StoredSource, &'a dyn Source, BTreeMap<u32, ChapterRef>)>;
 
-/// Discover each source's chapter map, best-effort (a failed source is warned
-/// and skipped, not fatal). `full` selects a complete ToC walk vs a delta check.
 async fn discover<'a>(
     sources: &'a [(StoredSource, Box<dyn Source>)],
     full: bool,
@@ -91,13 +56,6 @@ async fn discover<'a>(
     out
 }
 
-/// Sync `novel_id` (currently in `state`) from `sources` (priority order,
-/// primary first). `limit` caps chapters fetched this pass (0 = all missing).
-///
-/// `on_progress` is called once per chapter with a [`SyncProgress`] and returns
-/// a [`ControlFlow`]: returning `Break` stops the pass cleanly after the current
-/// chapter (which is already saved), leaving the run resumable — this is how the
-/// CLI turns Ctrl+C into a graceful pause.
 pub async fn sync_novel(
     store: &Store,
     novel_id: i64,
@@ -109,8 +67,6 @@ pub async fn sync_novel(
     let is_backfilling = matches!(state, DerivedState::Backfilling);
     let have = store.stored_chapter_numbers(novel_id)?;
     let max_have = have.iter().copied().max().unwrap_or(0);
-    // Previously-recorded permanent gaps (404 holes). Re-probed automatically
-    // when they reappear in a full walk's target below.
     let mut gaps = store.gaps(novel_id)?;
 
     let mut report = SyncReport {
@@ -125,12 +81,8 @@ pub async fn sync_novel(
         interrupted: false,
     };
 
-    // Backfilling walks the full ToC; a caught-up novel does a cheap delta check.
     let mut discovered = discover(sources, is_backfilling, &mut report.warnings).await;
 
-    // If a delta check reveals new chapters that don't pick up right after the
-    // last one we stored, the landing page didn't surface the whole tail — fall
-    // back to a full walk so we don't leave a gap.
     if !is_backfilling {
         let min_new = discovered
             .iter()
@@ -149,7 +101,6 @@ pub async fn sync_novel(
         }
     }
 
-    // Warn if sources disagree on how far the novel goes.
     if discovered.len() > 1 {
         let latest: Vec<(String, u32)> = discovered
             .iter()
@@ -170,7 +121,6 @@ pub async fn sync_novel(
         }
     }
 
-    // Target = union of discovered numbers; fetch those not yet stored.
     let mut target: BTreeSet<u32> = BTreeSet::new();
     for (_, _, map) in &discovered {
         target.extend(map.keys().copied());
@@ -182,9 +132,6 @@ pub async fn sync_novel(
         missing.into_iter().take(limit).collect()
     };
 
-    // Report progress as a structured `done/total` event per chapter; the caller
-    // renders it (an interactive fetch draws a single in-place counter rather
-    // than a line per chapter, which would be unusable for a big backfill).
     let total = to_fetch.len();
     for (i, num) in to_fetch.into_iter().enumerate() {
         let known_gap = gaps.contains(&num);
@@ -214,8 +161,6 @@ pub async fn sync_novel(
                     if is_primary && is_not_found(&e) {
                         primary_404 = true;
                     }
-                    // Re-probing an already-known gap on every full walk shouldn't
-                    // re-spam; only warn about a newly-seen failure.
                     if !known_gap {
                         report.warnings.push(format!(
                             "ch.{num} from {} failed: {e}; trying next source",
@@ -225,9 +170,6 @@ pub async fn sync_novel(
                 }
             }
         }
-        // A gap means the *primary* can't provide this chapter (permanent 404).
-        // Recorded even when a fallback fills it, so the upgrade pass below stops
-        // re-trying the primary for it every sync.
         if primary_ok {
             if gaps.remove(&num) {
                 store.clear_gap(novel_id, num)?;
@@ -238,26 +180,16 @@ pub async fn sync_novel(
             }
         }
         if !done && !primary_404 && attempted {
-            // Couldn't fetch and it isn't a primary hole => transient; retry next.
             report.failures.push(num);
         }
-        // The chapter just fetched is already committed, so stopping here is safe
-        // and resumable.
         if on_progress(SyncProgress::Fetching { done: i + 1, total }).is_break() {
             report.interrupted = true;
             break;
         }
     }
 
-    // Content upgrade: the primary is authoritative, so any chapter we're
-    // currently holding from a fallback that the primary now offers gets
-    // re-fetched from the primary and replaced. Normally there are none (steady
-    // state is all-primary); this fires once after a lagging primary catches up.
-    // Skipped when the fetch was interrupted — the user asked to stop.
     if !report.interrupted {
         if let Some((pmeta, psrc, pmap)) = discovered.iter().find(|(m, _, _)| m.priority == 1) {
-            // Skip chapters the primary is a known 404 hole for — upgrading them is
-            // permanently futile (that was the "upgrade of ch.N failed" spam).
             let upgradable: Vec<u32> = store
                 .chapters_from_other_sources(novel_id, pmeta.id)?
                 .into_iter()
@@ -271,14 +203,6 @@ pub async fn sync_novel(
                     break;
                 }
                 match psrc.fetch_chapter(cref).await {
-                    // The primary is authoritative for *content*, not for
-                    // "log in to keep reading" placeholders. A gated primary
-                    // answers 200 with a stub, which would overwrite the real
-                    // chapter a fallback supplied — silently undoing a
-                    // `vesper repair`. Treat it exactly like the 404 case: the
-                    // primary cannot provide this chapter, so record the gap
-                    // and stop re-trying it every sync. The chapter is stored,
-                    // so `unfilled_gaps` still won't show it to the user.
                     Ok(chapter) if crate::repair::looks_like_gate_stub(&chapter.paragraphs) => {
                         if gaps.insert(num) {
                             store.record_gap(novel_id, num)?;
@@ -289,8 +213,6 @@ pub async fn sync_novel(
                         report.upgraded += 1;
                     }
                     Err(e) if is_not_found(&e) => {
-                        // The primary permanently lacks this (it's fallback-filled);
-                        // record the gap so future syncs skip it, and stay quiet.
                         if gaps.insert(num) {
                             store.record_gap(novel_id, num)?;
                         }
@@ -304,23 +226,14 @@ pub async fn sync_novel(
         }
     }
 
-    // Record each source's latest discovered chapter.
     for (meta, _, map) in &discovered {
         if let Some(max) = map.keys().next_back() {
             store.update_source_progress(meta.id, *max)?;
         }
     }
 
-    // State transitions:
-    // - Backfilling -> Live once every discovered chapter is stored.
-    // - A non-backfilling novel that fetched something is (still) Live — activity
-    //   overrides a prior LikelyComplete. With nothing new, its state is left
-    //   unchanged; Live -> LikelyComplete is decided by `reevaluate_completion`.
     let now_have = store.stored_chapter_numbers(novel_id)?;
     let new_state = if is_backfilling {
-        // Complete once every target chapter is either stored or a known gap. A
-        // permanent 404 hole would otherwise wedge the novel in Backfilling
-        // forever (and so never auto-export).
         let outstanding = target.difference(&now_have).any(|n| !gaps.contains(n));
         if !target.is_empty() && !outstanding {
             DerivedState::Live
@@ -336,8 +249,6 @@ pub async fn sync_novel(
         store.set_derived_state(novel_id, new_state)?;
     }
     report.new_state = new_state;
-    // Report only *unfilled* gaps as missing — a gap filled from a fallback is a
-    // primary hole but not a missing chapter, so it shouldn't surface to the user.
     report.gaps = gaps.iter().copied().filter(|n| !now_have.contains(n)).collect();
 
     Ok(report)
@@ -349,16 +260,11 @@ mod tests {
     use crate::model::{Chapter, NovelMeta, NovelStatus};
     use async_trait::async_trait;
 
-    /// A source backed by an in-memory number->body map.
     struct MockSource {
         name: String,
         bodies: BTreeMap<u32, String>,
-        /// discovery error (simulates a dead source).
         broken: bool,
-        /// If set, `discover_latest` returns only the highest N numbers
-        /// (simulates a landing page's short "latest" list).
         latest_window: Option<usize>,
-        /// Numbers that discovery lists but that 404 on fetch (site holes).
         holes: BTreeSet<u32>,
     }
 
@@ -377,13 +283,11 @@ mod tests {
             }
         }
 
-        /// Discovered chapters that 404 on fetch (permanent site holes).
         fn with_holes(mut self, holes: &[u32]) -> Self {
             self.holes = holes.iter().copied().collect();
             self
         }
 
-        /// Serve a specific body for a chapter (e.g. a gating placeholder).
         fn with_body(mut self, number: u32, body: &str) -> Self {
             self.bodies.insert(number, body.to_string());
             self
@@ -404,7 +308,6 @@ mod tests {
             }
         }
 
-        /// Numbers this source lists in discovery: real bodies plus holes.
         fn discovered_numbers(&self) -> BTreeSet<u32> {
             self.bodies.keys().copied().chain(self.holes.iter().copied()).collect()
         }
@@ -490,8 +393,6 @@ mod tests {
         store.subscribe(&meta, "primary").unwrap()
     }
 
-    /// Build (StoredSource, adapter) pairs for a novel from provided mocks,
-    /// aligned to stored priority order.
     fn pair(store: &Store, id: i64, mocks: Vec<Box<dyn Source>>) -> Vec<(StoredSource, Box<dyn Source>)> {
         let novel = store.find_novel(&id.to_string()).unwrap().unwrap();
         novel.sources.into_iter().zip(mocks).collect()
@@ -542,8 +443,6 @@ mod tests {
         .unwrap();
         assert_eq!(report.newly_fetched, 60);
 
-        // One structured Fetching event per chapter, counting 1..=60 against a
-        // constant total. The caller collapses these into a single in-place line.
         let fetching: Vec<(usize, usize)> = events
             .iter()
             .filter_map(|p| match p {
@@ -566,7 +465,6 @@ mod tests {
         let numbers: Vec<u32> = (1..=60).collect();
         let sources = pair(&store, id, vec![Box::new(MockSource::new("primary", &numbers))]);
 
-        // Ask to stop once 10 chapters are in (as the CLI does on Ctrl+C).
         let report = sync_novel(&store, id, DerivedState::Backfilling, &sources, 0, |p| match p {
             SyncProgress::Fetching { done, .. } if done >= 10 => ControlFlow::Break(()),
             _ => ControlFlow::Continue(()),
@@ -588,7 +486,6 @@ mod tests {
     async fn permanent_gap_does_not_wedge_backfill() {
         let store = Store::open_in_memory().unwrap();
         let id = subscribe(&store);
-        // Primary lists 1..=5 but ch.3 is a 404 hole (like lightnovelworld).
         let sources = pair(
             &store,
             id,
@@ -616,7 +513,6 @@ mod tests {
         let store = Store::open_in_memory().unwrap();
         let id = subscribe(&store);
         store.add_source(id, "fallback", "https://fallback.example/n").unwrap();
-        // Primary's ch.3 is a hole, but the fallback has it.
         let sources = pair(
             &store,
             id,
@@ -633,9 +529,7 @@ mod tests {
 
         assert_eq!(report.newly_fetched, 5);
         assert_eq!(report.from_fallback, 1, "ch.3 came from the fallback");
-        // ch.3 is a primary 404 hole, so it's recorded (so upgrades skip it)...
         assert_eq!(store.gaps(id).unwrap().into_iter().collect::<Vec<_>>(), vec![3]);
-        // ...but it's filled from the fallback, so it isn't a *missing* chapter.
         assert!(report.gaps.is_empty(), "filled, so nothing is surfaced as missing");
         assert!(store.unfilled_gaps(id).unwrap().is_empty());
         assert_eq!(report.new_state, DerivedState::Live);
@@ -646,7 +540,6 @@ mod tests {
         let store = Store::open_in_memory().unwrap();
         let id = subscribe(&store);
         store.add_source(id, "fallback", "https://fallback.example/n").unwrap();
-        // Primary is a 404 hole at ch.2; the fallback has it.
         let backfill = pair(
             &store,
             id,
@@ -664,8 +557,6 @@ mod tests {
         assert_eq!(store.gaps(id).unwrap().into_iter().collect::<Vec<_>>(), vec![2]);
         assert_eq!(r1.upgraded, 0);
 
-        // The next sync must NOT keep trying to upgrade ch.2 to the primary — that
-        // permanent 404 was the "upgrade of ch.N failed" spam.
         let again = pair(
             &store,
             id,
@@ -691,7 +582,6 @@ mod tests {
     async fn gap_clears_when_chapter_reappears() {
         let store = Store::open_in_memory().unwrap();
         let id = subscribe(&store);
-        // First pass: ch.3 is a hole -> recorded, novel still goes Live.
         let s1 = pair(
             &store,
             id,
@@ -705,8 +595,6 @@ mod tests {
         assert_eq!(r1.gaps, vec![3]);
         assert_eq!(store.gaps(id).unwrap().len(), 1);
 
-        // The site restores ch.3; a full re-walk re-probes and fills it, clearing
-        // the gap (this is also the path a newly-added fallback source takes).
         let s2 = pair(&store, id, vec![Box::new(MockSource::new("primary", &[1, 2, 3, 4, 5]))]);
         let r2 = sync_novel(&store, id, DerivedState::Backfilling, &s2, 0, |_| {
             ControlFlow::Continue(())
@@ -749,11 +637,9 @@ mod tests {
     async fn live_delta_fetches_only_the_new_tail() {
         let store = Store::open_in_memory().unwrap();
         let id = subscribe(&store);
-        // Backfill 1-3.
         let backfill = pair(&store, id, vec![Box::new(MockSource::new("primary", &[1, 2, 3]))]);
         sync_novel(&store, id, DerivedState::Backfilling, &backfill, 0, |_| ControlFlow::Continue(())).await.unwrap();
 
-        // Now Live; the source has 1-5 but its landing page only lists the last 3.
         let live = pair(
             &store,
             id,
@@ -773,8 +659,6 @@ mod tests {
         let backfill = pair(&store, id, vec![Box::new(MockSource::new("primary", &[1, 2, 3]))]);
         sync_novel(&store, id, DerivedState::Backfilling, &backfill, 0, |_| ControlFlow::Continue(())).await.unwrap();
 
-        // Source jumped to 1-6, but the landing page only shows the single latest
-        // chapter (6) — a gap over 4 and 5 the delta check can't see directly.
         let live = pair(
             &store,
             id,
@@ -793,8 +677,6 @@ mod tests {
         let id = subscribe(&store);
         store.add_source(id, "fallback", "https://fallback.example/n").unwrap();
 
-        // Backfill: primary has 1-3, fallback is ahead with 1-5. ch.4/5 come from
-        // the fallback.
         let backfill = pair(
             &store,
             id,
@@ -810,8 +692,6 @@ mod tests {
         let ch4 = store.load_chapters(id).unwrap().into_iter().find(|c| c.number == 4).unwrap();
         assert_eq!(ch4.paragraphs, vec!["fallback body 4"]);
 
-        // Primary catches up to 1-5. Next sync should upgrade ch.4/5 to the
-        // primary's content.
         let caught_up = pair(
             &store,
             id,
@@ -829,7 +709,6 @@ mod tests {
         let ch4 = store.load_chapters(id).unwrap().into_iter().find(|c| c.number == 4).unwrap();
         assert_eq!(ch4.paragraphs, vec!["primary body 4"]);
 
-        // A third sync has nothing left to upgrade.
         let again = pair(
             &store,
             id,
@@ -844,10 +723,6 @@ mod tests {
         assert_eq!(r3.upgraded, 0);
     }
 
-    /// A gated primary answers 200 with a "log in to keep reading" stub. The
-    /// upgrade pass must not treat that as authoritative content and overwrite
-    /// the real chapter a fallback supplied — that would silently undo a
-    /// `vesper repair` on the next sync.
     #[tokio::test]
     async fn a_gated_primary_does_not_clobber_a_real_fallback_chapter() {
         const STUB: &str = "This chapter requires a free account to read. \
@@ -856,7 +731,6 @@ mod tests {
         let id = subscribe(&store);
         store.add_source(id, "fallback", "https://fallback.example/n").unwrap();
 
-        // Backfill: the primary doesn't have ch.2 yet, so the fallback fills it.
         let backfill = pair(
             &store,
             id,
@@ -872,7 +746,6 @@ mod tests {
         .unwrap();
         assert_eq!(r1.from_fallback, 1, "ch.2 came from the fallback");
 
-        // Now the primary lists ch.2 — but serves the gating placeholder.
         let gated = pair(
             &store,
             id,
@@ -891,13 +764,10 @@ mod tests {
         let ch2 = store.load_chapters(id).unwrap().into_iter().find(|c| c.number == 2).unwrap();
         assert_eq!(ch2.paragraphs, vec!["fallback body 2"], "real chapter survived");
 
-        // Recorded as a primary hole so it stops being retried every sync...
         assert!(store.gaps(id).unwrap().contains(&2));
-        // ...but it is stored, so the user is never told a chapter is missing.
         assert!(store.unfilled_gaps(id).unwrap().is_empty());
         assert!(r2.gaps.is_empty());
 
-        // And a third sync makes no further attempt at it.
         let again = pair(
             &store,
             id,

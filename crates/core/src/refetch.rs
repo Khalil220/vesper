@@ -1,15 +1,3 @@
-//! Re-downloading chapters that are already stored.
-//!
-//! Sync can never do this: `insert_chapter_if_absent` is `OR IGNORE`, so once a
-//! chapter is stored it is never looked at again, however wrong it turned out
-//! to be. `repair` covers the narrow case of a gating placeholder; this covers
-//! the general one, where the site itself changed the text.
-//!
-//! That is what these sites actually do when a chapter comes out duplicated,
-//! truncated or scrambled: they edit the body in place and the number stays
-//! put. Chapters do sometimes get deleted, leaving a hole in the numbering, but
-//! the numbering is never compacted afterwards, so nothing shifts underneath a
-//! stored chapter. This only ever overwrites; it never deletes.
 
 use std::collections::BTreeSet;
 
@@ -20,28 +8,20 @@ use crate::repair::looks_like_gate_stub;
 use crate::source::Source;
 use crate::store::{Store, StoredSource};
 
-/// What a refetch pass did. Every target lands in exactly one of these.
 #[derive(Debug, Default)]
 pub struct RefetchReport {
-    /// Stored text differed from the source's and was rewritten.
     pub replaced: Vec<u32>,
-    /// Re-downloaded and identical to what was already stored.
     pub unchanged: Vec<u32>,
-    /// Not previously stored; now downloaded.
     pub added: Vec<u32>,
-    /// Left as they were, with why.
     pub skipped: Vec<(u32, String)>,
 }
 
 impl RefetchReport {
-    /// Whether anything about the library actually changed.
     pub fn changed(&self) -> bool {
         !self.replaced.is_empty() || !self.added.is_empty()
     }
 }
 
-/// Re-download `targets` (or the whole novel when `None`) and replace what is
-/// stored. `dry_run` reports without writing.
 pub async fn refetch_novel(
     store: &Store,
     novel_id: i64,
@@ -55,7 +35,6 @@ pub async fn refetch_novel(
         return Err(anyhow!("no usable source to re-download from"));
     }
 
-    // Discover once, up front, and reuse the lists for every chapter below.
     let mut discovered: Vec<(&StoredSource, &dyn Source, Vec<ChapterRef>)> = Vec::new();
     let mut failures = Vec::new();
     for (meta, src) in sources {
@@ -80,8 +59,6 @@ pub async fn refetch_novel(
         .flat_map(|(_, _, refs)| refs.iter().map(|r| r.number))
         .collect();
 
-    // Default target is everything the novel has or the sources offer, so a
-    // bare `refetch` both rewrites what is stored and picks up anything missing.
     let targets: BTreeSet<u32> = match targets {
         Some(t) => t.clone(),
         None => stored.union(&listed).copied().collect(),
@@ -94,8 +71,6 @@ pub async fn refetch_novel(
         let existing = store.load_chapter(novel_id, number)?;
 
         let Some((fresh, source_id)) = fetch_one(&discovered, number, &mut report).await? else {
-            // Nothing served it. The stored chapter, if any, stays exactly as
-            // it is; a failed download never costs you text.
             if existing.is_none() {
                 still_absent.push(number);
             }
@@ -119,9 +94,6 @@ pub async fn refetch_novel(
         }
     }
 
-    // A target the sources list but nothing could serve leaves a real hole. Put
-    // the novel back to Backfilling so an ordinary sync walks the full list and
-    // fills it, rather than a delta check skipping straight past it.
     let recoverable = still_absent.iter().any(|n| listed.contains(n));
     if recoverable && !dry_run {
         store.set_derived_state(novel_id, DerivedState::Backfilling)?;
@@ -130,8 +102,6 @@ pub async fn refetch_novel(
     Ok(report)
 }
 
-/// Fetch one chapter from the highest-priority source that can serve it,
-/// returning the chapter and the source id that supplied it.
 async fn fetch_one(
     discovered: &[(&StoredSource, &dyn Source, Vec<ChapterRef>)],
     number: u32,
@@ -144,8 +114,6 @@ async fn fetch_one(
         };
         match src.fetch_chapter(cref).await {
             Ok(chapter) => {
-                // The same rule sync's upgrade pass follows: a gating
-                // placeholder is not content, and must never replace prose.
                 if looks_like_gate_stub(&chapter.paragraphs) {
                     last_error = Some(format!("{} served a login placeholder", meta.name));
                     continue;
@@ -171,7 +139,6 @@ mod tests {
     use crate::model::{NovelMeta, NovelStatus};
     use std::collections::BTreeMap;
 
-    /// A source serving canned bodies, with optional per-chapter failures.
     struct MockSource {
         name: String,
         bodies: BTreeMap<u32, String>,
@@ -191,13 +158,11 @@ mod tests {
             }
         }
 
-        /// Chapters this source lists but errors on when fetched.
         fn failing(mut self, numbers: &[u32]) -> Self {
             self.broken = numbers.iter().copied().collect();
             self
         }
 
-        /// Discovery itself fails (site down).
         fn unreachable(name: &str) -> Self {
             Self {
                 name: name.into(),
@@ -311,9 +276,6 @@ mod tests {
             .join(" ")
     }
 
-    /// The case that prompted this: the site served the same text at 152, 153
-    /// and 154, then fixed it. Refetch rewrites the wrong ones and reports the
-    /// already-correct one as unchanged rather than churning it.
     #[tokio::test]
     async fn rewrites_chapters_the_site_has_corrected() {
         let (store, id, _) = setup(&[(152, "dup"), (153, "dup"), (154, "dup")]);
@@ -337,8 +299,6 @@ mod tests {
         assert_eq!(body_of(&store, id, 154), "real 154");
     }
 
-    /// A replaced chapter must be flagged for re-export, or the EPUB keeps the
-    /// stale text.
     #[tokio::test]
     async fn a_rewrite_marks_the_novel_for_re_export() {
         let (store, id, _) = setup(&[(1, "old")]);
@@ -355,7 +315,6 @@ mod tests {
             .map(|c| c.len() as i64)
             .unwrap();
         assert_eq!(exported, 1);
-        // update_chapter_content clears the exported flag; retention keys on it.
         assert_eq!(store.apply_retention(0).unwrap(), 0, "un-exported, so not purgeable");
     }
 
@@ -371,9 +330,6 @@ mod tests {
         assert_eq!(body_of(&store, id, 1), "old", "dry run must not write");
     }
 
-
-    /// A chapter that fails to download must leave what is already stored
-    /// untouched, rather than blanking it or half-writing over it.
     #[tokio::test]
     async fn a_failed_fetch_leaves_the_stored_chapter_intact() {
         let (store, id, _) = setup(&[(1, "one"), (2, "two")]);
@@ -391,8 +347,6 @@ mod tests {
         assert!(r.skipped.iter().any(|(n, _)| *n == 2));
     }
 
-    /// With no source readable there is no basis for any of this, least of all
-    /// deletion — it errors rather than acting on an empty chapter list.
     #[tokio::test]
     async fn refuses_to_run_when_no_source_can_be_read() {
         let (store, id, _) = setup(&[(1, "one")]);
@@ -405,8 +359,6 @@ mod tests {
         assert_eq!(body_of(&store, id, 1), "one", "nothing touched");
     }
 
-    /// Refetch honours fallbacks, and will not let a gated source overwrite
-    /// prose with a login placeholder.
     #[tokio::test]
     async fn falls_back_and_refuses_a_placeholder() {
         const GATE: &str = "This chapter requires a free account to read.";
@@ -429,9 +381,6 @@ mod tests {
         assert_eq!(body_of(&store, id, 1), "fuller text", "came from the fallback");
     }
 
-    /// A chapter the sources list but nobody could serve leaves a hole, so the
-    /// novel goes back to Backfilling and an ordinary sync fills it — a delta
-    /// check would skip straight past a mid-range hole.
     #[tokio::test]
     async fn an_unfillable_hole_sends_the_novel_back_to_backfilling() {
         let (store, id, _) = setup(&[(1, "one")]);
@@ -449,9 +398,6 @@ mod tests {
         assert_eq!(novel.derived_state, DerivedState::Backfilling);
     }
 
-
-    /// A dry run still downloads, because "which chapters differ" cannot be
-    /// answered any other way. It costs the same as doing it for real.
     #[tokio::test]
     async fn a_plain_dry_run_still_compares_text() {
         let (store, id, _) = setup(&[(1, "one")]);

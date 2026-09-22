@@ -1,15 +1,3 @@
-//! Hand-written adapter for lightnovelworld.org.
-//!
-//! Why hand-written: the table of contents is JavaScript-rendered (the static
-//! `/chapters/?page=N` pages don't carry the chapter `<a>` items), and the
-//! metadata is *not* in `og:novel:*` tags. But chapter URLs are sequential
-//! (`/novel/<slug>/chapter/<n>/`) and the total count is on the novel page, so
-//! discovery generates the whole list from one request — like freewebnovel.
-//!
-//! Metadata comes from page elements (`h1.novel-title`, `a.author-link`,
-//! `.status-badge`) plus `og:image`. Chapter bodies live in `#chapterText`; the
-//! `data-protected` flag is JS copy-blocking, not server-side obfuscation — the
-//! prose is served as plain, readable `<p>` text.
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
@@ -36,8 +24,6 @@ impl<F: Fetcher> LightNovelWorldSource<F> {
 
 pub const HOST: &str = "lightnovelworld.org";
 
-/// Whether `url` points at lightnovelworld (bare domain or `www.`). Used by the
-/// chikari migration to spot subscriptions that need moving.
 pub fn is_lightnovelworld_url(url: &str) -> bool {
     Url::parse(url)
         .ok()
@@ -45,10 +31,6 @@ pub fn is_lightnovelworld_url(url: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// The novel slug from a lightnovelworld URL (`/novel/<slug>/...`).
-///
-/// chikari inherited lightnovelworld's slugs verbatim, so this is what the
-/// migration hands to `chikari::novel_url` to find the same novel's new home.
 pub fn slug_from_url(url: &str) -> Option<String> {
     let parsed = Url::parse(url).ok()?;
     let mut segments = parsed.path_segments()?.filter(|s| !s.is_empty());
@@ -92,10 +74,6 @@ fn meta_prop(doc: &Html, property: &str) -> Option<String> {
         .map(|s| s.trim().to_string())
 }
 
-/// Author from `p.novel-author` ("Author: <name>"). The name is usually a link
-/// (`a.author-link`), but authors without a profile page appear as plain text
-/// (e.g. `Author: 陷阵营营长`) — so read the element's whole text and strip the
-/// leading "Author:" label, which handles both.
 fn parse_author(doc: &Html) -> Option<String> {
     let raw = text_of(doc, "p.novel-author")?;
     let name = raw.split_once(':').map(|(_, rest)| rest).unwrap_or(&raw).trim();
@@ -110,7 +88,6 @@ fn parse_novel(html: &str, source_url: &str) -> Result<NovelMeta> {
         title,
         author: parse_author(&doc),
         cover_url: meta_prop(&doc, "og:image"),
-        // Genre lives in the page's JSON-LD; not extracted (no JSON dep). None.
         genre: None,
         status_hint: text_of(&doc, ".status-badge")
             .map(|s| parse_status_hint(&s))
@@ -119,21 +96,17 @@ fn parse_novel(html: &str, source_url: &str) -> Result<NovelMeta> {
     })
 }
 
-/// Total chapter count from `og:title` ("<title> by <author> - <N> Chapters").
 fn parse_total_chapters(html: &str) -> Option<u32> {
     let doc = Html::parse_document(html);
     let og_title = meta_prop(&doc, "og:title")?;
-    let last_segment = og_title.rsplit(" - ").next()?; // "3105 Chapters"
+    let last_segment = og_title.rsplit(" - ").next()?;
     last_segment.split_whitespace().next()?.parse().ok()
 }
 
-/// The chapter's name from `h1.chapter-title`, which is
-/// "Chapter N - [N:] Name"; strip our own "Chapter N" prefix and a duplicated
-/// leading "N:".
 fn parse_chapter_title(html: &str) -> Option<String> {
     let doc = Html::parse_document(html);
     let raw = text_of(&doc, "h1.chapter-title")?;
-    let stripped = clean_chapter_title(&raw); // removes "Chapter N -/:"
+    let stripped = clean_chapter_title(&raw);
     let cleaned = strip_leading_number_colon(&stripped);
     (!cleaned.is_empty()).then_some(cleaned)
 }
@@ -221,7 +194,6 @@ mod tests {
 
     #[test]
     fn parses_author_without_a_profile_link() {
-        // Some authors have no profile page, so the name is plain text (no <a>).
         let html = r#"<html><head>
               <meta property="og:title" content="X by 陷阵营营长 - 908 Chapters">
             </head><body>

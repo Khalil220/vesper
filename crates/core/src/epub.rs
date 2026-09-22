@@ -1,10 +1,3 @@
-//! EPUB packaging.
-//!
-//! Chapters are rendered to clean, reconstructed XHTML (we emit our own
-//! `<p>` elements from extracted text rather than passing site HTML through),
-//! which keeps the EPUB valid regardless of the source markup. The file is
-//! written atomically: a temp file is generated first, then renamed over the
-//! target, so a crash mid-write never corrupts an existing EPUB.
 
 use std::fs::File;
 use std::path::Path;
@@ -15,14 +8,11 @@ use epub_builder::{EpubBuilder, EpubContent, EpubVersion, ReferenceType, ZipLibr
 
 use crate::model::{Chapter, NovelMeta};
 
-/// A cover image to embed: raw bytes plus its MIME type.
 pub struct Cover {
     pub bytes: Vec<u8>,
     pub mime: String,
 }
 
-/// Best-effort download of a cover image (browser UA). Returns `None` on any
-/// failure so export never breaks over a missing/blocked cover.
 pub async fn download_cover(url: &str) -> Option<Cover> {
     let client = reqwest::Client::builder()
         .user_agent(crate::fetch::DEFAULT_UA)
@@ -53,18 +43,12 @@ fn cover_filename(mime: &str) -> &'static str {
     }
 }
 
-/// `epub-builder` reports errors as `eyre::Report`, which is not a
-/// `std::error::Error`, so `?` can't lift it into `anyhow`. Convert via Display.
 macro_rules! epub_try {
     ($e:expr) => {
         ($e).map_err(|e| anyhow!("epub: {e}"))?
     };
 }
 
-/// Build an EPUB for `meta`/`chapters` at `out_path` (atomic write). Optionally
-/// embeds a cover image. `gaps` lists chapter numbers the source could not
-/// provide (permanent 404 holes); if non-empty, a short notice page is added up
-/// front so a reader sees the book is missing chapters.
 pub fn build_epub(
     meta: &NovelMeta,
     chapters: &[Chapter],
@@ -87,8 +71,6 @@ pub fn build_epub(
         epub_try!(builder.add_cover_image(cover_filename(&cover.mime), &cover.bytes[..], &cover.mime));
     }
 
-    // A reader-facing notice for any chapters the source couldn't provide, so a
-    // gap isn't an invisible seam between two chapters.
     if !gaps.is_empty() {
         let xhtml = render_gap_notice(meta, gaps);
         epub_try!(builder.add_content(
@@ -125,7 +107,6 @@ pub fn build_epub(
     Ok(())
 }
 
-/// Front-matter page listing chapters the source couldn't provide.
 fn render_gap_notice(meta: &NovelMeta, gaps: &[u32]) -> String {
     let mut sorted = gaps.to_vec();
     sorted.sort_unstable();
@@ -151,7 +132,6 @@ fn render_gap_notice(meta: &NovelMeta, gaps: &[u32]) -> String {
     wrap_xhtml("Missing Chapters", &body)
 }
 
-/// Host of a URL (for the notice), best-effort.
 fn url_host(url: &str) -> Option<String> {
     url::Url::parse(url).ok()?.host_str().map(|h| h.to_string())
 }
@@ -164,7 +144,6 @@ fn render_chapter_xhtml(heading: &str, ch: &Chapter) -> String {
     wrap_xhtml(heading, &body)
 }
 
-/// Wrap already-built body HTML in an XHTML document with an escaped `<title>`.
 fn wrap_xhtml(title: &str, body_html: &str) -> String {
     format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\

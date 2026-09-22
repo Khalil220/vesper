@@ -1,9 +1,3 @@
-//! Global configuration (`config.ini`).
-//!
-//! A single flat INI file, generated with defaults on first use, holding
-//! settings that aren't per-novel. Per-novel overrides live in the DB. The file
-//! is written with explanatory comments; reading is tolerant — any missing key
-//! falls back to its default.
 
 use std::path::{Path, PathBuf};
 
@@ -13,37 +7,24 @@ use ini::{Ini, ParseOption};
 
 #[derive(Debug, Clone)]
 pub struct Config {
-    /// Where EPUBs are written (`<output_dir>/<author>/<novel>/...`).
     pub output_dir: PathBuf,
-    /// Base politeness delay between requests, in milliseconds.
     pub request_delay_ms: u64,
-    /// How often the background task runs, in minutes (used at install time).
     pub poll_interval_minutes: u32,
-    /// Keep exported chapters this many days before pruning (0 = purge on export).
     pub retention_days: u32,
-    /// Days a completed novel must be quiet before it's judged LikelyComplete.
     pub quiet_grace_days: u32,
-    /// How often (days) to re-check a LikelyComplete novel; between re-checks the
-    /// scheduled sync skips it instead of polling every interval.
     pub likely_complete_recheck_days: u32,
-    /// Export automatically once a novel's initial backfill completes.
     pub auto_export: bool,
-    /// Re-export automatically when a Live novel gains new chapters.
     pub auto_append: bool,
-    /// Split EPUBs into volumes of this many chapters (0 = single file).
     pub split_every_chapters: u32,
-    /// Where the background sync appends its log (its stderr is discarded).
     pub log_path: PathBuf,
 }
 
-/// Default log path: `<data_local>/vesper.log`.
 pub fn default_log_path() -> PathBuf {
     ProjectDirs::from("", "", "vesper")
         .map(|d| d.data_local_dir().join("vesper.log"))
         .unwrap_or_else(|| PathBuf::from("vesper.log"))
 }
 
-/// Default EPUB output directory: `<Documents>/lightnovels`, or `./lightnovels`.
 pub fn default_output_dir() -> PathBuf {
     UserDirs::new()
         .and_then(|u| u.document_dir().map(|d| d.join("lightnovels")))
@@ -67,7 +48,6 @@ impl Default for Config {
     }
 }
 
-/// Path to the config file: `<config_dir>/config.ini`.
 pub fn config_path() -> Result<PathBuf> {
     let dirs = ProjectDirs::from("", "", "vesper")
         .ok_or_else(|| anyhow!("could not resolve a config directory"))?;
@@ -75,7 +55,6 @@ pub fn config_path() -> Result<PathBuf> {
 }
 
 impl Config {
-    /// Load the config, creating it with defaults if it doesn't exist yet.
     pub fn load_or_create() -> Result<Self> {
         let path = config_path()?;
         if path.exists() {
@@ -88,8 +67,6 @@ impl Config {
     }
 
     fn read(path: &Path) -> Result<Self> {
-        // Disable backslash escaping so Windows paths (C:\Users\...) round-trip
-        // literally instead of the parser eating the separators.
         let opt = ParseOption {
             enabled_escape: false,
             ..ParseOption::default()
@@ -131,7 +108,6 @@ impl Config {
         })
     }
 
-    /// Write the config with explanatory comments (used to generate defaults).
     pub fn write(&self, path: &Path) -> Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
@@ -233,7 +209,6 @@ mod tests {
 
         let read = Config::read(&path).unwrap();
         assert_eq!(read.request_delay_ms, 500);
-        // Unspecified keys use defaults.
         assert_eq!(read.poll_interval_minutes, Config::default().poll_interval_minutes);
         assert!(!read.auto_export);
 

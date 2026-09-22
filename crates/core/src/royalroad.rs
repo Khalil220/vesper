@@ -1,14 +1,3 @@
-//! Hand-written adapter for royalroad.com.
-//!
-//! RoyalRoad embeds the whole chapter list in the fiction page as a
-//! `window.chapters = [...]` JSON array (id, title, url, order, visible), so
-//! discovery is a single request — no ToC pagination — but chapter URLs use
-//! non-sequential DB ids, so we must read the list rather than generate URLs.
-//!
-//! Content lives in `.chapter-inner`. RoyalRoad salts each chapter with **decoy
-//! paragraphs**: a `<style>` block marks one (randomized-per-request) class as
-//! `display: none`, and the decoy `<p>`s carry that class. We collect the
-//! hidden classes and skip any `<p>` using them, keeping only visible prose.
 
 use std::collections::HashSet;
 
@@ -62,8 +51,6 @@ fn meta_name(doc: &Html, name: &str) -> Option<String> {
         .map(|s| s.trim().to_string())
 }
 
-/// Strip a leading "N. " / "N: " numbering from a chapter title (we render our
-/// own "Chapter N:" prefix).
 fn clean_title(raw: &str) -> String {
     let t = raw.trim();
     let digits = t.chars().take_while(|c| c.is_ascii_digit()).count();
@@ -84,7 +71,6 @@ fn parse_novel(html: &str, source_url: &str) -> Result<NovelMeta> {
 
     let title = meta_prop(&doc, "og:title")
         .or_else(|| {
-            // "<title> | Royal Road" -> "<title>"
             text_of(&doc, "title").map(|t| {
                 t.rsplit_once('|')
                     .map(|(head, _)| head.trim().to_string())
@@ -99,8 +85,6 @@ fn parse_novel(html: &str, source_url: &str) -> Result<NovelMeta> {
         .or_else(|| text_of(&doc, "a[href^=\"/profile/\"]"))
         .filter(|s| !s.is_empty());
 
-    // Status is a `span.label` whose text is a status keyword (other labels are
-    // genre tags).
     let status_hint = doc
         .select(&sel("span.label"))
         .map(|e| parse_status_hint(&e.text().collect::<String>()))
@@ -117,7 +101,6 @@ fn parse_novel(html: &str, source_url: &str) -> Result<NovelMeta> {
     })
 }
 
-/// Parse the `window.chapters = [...]` JSON array into ordered chapter refs.
 fn parse_chapters(html: &str, base_url: &str) -> Result<Vec<ChapterRef>> {
     let idx = html
         .find("window.chapters")
@@ -126,8 +109,6 @@ fn parse_chapters(html: &str, base_url: &str) -> Result<Vec<ChapterRef>> {
     let bracket = after
         .find('[')
         .ok_or_else(|| anyhow!("malformed chapter list"))?;
-    // serde_json parses the first JSON value (the array) and ignores the
-    // trailing `;` and rest of the script.
     let arr: serde_json::Value = serde_json::Deserializer::from_str(&after[bracket..])
         .into_iter::<serde_json::Value>()
         .next()
@@ -157,8 +138,6 @@ fn parse_chapters(html: &str, base_url: &str) -> Result<Vec<ChapterRef>> {
     Ok(out)
 }
 
-/// CSS class names marked `display: none` in any `<style>` block — RoyalRoad's
-/// decoy-paragraph classes.
 fn decoy_classes(doc: &Html) -> HashSet<String> {
     let mut set = HashSet::new();
     for style in doc.select(&sel("style")) {
@@ -192,7 +171,7 @@ fn parse_body(html: &str) -> Result<Vec<String>> {
     let mut paragraphs = Vec::new();
     for p in content.select(&p_sel) {
         if p.value().classes().any(|c| decoy.contains(c)) {
-            continue; // decoy paragraph
+            continue;
         }
         let text = p.text().collect::<String>().trim().to_string();
         if !text.is_empty() {
@@ -261,7 +240,7 @@ mod tests {
         let refs = parse_chapters(html, "https://www.royalroad.com/fiction/21220/x").unwrap();
         assert_eq!(refs.len(), 2, "visible:0 chapter skipped");
         assert_eq!(refs[0].number, 1);
-        assert_eq!(refs[0].title, "Good Morning Brother"); // "1. " stripped
+        assert_eq!(refs[0].title, "Good Morning Brother");
         assert_eq!(refs[1].title, "Life's Problems");
         assert!(refs[0].url.starts_with("https://www.royalroad.com/fiction/"));
     }

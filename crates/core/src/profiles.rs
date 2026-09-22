@@ -1,10 +1,3 @@
-//! Site profiles for the generic adapter.
-//!
-//! novgo.net is built in; users add more *config-driven* profiles, with no
-//! recompile, by dropping `.ini` files into `<config_dir>/vesper/profiles/` for
-//! any site that fits the generic shape (server-rendered, CSS-selectable
-//! content, `?page=N` table of contents). A `README.txt` documenting the format
-//! is generated there on first use.
 
 use std::fs;
 use std::path::PathBuf;
@@ -16,7 +9,6 @@ use url::Url;
 
 use crate::source::SiteProfile;
 
-/// Profile for novgo.net (built in).
 pub fn novgo() -> SiteProfile {
     SiteProfile {
         name: "novgo".into(),
@@ -29,14 +21,12 @@ pub fn novgo() -> SiteProfile {
     }
 }
 
-/// All profiles: the built-in novgo one plus any loaded from `.ini` files.
 pub fn all() -> Vec<SiteProfile> {
     let mut v = vec![novgo()];
     v.extend(external());
     v
 }
 
-/// The profile whose host matches `url`, if any.
 pub fn for_url(url: &str) -> Option<SiteProfile> {
     let host = Url::parse(url).ok()?.host_str()?.to_string();
     all()
@@ -44,13 +34,10 @@ pub fn for_url(url: &str) -> Option<SiteProfile> {
         .find(|p| host.eq_ignore_ascii_case(&p.host))
 }
 
-/// Directory holding user-supplied profile files.
 pub fn profiles_dir() -> Option<PathBuf> {
     ProjectDirs::from("", "", "vesper").map(|d| d.config_dir().join("profiles"))
 }
 
-/// Load the profiles folder, skipping (with a warning) any file that fails to
-/// parse. Best-effort: returns an empty list if the directory is unavailable.
 pub fn external() -> Vec<SiteProfile> {
     let Some(dir) = profiles_dir() else {
         return Vec::new();
@@ -110,8 +97,6 @@ fn load_profile(path: &std::path::Path) -> Result<SiteProfile> {
     })
 }
 
-/// Write a README documenting the profile format (once), so users can discover
-/// how to add sites.
 fn ensure_readme(dir: &std::path::Path) -> Result<()> {
     fs::create_dir_all(dir)?;
     let readme = dir.join("README.txt");
@@ -160,9 +145,9 @@ mod tests {
         assert_eq!(p.name, "mysite");
         assert_eq!(p.host, "mysite.com");
         assert_eq!(p.content_selector, ".article");
-        assert_eq!(p.paragraph_selector, "p"); // default
-        assert_eq!(p.chapter_marker, "/chapter-"); // default
-        assert_eq!(p.max_pages, 500); // default
+        assert_eq!(p.paragraph_selector, "p");
+        assert_eq!(p.chapter_marker, "/chapter-");
+        assert_eq!(p.max_pages, 500);
 
         fs::remove_dir_all(&dir).ok();
     }

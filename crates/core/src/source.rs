@@ -1,9 +1,3 @@
-//! Source adapters: how Vesper understands a given site.
-//!
-//! A site with the generic shape (server-rendered HTML, CSS-selectable
-//! content, `?page=N` pagination) is expressed as a declarative
-//! [`SiteProfile`] driving a single [`GenericSource`]. Sites that don't fit
-//! implement [`Source`] by hand instead.
 
 use std::collections::BTreeMap;
 
@@ -16,57 +10,34 @@ use crate::fetch::Fetcher;
 use crate::model::{Chapter, ChapterRef, NovelMeta, NovelStatus};
 use crate::util::{clean_chapter_title, parse_chapter_number};
 
-/// The behaviour every site adapter must provide. Kept object-safe (via
-/// `async_trait`) so a registry of `Box<dyn Source>` can resolve a URL to its
-/// adapter by host.
 #[async_trait]
 pub trait Source: Send + Sync {
-    /// Human-readable adapter name (e.g. `"royalroad"`).
     fn name(&self) -> &str;
 
-    /// Whether this source handles the given URL (matched by host).
     fn matches(&self, url: &str) -> bool;
 
-    /// Fetch and parse the novel's landing-page metadata.
     async fn fetch_novel(&self, url: &str) -> Result<NovelMeta>;
 
-    /// Enumerate chapters from the table of contents, ascending by number.
-    ///
-    /// `needed` lets discovery stop early once enough chapters are known,
-    /// instead of walking every ToC page.
     async fn discover_chapters(&self, url: &str, needed: Option<usize>) -> Result<Vec<ChapterRef>>;
 
-    /// Fetch and extract a single chapter's body.
     async fn fetch_chapter(&self, chapter: &ChapterRef) -> Result<Chapter>;
 
-    /// Cheap "what's new" discovery for delta syncs — typically just the landing
-    /// page, which lists the latest chapters. Defaults to full discovery so a
-    /// source that can't do better stays correct.
     async fn discover_latest(&self, url: &str) -> Result<Vec<ChapterRef>> {
         self.discover_chapters(url, None).await
     }
 }
 
-/// A declarative description of a site that fits the generic adapter. Owned
-/// strings so profiles can be loaded from external config files at runtime.
 #[derive(Debug, Clone)]
 pub struct SiteProfile {
     pub name: String,
-    /// Host this profile handles, e.g. `"mysite.com"`.
     pub host: String,
-    /// CSS selector for the element containing a chapter's prose.
     pub content_selector: String,
-    /// CSS selector for paragraph elements within the content container.
     pub paragraph_selector: String,
-    /// Substring that marks a chapter link's href (e.g. `"/chapter-"`).
     pub chapter_marker: String,
-    /// Query parameter for ToC pagination (e.g. `"page"` => `?page=N`).
     pub page_param: String,
-    /// Safety cap on how many ToC pages to walk.
     pub max_pages: u32,
 }
 
-/// The generic, profile-driven source adapter.
 pub struct GenericSource<F: Fetcher> {
     profile: SiteProfile,
     fetcher: F,
@@ -93,8 +64,6 @@ impl<F: Fetcher> Source for GenericSource<F> {
 
     async fn fetch_novel(&self, url: &str) -> Result<NovelMeta> {
         let html = self.fetcher.get(url).await?;
-        // Parsing is synchronous and self-contained: the non-Send `Html` never
-        // crosses an `.await`.
         parse_novel_meta(&html, url)
     }
 
@@ -111,8 +80,6 @@ impl<F: Fetcher> Source for GenericSource<F> {
             let html = self.fetcher.get(&page_url).await?;
             let links = parse_chapter_links(&html, url, &self.profile.chapter_marker)?;
 
-            // A page with no chapter links means we've walked past the last ToC
-            // page (or discovery is misconfigured); either way, stop.
             if links.is_empty() {
                 break;
             }
@@ -127,7 +94,6 @@ impl<F: Fetcher> Source for GenericSource<F> {
                     break;
                 }
             }
-            // No new chapters on this page => we've run past the last page.
             if found.len() == before {
                 break;
             }
@@ -155,9 +121,6 @@ impl<F: Fetcher> Source for GenericSource<F> {
     }
 
     async fn discover_latest(&self, url: &str) -> Result<Vec<ChapterRef>> {
-        // Page 1 (the landing URL) lists the newest chapters at the top plus the
-        // first block — enough to spot and fetch a handful of new chapters
-        // without walking the entire table of contents.
         let html = self.fetcher.get(url).await?;
         parse_chapter_links(&html, url, &self.profile.chapter_marker)
     }
@@ -167,14 +130,6 @@ fn sel(selector: &str) -> Result<Selector> {
     Selector::parse(selector).map_err(|e| anyhow!("invalid selector {selector:?}: {e:?}"))
 }
 
-/// Interpret a site's status label (numeric or word form) across sources.
-///
-/// Everything unrecognised — notably "hiatus", "cancelled" and "dropped" —
-/// stays `Unknown` on purpose. Only `Completed` lowers the poll cadence and
-/// makes a novel eligible for retention purging, and none of those three mean
-/// the story finished; a hiatus can end, and a dropped novel that gets picked
-/// up again would have been purged. The label is a hint either way (see
-/// DESIGN.md): observed activity decides.
 pub(crate) fn parse_status_hint(raw: &str) -> NovelStatus {
     match raw.trim().to_ascii_lowercase().as_str() {
         "1" | "ongoing" | "on going" | "serializing" | "active" | "releasing" => {
@@ -194,7 +149,6 @@ fn meta_content(doc: &Html, property: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Parse novel metadata from Open Graph tags, with sensible fallbacks.
 pub(crate) fn parse_novel_meta(html: &str, source_url: &str) -> Result<NovelMeta> {
     let doc = Html::parse_document(html);
 
@@ -225,8 +179,6 @@ pub(crate) fn parse_novel_meta(html: &str, source_url: &str) -> Result<NovelMeta
     })
 }
 
-/// Collect chapter links from a table-of-contents page, resolved to absolute
-/// URLs. Deduplication and ordering are the caller's job (via `BTreeMap`).
 fn parse_chapter_links(html: &str, base_url: &str, marker: &str) -> Result<Vec<ChapterRef>> {
     let doc = Html::parse_document(html);
     let base = Url::parse(base_url).with_context(|| format!("parsing base URL {base_url}"))?;
@@ -253,9 +205,6 @@ fn parse_chapter_links(html: &str, base_url: &str, marker: &str) -> Result<Vec<C
     Ok(out)
 }
 
-/// Extract a chapter's prose paragraphs from its page, given the content
-/// container and paragraph selectors. Shared by the generic and hand-written
-/// adapters.
 pub(crate) fn parse_chapter_body(
     html: &str,
     content_selector: &str,
@@ -329,14 +278,11 @@ mod tests {
         assert_eq!(meta.status_hint, NovelStatus::Ongoing);
     }
 
-    /// The label only ever lowers the poll cadence, and only `Completed` makes
-    /// a novel purgeable — so a paused or abandoned novel must not map to it.
     #[test]
     fn only_finished_labels_count_as_completed() {
         assert_eq!(parse_status_hint("releasing"), NovelStatus::Ongoing);
         assert_eq!(parse_status_hint("Ongoing"), NovelStatus::Ongoing);
         assert_eq!(parse_status_hint("completed"), NovelStatus::Completed);
-        // novgo encodes the same two states as numbers.
         assert_eq!(parse_status_hint("1"), NovelStatus::Ongoing);
         assert_eq!(parse_status_hint("2"), NovelStatus::Completed);
         for paused in ["hiatus", "cancelled", "dropped", ""] {
@@ -353,7 +299,6 @@ mod tests {
         let links =
             parse_chapter_links(NOVEL_HTML, "https://example.com/cultivation-online-novel.html", "/chapter-")
                 .unwrap();
-        // Two distinct chapters plus a duplicate; the non-chapter link is skipped.
         assert_eq!(links.len(), 3);
         assert!(links
             .iter()

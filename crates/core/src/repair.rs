@@ -1,22 +1,3 @@
-//! Re-fetching chapters that were stored as something other than the chapter.
-//!
-//! A site that gates part of its catalogue can serve a short "log in to keep
-//! reading" placeholder with an ordinary 200, so the fetch succeeds and the
-//! placeholder is stored as the chapter's text. Sync can never fix that on its
-//! own: `insert_chapter_if_absent` is `OR IGNORE`, so a chapter already present
-//! is never revisited, however wrong it is. This is the body counterpart to
-//! `store::update_chapter_title`, which exists for the same reason.
-//!
-//! Detection keys on the placeholder's wording, **not** on length alone. Real
-//! chapters can be legitimately short — an author's note between arcs is a
-//! couple of hundred characters of genuine content — and deleting one of those
-//! to "repair" it would be a straight loss. Length only narrows the scan.
-//!
-//! Every replacement is also checked before it lands: the incoming text must
-//! not itself be a placeholder, and must be longer than what is already
-//! stored. Repairing from a source that is *also* gated would otherwise
-//! overwrite one stub with another, and re-running it against a site having a
-//! bad day would overwrite a real chapter with a stub.
 
 use anyhow::{anyhow, Result};
 
@@ -24,7 +5,6 @@ use crate::model::Chapter;
 use crate::source::Source;
 use crate::store::{Store, StoredSource};
 
-/// Wordings that mark a gating placeholder rather than prose.
 const GATE_PHRASES: &[&str] = &[
     "requires a free account",
     "log in to continue",
@@ -35,12 +15,8 @@ const GATE_PHRASES: &[&str] = &[
     "subscribe to continue reading",
 ];
 
-/// Only bodies shorter than this are even considered. A placeholder is a
-/// sentence or two; this is generous enough to cover a wordier one while
-/// keeping the scan off the whole table.
 pub const STUB_MAX_CHARS: usize = 2000;
 
-/// Whether a stored body is a gating placeholder rather than the chapter.
 pub fn looks_like_gate_stub(paragraphs: &[String]) -> bool {
     let text = paragraphs.join(" ");
     if text.chars().count() > STUB_MAX_CHARS {
@@ -50,12 +26,9 @@ pub fn looks_like_gate_stub(paragraphs: &[String]) -> bool {
     GATE_PHRASES.iter().any(|p| lowered.contains(p))
 }
 
-/// What a repair pass did.
 #[derive(Debug, Default)]
 pub struct RepairReport {
-    /// Chapter numbers whose text was replaced (or would be, on a dry run).
     pub repaired: Vec<u32>,
-    /// Chapters left alone, with why.
     pub skipped: Vec<(u32, String)>,
 }
 
@@ -65,12 +38,6 @@ impl RepairReport {
     }
 }
 
-/// Re-fetch and replace a novel's placeholder chapters.
-///
-/// `only` repairs one specific chapter regardless of how its stored text
-/// looks — for a bad chapter whose wording this doesn't recognise. The
-/// safety checks on the *incoming* text still apply. `dry_run` reports without
-/// writing.
 pub async fn repair_novel(
     store: &Store,
     novel_id: i64,
@@ -104,7 +71,6 @@ pub async fn repair_novel(
         return Err(anyhow!("no usable source to re-fetch from"));
     }
 
-    // One discovery pass per source, reused for every chapter below.
     let mut discovered = Vec::new();
     for (meta, src) in sources {
         match src.discover_chapters(&meta.url, None).await {
@@ -148,7 +114,6 @@ pub async fn repair_novel(
     Ok(report)
 }
 
-/// Refuse a replacement that isn't an improvement.
 fn acceptable_replacement(stored: &Chapter, fresh: &Chapter) -> Result<(), String> {
     if looks_like_gate_stub(&fresh.paragraphs) {
         return Err("the source served the same kind of placeholder".into());
@@ -171,7 +136,6 @@ mod tests {
 
     #[test]
     fn recognises_a_gating_placeholder() {
-        // The exact shape found in a real library.
         let stub = paras(
             "This chapter requires a free account to read. Sign up or log in to \
              continue reading \"Cultivation Online\".",
@@ -179,8 +143,6 @@ mod tests {
         assert!(looks_like_gate_stub(&stub));
     }
 
-    /// The case that makes length-based detection unsafe: a real, short
-    /// author's note. Deleting one of these to "repair" it is a pure loss.
     #[test]
     fn leaves_a_genuinely_short_chapter_alone() {
         let note = paras(
@@ -191,7 +153,6 @@ mod tests {
         assert!(!looks_like_gate_stub(&note));
     }
 
-    /// A long chapter that merely mentions signing in is prose, not a gate.
     #[test]
     fn a_long_chapter_is_never_a_stub() {
         let mut body = "He had to log in to continue the simulation. ".repeat(80);
@@ -208,7 +169,6 @@ mod tests {
         }
     }
 
-    /// A source serving canned bodies per chapter number.
     struct MockSource {
         name: String,
         bodies: std::collections::BTreeMap<u32, String>,
@@ -286,10 +246,6 @@ mod tests {
         (store, id, primary)
     }
 
-    /// The question this answers: if the primary is still gated but a fallback
-    /// carries the full text, does repair reach the fallback? It must — falling
-    /// through on a rejected replacement is the whole point of trying each
-    /// source in turn.
     #[tokio::test]
     async fn falls_through_to_a_fallback_when_the_primary_is_still_gated() {
         let (store, id, _) = store_with_gated_chapter();
@@ -313,8 +269,6 @@ mod tests {
         assert_eq!(stored.paragraphs.join(" "), REAL);
     }
 
-    /// With every source gated there is nothing to repair from, and the stored
-    /// chapter must be left exactly as it was rather than churned.
     #[tokio::test]
     async fn leaves_the_chapter_alone_when_every_source_is_gated() {
         let (store, id, _) = store_with_gated_chapter();
@@ -339,7 +293,6 @@ mod tests {
         assert_eq!(store.load_chapter(id, 1).unwrap().unwrap().paragraphs.join(" "), GATED);
     }
 
-    /// A dry run reports what it would do and writes nothing.
     #[tokio::test]
     async fn dry_run_changes_nothing() {
         let (store, id, _) = store_with_gated_chapter();
@@ -374,7 +327,6 @@ mod tests {
         let stored = chapter(1, "This chapter requires a free account to read.");
         let shorter = chapter(1, "Nope.");
         assert!(acceptable_replacement(&stored, &shorter).is_err());
-        // A real chapter is longer, so it goes through.
         let real = chapter(1, "The morning broke over the ruined city, and Sunny woke.");
         assert!(acceptable_replacement(&stored, &real).is_ok());
     }

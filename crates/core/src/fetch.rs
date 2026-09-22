@@ -1,14 +1,3 @@
-//! HTTP fetching, abstracted behind a trait so higher tiers (TLS-fingerprint
-//! impersonation, headless browsers) can slot in per-site later.
-//!
-//! [`ReqwestFetcher`] is Tier 1: a plain `reqwest` client with **adaptive,
-//! per-host politeness**. Each host has a current request spacing that starts at
-//! a base delay, grows when the server pushes back (HTTP 429/503, `Retry-After`)
-//! and relaxes toward the base on sustained success. Throttling and transient
-//! network errors are retried with exponential backoff, bounded by
-//! `max_retries`. This is the polite-and-optimal strategy from DESIGN.md: never
-//! hammer, back off on resistance, and never escalate the site into a harder
-//! anti-bot tier.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -19,26 +8,15 @@ use async_trait::async_trait;
 use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, ACCEPT_LANGUAGE, RETRY_AFTER};
 use tokio::time::sleep;
 
-/// Anything that can fetch a URL's HTML body.
-///
-/// Tier 1 is [`ReqwestFetcher`]. Future tiers implement the same trait, so
-/// callers never care which tier a site needs.
 #[async_trait]
 pub trait Fetcher: Send + Sync {
     async fn get(&self, url: &str) -> Result<String>;
 
-    /// POST a form-urlencoded body and return the response text. For AJAX ToC
-    /// endpoints (ScribbleHub). Default: unsupported — only the curl tier
-    /// implements it, since the sites that need POST also need that tier.
     async fn post(&self, _url: &str, _form_body: &str) -> Result<String> {
         bail!("POST is not supported by this fetch tier")
     }
 }
 
-/// A fetch that failed because the server said the resource does not exist
-/// (HTTP 404/410) — a *permanent* absence, distinct from a transient failure
-/// (timeout, 5xx) that should be retried. The sync engine uses this to tell a
-/// real "this chapter URL is a hole in the site" apart from "try again later".
 #[derive(Debug, Clone)]
 pub struct NotFound {
     pub url: String,
@@ -53,31 +31,21 @@ impl std::fmt::Display for NotFound {
 
 impl std::error::Error for NotFound {}
 
-/// Whether `err` (or anything in its chain) is a [`NotFound`] — i.e. the server
-/// reported the resource absent (404/410). Chain-aware so it still detects the
-/// case when a caller added `.context(...)` on top.
 pub fn is_not_found(err: &anyhow::Error) -> bool {
     err.chain().any(|c| c.is::<NotFound>())
 }
 
-/// Default browser-like User-Agent. Sending a real one is basic politeness, and
-/// freewebnovel's Cloudflare front gates on it.
 pub(crate) const DEFAULT_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) \
     AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
 
-/// Tunable fetch behaviour.
 #[derive(Debug, Clone)]
 pub struct FetchConfig {
-    /// Polite floor for request spacing per host.
     pub base_delay: Duration,
-    /// Ceiling that adaptive backoff never exceeds.
     pub max_delay: Duration,
-    /// Maximum retry attempts for throttling / transient errors.
     pub max_retries: u32,
 }
 
 impl FetchConfig {
-    /// Sensible defaults derived from a base delay.
     pub fn new(base_delay: Duration) -> Self {
         let max_delay = std::cmp::max(base_delay.saturating_mul(16), Duration::from_secs(30));
         Self {
@@ -88,11 +56,9 @@ impl FetchConfig {
     }
 }
 
-/// Tier 1: a plain `reqwest` client with adaptive per-host rate control.
 pub struct ReqwestFetcher {
     client: reqwest::Client,
     config: FetchConfig,
-    /// Current polite spacing per host; grows on throttling, relaxes on success.
     host_delay: Mutex<HashMap<String, Duration>>,
 }
 
@@ -206,14 +172,6 @@ impl Fetcher for ReqwestFetcher {
     }
 }
 
-/// Tier 2: shell out to the system `curl`.
-///
-/// Some Cloudflare-fronted sites (freewebnovel) challenge reqwest's TLS
-/// ClientHello fingerprint but accept curl's — even though both use Schannel on
-/// Windows. Rather than pull in a heavyweight TLS-impersonation stack, we defer
-/// to `curl`, which ships with Windows 10+ (and virtually everywhere else). Same
-/// politeness contract as Tier 1: base delay + jitter and bounded backoff
-/// retries on throttling / transient failures.
 pub struct CurlFetcher {
     config: FetchConfig,
 }
@@ -226,10 +184,6 @@ impl CurlFetcher {
     }
 }
 
-/// Run a prepared `curl` command, turning a missing binary into an actionable
-/// message. `curl` ships with Windows 10+ and macOS; on a minimal Linux install
-/// it may be absent, and only the Tier-2 sources (freewebnovel, scribblehub)
-/// need it.
 async fn run_curl(mut cmd: tokio::process::Command) -> Result<std::process::Output> {
     cmd.output().await.map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
@@ -291,7 +245,6 @@ impl Fetcher for CurlFetcher {
             .arg(url);
             let out = run_curl(cmd).await?;
 
-            // stdout is the body followed by "\n<status>" (from -w).
             let stdout = String::from_utf8_lossy(&out.stdout);
             let (body, status) = stdout.rsplit_once('\n').unwrap_or((stdout.as_ref(), ""));
             let code: u16 = status.trim().parse().unwrap_or(0);
@@ -300,7 +253,6 @@ impl Fetcher for CurlFetcher {
                 return Ok(body.to_string());
             }
 
-            // code == 0 means curl itself failed (network/timeout).
             let retryable = code == 0 || is_retryable_status(code);
             if retryable && attempt < self.config.max_retries {
                 let wait = backoff_delay(self.config.base_delay, attempt, self.config.max_delay);
@@ -403,10 +355,6 @@ impl Fetcher for CurlFetcher {
     }
 }
 
-/// A consistent, browser-like default header set. Some Cloudflare-fronted sites
-/// (e.g. freewebnovel) reject requests that carry a browser User-Agent but not
-/// the matching navigation and client-hint headers. Keep these consistent with
-/// `DEFAULT_UA` (Chrome 126 on Windows).
 fn browser_headers() -> HeaderMap {
     let mut h = HeaderMap::new();
     h.insert(
@@ -430,31 +378,24 @@ fn browser_headers() -> HeaderMap {
     h
 }
 
-/// Host portion of a URL, for keying per-host rate state.
 fn host_of(url: &str) -> Option<String> {
     url::Url::parse(url).ok()?.host_str().map(str::to_string)
 }
 
-/// Statuses worth retrying: rate-limit and transient server errors.
 fn is_retryable_status(code: u16) -> bool {
     matches!(code, 429 | 500 | 502 | 503 | 504)
 }
 
-/// Exponential backoff: `base * 2^(attempt+1)`, capped at `max`.
 fn backoff_delay(base: Duration, attempt: u32, max: Duration) -> Duration {
     let shift = (attempt + 1).min(16);
     let factor = 1u32 << shift;
     std::cmp::min(max, base.saturating_mul(factor))
 }
 
-/// Parse a `Retry-After` header. Only the delta-seconds form is honoured; the
-/// HTTP-date form is ignored (the caller falls back to computed backoff).
 fn parse_retry_after(value: &str) -> Option<Duration> {
     value.trim().parse::<u64>().ok().map(Duration::from_secs)
 }
 
-/// Add up to +40% random jitter to a delay, so requests aren't metronomic
-/// (a bot tell). Time-seeded — quality is irrelevant here.
 fn jitter(base: Duration) -> Duration {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -481,18 +422,13 @@ mod tests {
     fn detects_not_found_through_context() {
         let bare: anyhow::Error = anyhow!(NotFound { url: "https://x/c/190".into(), status: 404 });
         assert!(is_not_found(&bare));
-        // Still detected when a caller wraps it with context.
         let wrapped = bare.context("fetching chapter 190");
         assert!(is_not_found(&wrapped));
-        // A plain error is not a NotFound.
         assert!(!is_not_found(&anyhow!("GET x returned HTTP 503")));
     }
 
     #[tokio::test]
     async fn missing_curl_binary_gives_actionable_error() {
-        // A non-existent binary triggers the same NotFound path as a missing
-        // curl (relevant on minimal Linux). The message must name curl and hint
-        // at installing it rather than surfacing a bare OS error.
         let cmd = tokio::process::Command::new("vesper-no-such-binary-zzq");
         let err = run_curl(cmd).await.expect_err("spawning a missing binary must fail");
         let msg = err.to_string();
@@ -520,7 +456,6 @@ mod tests {
         assert_eq!(backoff_delay(base, 0, max), Duration::from_secs(2));
         assert_eq!(backoff_delay(base, 1, max), Duration::from_secs(4));
         assert_eq!(backoff_delay(base, 2, max), Duration::from_secs(8));
-        // Caps at max rather than overflowing.
         assert_eq!(backoff_delay(base, 20, max), max);
     }
 
@@ -528,7 +463,6 @@ mod tests {
     fn parses_retry_after_seconds() {
         assert_eq!(parse_retry_after("30"), Some(Duration::from_secs(30)));
         assert_eq!(parse_retry_after("  5 "), Some(Duration::from_secs(5)));
-        // HTTP-date form is not parsed.
         assert_eq!(parse_retry_after("Wed, 21 Oct 2026 07:28:00 GMT"), None);
     }
 

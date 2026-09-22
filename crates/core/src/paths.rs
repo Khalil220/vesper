@@ -1,15 +1,8 @@
-//! Where EPUBs land in the library.
-//!
-//! Layout: `<library>/<author>/<novel>/<file>.epub`. Each author is a folder;
-//! each of their novels is a folder beneath it (so an author with several novels
-//! gets sibling novel folders); the EPUB(s) live inside the novel folder. Every
-//! path component is sanitized for the filesystem.
 
 use std::path::{Path, PathBuf};
 
 use crate::util::sanitize_filename;
 
-/// Folder name used when a novel has no known author.
 pub const UNKNOWN_AUTHOR: &str = "Unknown Author";
 
 fn author_component(author: Option<&str>) -> String {
@@ -20,15 +13,12 @@ fn author_component(author: Option<&str>) -> String {
     sanitize_filename(name)
 }
 
-/// The folder that holds a novel's EPUB(s): `<library>/<author>/<novel>`.
 pub fn novel_dir(library: &Path, author: Option<&str>, title: &str) -> PathBuf {
     library
         .join(author_component(author))
         .join(sanitize_filename(title))
 }
 
-/// Full path to a novel's EPUB. `volume` produces `"<novel> - Vol NN.epub"`;
-/// `None` produces the single-file `"<novel>.epub"`.
 pub fn epub_path(library: &Path, author: Option<&str>, title: &str, volume: Option<u32>) -> PathBuf {
     let title_component = sanitize_filename(title);
     let filename = match volume {

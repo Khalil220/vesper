@@ -1,9 +1,4 @@
-//! Small cross-cutting helpers.
 
-/// Normalize a novel title for cross-source identity: lowercase, keep only
-/// alphanumerics (dropping spaces and punctuation). Lets the *same* novel titled
-/// slightly differently across sites ("Shadow Slave", "shadow-slave") compare
-/// equal, so a re-`subscribe` can be recognized as a duplicate.
 pub fn normalize_title(s: &str) -> String {
     s.chars()
         .filter(|c| c.is_alphanumeric())
@@ -11,11 +6,6 @@ pub fn normalize_title(s: &str) -> String {
         .collect()
 }
 
-/// Make a string safe to use as a Windows filename.
-///
-/// Strips the characters Windows forbids (`<>:"/\|?*` and control chars),
-/// trailing dots/spaces, and avoids reserved device names (CON, PRN, ...).
-/// Never returns an empty string.
 pub fn sanitize_filename(name: &str) -> String {
     const ILLEGAL: &[char] = &['<', '>', ':', '"', '/', '\\', '|', '?', '*'];
 
@@ -50,8 +40,6 @@ pub fn sanitize_filename(name: &str) -> String {
         trimmed
     };
 
-    // A title made entirely of illegal characters sanitizes to underscores,
-    // which is a useless filename; fall back to a placeholder.
     if out.is_empty() || out.chars().all(|c| c == '_') {
         "untitled".to_string()
     } else {
@@ -59,7 +47,6 @@ pub fn sanitize_filename(name: &str) -> String {
     }
 }
 
-/// Current wall-clock time as Unix seconds. Used for DB timestamps.
 pub fn now_unix() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
@@ -68,11 +55,6 @@ pub fn now_unix() -> i64 {
         .unwrap_or(0)
 }
 
-/// Strip a leading "Chapter N -/–/:/|" prefix from a table-of-contents link's
-/// text, leaving just the chapter's actual name. ToC entries look like
-/// "Chapter 1 - Cultivation Online"; we render our own "Chapter N:" prefix, so
-/// keeping the site's would double it. If the text is *only* the prefix (no real
-/// name), the original is returned unchanged.
 pub fn clean_chapter_title(raw: &str) -> String {
     let t = raw.trim();
     let bytes = t.as_bytes();
@@ -90,7 +72,6 @@ pub fn clean_chapter_title(raw: &str) -> String {
             while i < t.len() && bytes[i] == b' ' {
                 i += 1;
             }
-            // Skip one separator: ASCII '-'/':'/'|' or a Unicode en/em dash.
             if i < t.len() && (bytes[i] == b'-' || bytes[i] == b':' || bytes[i] == b'|') {
                 i += 1;
             } else if let Some(c) = t[i..].chars().next() {
@@ -110,21 +91,12 @@ pub fn clean_chapter_title(raw: &str) -> String {
     t.to_string()
 }
 
-/// Extract a chapter number from a URL with a `chapter-<n>` segment, e.g.
-/// `/novel/chapter-42-some-title.html` -> `42`.
 pub fn parse_chapter_number(url: &str) -> Option<u32> {
     let idx = url.find("chapter-")? + "chapter-".len();
     let digits: String = url[idx..].chars().take_while(|c| c.is_ascii_digit()).collect();
     digits.parse().ok()
 }
 
-/// Parse a chapter selection like `"152"`, `"152-154"` or `"1,5,10-20"` into
-/// the set of numbers it names.
-///
-/// Ranges are inclusive, because that is how a reader refers to chapters:
-/// "152-154" means all three. Chapter numbering starts at 1, so 0 is an error
-/// instead of being dropped. The commands built on this rewrite stored text, and
-/// a spec that doesn't mean what the user typed must not reach them.
 pub fn parse_chapter_spec(spec: &str) -> Result<std::collections::BTreeSet<u32>, String> {
     let mut out = std::collections::BTreeSet::new();
     for part in spec.split(',') {
@@ -132,8 +104,6 @@ pub fn parse_chapter_spec(spec: &str) -> Result<std::collections::BTreeSet<u32>,
         if part.is_empty() {
             continue;
         }
-        // Split on the *last* '-' so a leading minus reads as a bad number
-        // rather than an open range.
         match part.split_once('-') {
             Some((lo, hi)) => {
                 let lo: u32 = parse_number(lo)?;
@@ -176,12 +146,9 @@ mod tests {
 
     #[test]
     fn normalizes_titles_for_matching() {
-        // Same novel, different site formatting -> equal.
         assert_eq!(normalize_title("Shadow Slave"), normalize_title("shadow-slave"));
         assert_eq!(normalize_title("Pain Immunity: X!"), "painimmunityx");
-        // Distinct titles stay distinct.
         assert_ne!(normalize_title("Slime Evolution"), normalize_title("Slime Rancher"));
-        // Non-Latin titles survive (Chinese chars are alphanumeric).
         assert_eq!(normalize_title("陷阵营营长"), "陷阵营营长");
     }
 
@@ -221,9 +188,7 @@ mod tests {
             clean_chapter_title("Chapter 7 \u{2013} The Stone Tablets"),
             "The Stone Tablets"
         );
-        // Only a prefix, no real name -> keep original.
         assert_eq!(clean_chapter_title("Chapter 5"), "Chapter 5");
-        // Not a chapter-prefixed title -> unchanged.
         assert_eq!(clean_chapter_title("Prologue"), "Prologue");
     }
 
@@ -244,12 +209,9 @@ mod tests {
     fn parses_chapter_specs() {
         let set = |v: &[u32]| v.iter().copied().collect::<std::collections::BTreeSet<u32>>();
         assert_eq!(parse_chapter_spec("152").unwrap(), set(&[152]));
-        // Ranges are inclusive at both ends.
         assert_eq!(parse_chapter_spec("152-154").unwrap(), set(&[152, 153, 154]));
         assert_eq!(parse_chapter_spec("1,5,10-12").unwrap(), set(&[1, 5, 10, 11, 12]));
-        // Whitespace and overlap are tolerated; the result is a set.
         assert_eq!(parse_chapter_spec(" 3 , 1-3 ").unwrap(), set(&[1, 2, 3]));
-        // A single-number "range" is just that number.
         assert_eq!(parse_chapter_spec("7-7").unwrap(), set(&[7]));
     }
 

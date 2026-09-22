@@ -1,14 +1,3 @@
-//! Hand-written adapter for scribblehub.com.
-//!
-//! ScribbleHub is the hardest of the sources: Cloudflare rejects requests
-//! without a full browser header set (so it runs on the curl tier), and its
-//! table of contents is a WordPress admin-ajax **POST** (`wi_getreleases_
-//! pagination`), 15 chapters/page, newest-first. Chapter URLs use non-sequential
-//! ids and the "Chapter N" numbers don't match the count (prologues/interludes),
-//! so chapters are numbered by position, oldest-first.
-//!
-//! Series page gives `mypostid` and the total (`span.cnt_toc`); content is
-//! `#chp_raw`.
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
@@ -54,7 +43,6 @@ fn meta_prop(doc: &Html, property: &str) -> Option<String> {
         .map(|s| s.trim().to_string())
 }
 
-/// Strip a leading "Chapter N." / "N." numbering (we render our own prefix).
 fn clean_title(raw: &str) -> String {
     let mut t = raw.trim();
     if t.len() >= 8 && t[..8].eq_ignore_ascii_case("chapter ") {
@@ -84,7 +72,6 @@ fn parse_novel(html: &str, source_url: &str) -> Result<NovelMeta> {
         .ok_or_else(|| anyhow!("could not find a novel title on {source_url}"))?;
     let cover_url = meta_prop(&doc, "og:image")
         .filter(|s| !s.is_empty() && !s.contains("noimagefound"));
-    // Status is a `span.rnd_stats` whose text is a status keyword.
     let status_hint = doc
         .select(&sel("span.rnd_stats"))
         .map(|e| parse_status_hint(&e.text().collect::<String>()))
@@ -109,7 +96,6 @@ fn parse_post_id(html: &str) -> Option<String> {
         .map(|s| s.trim().to_string())
 }
 
-/// Total chapter count from `span.cnt_toc`.
 fn parse_total(html: &str) -> Option<u32> {
     let doc = Html::parse_document(html);
     let raw = text_of(&doc, ".cnt_toc")?;
@@ -117,7 +103,6 @@ fn parse_total(html: &str) -> Option<u32> {
     digits.parse().ok()
 }
 
-/// Parse `a.toc_a` chapter links from a ToC page: (absolute url, raw title).
 fn parse_toc_links(html: &str) -> Vec<(String, String)> {
     let doc = Html::parse_document(html);
     doc.select(&sel("a.toc_a"))
@@ -141,8 +126,6 @@ fn toc_body(page: u32, post_id: &str) -> String {
     format!("action=wi_getreleases_pagination&pagenum={page}&mypostid={post_id}")
 }
 
-/// Turn a newest-first list of (url, raw_title) into oldest-first chapter refs
-/// numbered from `start`.
 fn to_refs(mut newest_first: Vec<(String, String)>, start: u32) -> Vec<ChapterRef> {
     newest_first.reverse();
     newest_first
@@ -185,8 +168,6 @@ impl<F: Fetcher> Source for ScribbleHubSource<F> {
         let total = parse_total(&series).unwrap_or(0) as usize;
         let ajax = admin_ajax_url(url)?;
 
-        // POST each ToC page (newest-first). Stop at the total (so we never POST
-        // an out-of-range page, which returns 403) or a short/empty page.
         let mut collected: Vec<(String, String)> = Vec::new();
         let mut page_size = 15usize;
         let mut page = 1u32;
@@ -214,7 +195,6 @@ impl<F: Fetcher> Source for ScribbleHubSource<F> {
         Ok(to_refs(collected, 1))
     }
 
-    /// Cheap delta check: just the newest ToC page, numbered to end at the total.
     async fn discover_latest(&self, url: &str) -> Result<Vec<ChapterRef>> {
         let series = self.fetcher.get(url).await?;
         let post_id = parse_post_id(&series).ok_or_else(|| anyhow!("no mypostid on {url}"))?;
@@ -258,7 +238,6 @@ mod tests {
         </div>"#;
         let links = parse_toc_links(html);
         assert_eq!(links.len(), 2);
-        // to_refs reverses newest-first -> oldest-first and numbers from `start`.
         let refs = to_refs(links, 1);
         assert_eq!(refs[0].number, 1);
         assert_eq!(refs[0].title, "One");

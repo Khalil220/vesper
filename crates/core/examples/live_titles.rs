@@ -1,8 +1,3 @@
-//! Live smoke check: fetch a handful of real chapters through the actual
-//! adapter + fetch tier and print the parsed titles.
-//!
-//! Not part of `cargo test` (it hits the network). Run it by hand:
-//!   cargo run -p vesper-core --example live_titles -- <novel-url> 1 2 61 62
 
 use std::time::Duration;
 

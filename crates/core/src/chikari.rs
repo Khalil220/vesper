@@ -1,27 +1,3 @@
-//! Hand-written adapter for chikari.moe — the site lightnovelworld's novel
-//! library moved to.
-//!
-//! Why hand-written: chikari is a SvelteKit app whose chapter pages are
-//! client-rendered (the HTML served for `/novels/<slug>/<n>` is an empty app
-//! shell), so there is nothing to scrape. It does, however, publish a plain
-//! JSON API — the same one its own front end calls — documented at
-//! `/api/openapi.json`. Reading that is both more robust and far politer than
-//! scraping would be:
-//!
-//! - `GET /api/novels/<slug>` — metadata (title, authors, cover, status,
-//!   genres, chapter counts).
-//! - `GET /api/novels/<slug>/chapters?order=asc&limit=500&offset=N` — the real
-//!   table of contents, paginated. The server clamps `limit` to 500.
-//! - `GET /api/novels/<slug>/chapters/<n>/read` — one chapter; `body` is plain
-//!   text with paragraphs separated by newlines.
-//!
-//! **Discovery reads the list; it never generates `1..=N`.** chikari's chapter
-//! numbering has holes (deleted/merged chapters — `latest_number` runs ahead of
-//! `stored_chapter_count` for roughly half the catalogue), and those numbers
-//! 404 on the read endpoint. Because the ToC endpoint returns only the numbers
-//! that actually exist, Vesper never requests a dead one, so this source
-//! produces no 404 gaps at all — unlike lightnovelworld, where the count was
-//! all we had and the missing numbers had to be discovered by hitting them.
 
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
@@ -35,13 +11,8 @@ use crate::util::clean_chapter_title;
 
 pub const HOST: &str = "chikari.moe";
 
-/// Page size for ToC requests. The API silently clamps anything larger, so
-/// asking for more just wastes the round trip.
 const PAGE_LIMIT: u32 = 500;
 
-/// How many of the newest chapters a delta check pulls. One request, and wide
-/// enough to cover a burst of releases between syncs; if it still isn't enough,
-/// `sync` notices the hole and falls back to a full walk.
 const LATEST_WINDOW: u32 = 60;
 
 pub struct ChikariSource<F: Fetcher> {
@@ -58,13 +29,6 @@ impl<F: Fetcher> ChikariSource<F> {
         serde_json::from_str(&text).with_context(|| format!("parsing JSON from {url}"))
     }
 
-    /// Find a novel's slug by title, for when a known slug no longer resolves.
-    ///
-    /// Matching is on the *normalized* title (the same comparison `subscribe`
-    /// uses for duplicates), so punctuation and spacing differences between
-    /// sites don't defeat it. Returns `None` rather than a near-miss: silently
-    /// binding a subscription to the wrong novel is far worse than reporting
-    /// that it couldn't be found.
     pub async fn find_slug_by_title(&self, title: &str) -> Result<Option<String>> {
         let query: String = url::form_urlencoded::byte_serialize(title.as_bytes()).collect();
         let url = format!("https://{HOST}/api/novels/search?q={query}&limit=20");
@@ -72,8 +36,6 @@ impl<F: Fetcher> ChikariSource<F> {
         Ok(match_slug_by_title(&json, title))
     }
 
-    /// One page of the table of contents. Returns the refs plus the reported
-    /// total, so the caller knows when to stop paging.
     async fn chapter_page(
         &self,
         slug: &str,
@@ -89,9 +51,6 @@ impl<F: Fetcher> ChikariSource<F> {
     }
 }
 
-/// The novel slug from a chikari URL. Accepts the novel page
-/// (`/novels/<slug>`), a chapter page (`/novels/<slug>/<n>`), and the bare
-/// `/novel/<slug>` singular form a hand-typed or migrated URL might carry.
 fn slug_from_url(url: &str) -> Result<String> {
     let parsed = Url::parse(url).with_context(|| format!("parsing {url}"))?;
     let mut segments = parsed
@@ -109,7 +68,6 @@ fn slug_from_url(url: &str) -> Result<String> {
     Ok(slug.to_string())
 }
 
-/// The canonical novel URL Vesper stores for a chikari novel.
 pub fn novel_url(slug: &str) -> String {
     format!("https://{HOST}/novels/{slug}")
 }
@@ -123,13 +81,6 @@ fn str_field(v: &Value, key: &str) -> Option<String> {
     (!s.is_empty()).then(|| s.to_string())
 }
 
-/// A chapter number as Vesper's schema needs it: a positive integer.
-///
-/// The API types `number` as a float. Every chapter observed across the
-/// catalogue is integral, but a fractional number (a "12.5" side chapter) can't
-/// be stored — `chapters` is keyed by an integer number — and rounding one would
-/// silently collide with, and overwrite, a real neighbouring chapter. So a
-/// non-integral number is skipped rather than mangled.
 fn chapter_number(v: &Value) -> Option<u32> {
     let n = v.get("number")?.as_f64()?;
     if !n.is_finite() || n < 1.0 || n.fract() != 0.0 || n > u32::MAX as f64 {
@@ -138,8 +89,6 @@ fn chapter_number(v: &Value) -> Option<u32> {
     Some(n as u32)
 }
 
-/// Author from the `authors` array, preferring the one credited as the author
-/// over a translator or artist.
 fn parse_author(v: &Value) -> Option<String> {
     let authors = v.get("authors")?.as_array()?;
     let pick = authors
@@ -149,8 +98,6 @@ fn parse_author(v: &Value) -> Option<String> {
     str_field(pick, "name")
 }
 
-/// Genres as a comma-separated list, matching what the other adapters put in
-/// `NovelMeta::genre` (it becomes the EPUB's `dc:subject`).
 fn parse_genres(v: &Value) -> Option<String> {
     let names: Vec<String> = v
         .get("genres")?
@@ -161,9 +108,6 @@ fn parse_genres(v: &Value) -> Option<String> {
     (!names.is_empty()).then(|| names.join(", "))
 }
 
-/// Pick the search hit whose title matches `title` once normalized. The API
-/// returns either a bare array or an `{ "items": [...] }` envelope depending on
-/// the endpoint, so accept both.
 fn match_slug_by_title(json: &Value, title: &str) -> Option<String> {
     let items = json
         .as_array()
@@ -197,8 +141,6 @@ fn parse_novel(json: &Value, source_url: &str) -> Result<NovelMeta> {
     })
 }
 
-/// One page of `/chapters`: the refs it lists (skipping unusable numbers) and
-/// the total chapter count the server reports.
 fn parse_chapter_page(json: &Value, slug: &str) -> Result<(Vec<ChapterRef>, u32)> {
     let items = json
         .get("items")
@@ -223,11 +165,6 @@ fn parse_chapter_page(json: &Value, slug: &str) -> Result<(Vec<ChapterRef>, u32)
     Ok((refs, total))
 }
 
-/// A chapter's display title. The site stores it with its own "Chapter N"
-/// prefix — and often a duplicated "N:" after that ("Chapter 1 - 1: Nightmare
-/// Begins") — while Vesper renders its own prefix at EPUB build time, so both
-/// are stripped. Note the site's prefix number is its *display* number, which
-/// can differ from the canonical `number` the URL uses.
 fn chapter_title(item: &Value, number: u32) -> String {
     let raw = str_field(item, "title").unwrap_or_default();
     let cleaned = strip_leading_number_colon(&clean_chapter_title(&raw));
@@ -249,15 +186,8 @@ fn strip_leading_number_colon(s: &str) -> String {
     }
 }
 
-/// Inline tags chikari permits inside a chapter body. The body is *plain text*,
-/// not HTML — the reader escapes `&`, `<` and `>` wholesale and then re-enables
-/// exactly this set — so these arrive as literal characters and would otherwise
-/// end up visible in the EPUB, whose paragraphs are XML-escaped.
 const INLINE_TAGS: &[&str] = &["em", "strong", "i", "b", "u", "s", "sup", "sub", "br"];
 
-/// Drop chikari's inline markup, leaving the prose. Anything that isn't one of
-/// the recognised tags is kept verbatim — a stray `<` in dialogue is text, not
-/// markup, and must survive.
 fn strip_inline_markup(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out = String::with_capacity(s.len());
@@ -265,12 +195,6 @@ fn strip_inline_markup(s: &str) -> String {
     while i < s.len() {
         if bytes[i] == b'<' {
             if let Some(end) = inline_tag_end(s, i) {
-                // chikari's import dropped whitespace that sat beside inline
-                // markup, so bodies arrive with `have a<strong>[+1]</strong>next
-                // to it` where the words need separating. Put a space back only
-                // where two *word* characters would otherwise weld together —
-                // never around punctuation, which is where the site's text is
-                // already right (`Vance</strong>'s`, `[Lv 2]</strong>,`).
                 if welds_words(out.chars().next_back(), s[end..].chars().next()) {
                     out.push(' ');
                 }
@@ -278,7 +202,6 @@ fn strip_inline_markup(s: &str) -> String {
                 continue;
             }
         }
-        // Step by whole characters so multi-byte prose isn't split.
         let ch = s[i..].chars().next().expect("index is on a char boundary");
         out.push(ch);
         i += ch.len_utf8();
@@ -286,20 +209,6 @@ fn strip_inline_markup(s: &str) -> String {
     out
 }
 
-/// Whether dropping a tag between these two characters would run two words
-/// together, so a space belongs in its place.
-///
-/// Only between characters that can start or end a word. Punctuation is
-/// excluded on the side it hugs, because that is where chikari's text is
-/// already correct: a space inserted there produces `Vance 's` or `[Lv 2] ,`.
-/// Note the same chapters downloaded from lightnovelworld *do* carry those
-/// artifacts — it space-joined mechanically — so matching its output is not
-/// the goal here and would make the text worse.
-///
-/// CJK is excluded entirely: it separates no words with spaces, so inserting
-/// one is corruption rather than repair. Korean does use spaces but sits above
-/// the same cutoff, so it keeps chikari's spacing rather than risking a wrong
-/// one.
 fn welds_words(before: Option<char>, after: Option<char>) -> bool {
     let (Some(b), Some(a)) = (before, after) else {
         return false;
@@ -313,8 +222,6 @@ fn welds_words(before: Option<char>, after: Option<char>) -> bool {
     !hugs_what_precedes(a) && !hugs_what_follows(b)
 }
 
-/// Punctuation that attaches to the word before it, so nothing may be inserted
-/// in front of it: `word</em>,` must not become `word ,`.
 fn hugs_what_precedes(c: char) -> bool {
     matches!(
         c,
@@ -323,8 +230,6 @@ fn hugs_what_precedes(c: char) -> bool {
     )
 }
 
-/// Punctuation that attaches to the word after it, so nothing may be inserted
-/// behind it: `(<em>word` must not become `( word`.
 fn hugs_what_follows(c: char) -> bool {
     matches!(
         c,
@@ -336,13 +241,11 @@ fn is_space_separated(c: char) -> bool {
     (c as u32) < 0x2E80
 }
 
-/// If `s[start..]` opens a recognised inline tag, the index just past its `>`.
 fn inline_tag_end(s: &str, start: usize) -> Option<usize> {
     let rest = &s[start + 1..];
     let close = rest.find('>')?;
     let inner = rest[..close].trim();
     let name = inner.strip_prefix('/').unwrap_or(inner);
-    // `<br/>` and `<br />` also end with a slash.
     let name = name.strip_suffix('/').unwrap_or(name).trim();
     INLINE_TAGS
         .iter()
@@ -350,9 +253,6 @@ fn inline_tag_end(s: &str, start: usize) -> Option<usize> {
         .then_some(start + 1 + close + 1)
 }
 
-/// Split a chapter body into paragraphs. chikari separates them with newlines
-/// (single or blank-line-doubled); its own reader treats every newline as a
-/// break, so we do too.
 fn body_paragraphs(body: &str) -> Vec<String> {
     body.split('\n')
         .map(|line| strip_inline_markup(line).trim().to_string())
@@ -361,9 +261,6 @@ fn body_paragraphs(body: &str) -> Vec<String> {
 }
 
 fn parse_read(json: &Value, fallback: &ChapterRef) -> Result<Chapter> {
-    // An early-access chapter comes back flagged rather than as an error. It has
-    // no prose to store, so treat it as "not available yet" — a transient
-    // failure that sync retries, not a permanent hole.
     if json.get("locked").and_then(Value::as_bool).unwrap_or(false) {
         let reason = str_field(json, "lock_reason").unwrap_or_else(|| "locked".into());
         return Err(anyhow!(
@@ -409,15 +306,12 @@ impl<F: Fetcher> Source for ChikariSource<F> {
         let json = self
             .get_json(&format!("https://{HOST}/api/novels/{slug}"))
             .await?;
-        // Store the canonical novel URL rather than whatever form was passed in.
         parse_novel(&json, &novel_url(&slug))
     }
 
     async fn discover_chapters(&self, url: &str, needed: Option<usize>) -> Result<Vec<ChapterRef>> {
         let slug = slug_from_url(url)?;
 
-        // With a `needed` hint, page from the *newest* end and stop once that
-        // many are in hand — the caller wants the recent tail, not the oldest N.
         let descending = needed.is_some();
         let order = if descending { "desc" } else { "asc" };
 
@@ -428,8 +322,6 @@ impl<F: Fetcher> Source for ChikariSource<F> {
             if page.is_empty() {
                 break;
             }
-            // Advance by the page's raw length, not by how many refs survived
-            // filtering, or an unusable number would shift every later offset.
             offset = offset.saturating_add(PAGE_LIMIT.min(page.len() as u32));
             out.extend(page);
             if let Some(n) = needed {
@@ -460,7 +352,6 @@ impl<F: Fetcher> Source for ChikariSource<F> {
     }
 }
 
-/// chikari serves the same app on the bare domain and `www.`.
 pub fn is_chikari_host(host: &str) -> bool {
     let host = host.trim_start_matches("www.");
     host.eq_ignore_ascii_case(HOST)
@@ -514,22 +405,17 @@ mod tests {
         assert_eq!(slug_from_url("https://chikari.moe/novels/shadow-slave").unwrap(), "shadow-slave");
         assert_eq!(slug_from_url("https://chikari.moe/novels/shadow-slave/").unwrap(), "shadow-slave");
         assert_eq!(slug_from_url("https://chikari.moe/novels/shadow-slave/42").unwrap(), "shadow-slave");
-        // Singular form, as a hand-typed or migrated URL might carry.
         assert_eq!(slug_from_url("https://chikari.moe/novel/shadow-slave").unwrap(), "shadow-slave");
-        // Not a novel URL.
         assert!(slug_from_url("https://chikari.moe/series/one-piece").is_err());
         assert!(slug_from_url("https://chikari.moe/novels").is_err());
     }
 
-    /// The ToC is the authority: numbers absent from it (site holes) are never
-    /// generated, so they're never requested and never become 404 gaps.
     #[test]
     fn discovery_lists_only_the_numbers_the_site_reports() {
         let page = json!({
             "items": [
                 {"number": 1.0, "title": "Chapter 1 - 1: Nightmare Begins"},
                 {"number": 2.0, "title": "Chapter 2 Slave Caravan"},
-                // 3 is missing on the site — a deleted chapter.
                 {"number": 4.0, "title": "Chapter 4: The Fourth"}
             ],
             "total": 3
@@ -546,8 +432,6 @@ mod tests {
         );
     }
 
-    /// A fractional number can't be stored and must not be rounded into a
-    /// neighbour's slot — it is dropped instead.
     #[test]
     fn fractional_chapter_numbers_are_skipped_not_rounded() {
         let page = json!({
@@ -567,7 +451,6 @@ mod tests {
         let page = json!({"items": [{"number": 7.0, "title": "Chapter 7"}], "total": 1});
         let (refs, _) = parse_chapter_page(&page, "x").unwrap();
         assert_eq!(refs[0].title, "Chapter 7");
-        // Missing title entirely still yields something usable.
         let page = json!({"items": [{"number": 8.0}], "total": 1});
         let (refs, _) = parse_chapter_page(&page, "x").unwrap();
         assert_eq!(refs[0].title, "Chapter 8");
@@ -615,19 +498,14 @@ mod tests {
         );
     }
 
-    /// Multi-byte prose must survive the markup scan intact.
     #[test]
     fn non_ascii_prose_is_not_mangled() {
         let v = json!({"number": 3.0, "title": "", "body": "「こんにちは」と<b>言った</b>。\nDash — and é."});
         let ch = parse_read(&v, &a_ref(3)).unwrap();
         assert_eq!(ch.paragraphs, vec!["「こんにちは」と言った。", "Dash — and é."]);
-        // Empty title falls back to the ref's.
         assert_eq!(ch.title, "Chapter 3");
     }
 
-    /// A locked (early-access) chapter is a "not yet", not a permanent hole:
-    /// it must surface as an ordinary error so sync retries it rather than
-    /// recording a gap or storing an empty chapter.
     #[test]
     fn locked_chapter_is_a_retryable_error() {
         let v = json!({
@@ -654,15 +532,11 @@ mod tests {
             {"slug": "shadow-slave-2", "title": "Shadow Slave: Side Stories"},
             {"slug": "shadow-slave", "title": "Shadow  Slave!"}
         ]);
-        // Punctuation and spacing differences still match...
         assert_eq!(
             match_slug_by_title(&results, "Shadow Slave").as_deref(),
             Some("shadow-slave")
         );
-        // ...but a merely similar title does not, so a subscription is never
-        // silently bound to the wrong novel.
         assert_eq!(match_slug_by_title(&results, "Shadow Slaves"), None);
-        // The `{items: [...]}` envelope form is accepted too.
         let enveloped = json!({"items": [{"slug": "x", "title": "A Novel"}]});
         assert_eq!(match_slug_by_title(&enveloped, "A Novel").as_deref(), Some("x"));
     }
@@ -676,9 +550,6 @@ mod tests {
         assert!(!src.matches("https://notchikari.moe/novels/x"));
     }
 
-    /// chikari's import dropped whitespace next to inline markup, so stripping
-    /// a tag has to put it back or words weld together — `</em>Devon` where the
-    /// original read `</em> Devon`.
     #[test]
     fn restores_the_space_the_site_dropped_beside_markup() {
         let v = json!({
@@ -696,7 +567,6 @@ mod tests {
         );
     }
 
-    /// ...but CJK separates no words with spaces, so it must not gain any.
     #[test]
     fn does_not_inject_spaces_into_cjk_prose() {
         let v = json!({
@@ -711,16 +581,12 @@ mod tests {
         );
     }
 
-    /// Patterns taken from real chapters. The rule has to separate welded
-    /// words without touching punctuation the site already gets right.
     #[test]
     fn spacing_matches_what_the_prose_actually_needs() {
         let cases = [
-            // Words welded by stripped markup gain a space...
             ("to finally have a<strong>[+1]</strong>next to it.", "to finally have a [+1] next to it."),
             ("<strong>[Name:</strong>Lisa", "[Name: Lisa"),
             ("<strong>Level:</strong>03", "Level: 03"),
-            // ...but punctuation keeps hugging its word.
             ("hologram,<strong>Isabella Vance</strong>\u{2019}s heart", "hologram, Isabella Vance\u{2019}s heart"),
             ("with<strong>[Aptitude Lv 2]</strong>, he heard", "with [Aptitude Lv 2], he heard"),
             ("<strong>Status:</strong>Online<strong>]</strong>", "Status: Online]"),

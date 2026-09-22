@@ -1,15 +1,3 @@
-//! Hand-written adapter for freewebnovel.com.
-//!
-//! freewebnovel doesn't fit the generic profile: its table of contents is
-//! paginated by JavaScript/AJAX (the static dropdown options are placeholder
-//! URLs), so there's no scrapable `?page=N`. But it doesn't need one — chapter
-//! URLs are sequential (`/novel/<slug>/chapter-<n>`) and the landing page
-//! exposes `data-total-chapters`, so we generate the whole chapter list from a
-//! single request. Metadata and chapter bodies reuse the shared extractors.
-//!
-//! Cloudflare here gates on User-Agent (a browser UA returns 200; a bot UA gets
-//! a challenge), which the Tier-1 fetcher already sends — so no higher tier is
-//! needed.
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
@@ -226,7 +214,6 @@ pub fn strip_promo_paragraphs(paragraphs: &[String]) -> Vec<String> {
     cleaned
 }
 
-/// Strip any query/fragment from the novel URL so we can append `/chapter-N`.
 fn novel_base(url: &str) -> String {
     match Url::parse(url) {
         Ok(mut u) => {
@@ -274,7 +261,6 @@ impl<F: Fetcher> Source for FreewebnovelSource<F> {
         let html = self.fetcher.get(&chapter.url).await?;
         let paragraphs = parse_chapter_body(&html, CONTENT_SELECTOR, PARAGRAPH_SELECTOR)?;
         let paragraphs = strip_promo_paragraphs(&paragraphs);
-        // Prefer the real title from the page; fall back to the placeholder.
         let title = parse_chapter_title(&html).unwrap_or_else(|| chapter.title.clone());
         Ok(Chapter {
             number: chapter.number,
@@ -284,7 +270,6 @@ impl<F: Fetcher> Source for FreewebnovelSource<F> {
     }
 }
 
-/// Read `data-total-chapters="N"` from the landing page.
 fn parse_total_chapters(html: &str) -> Option<u32> {
     let doc = Html::parse_document(html);
     let sel = Selector::parse("[data-total-chapters]").ok()?;
@@ -297,14 +282,6 @@ fn parse_total_chapters(html: &str) -> Option<u32> {
         .ok()
 }
 
-/// Pull the chapter's name from the `<title>`, which looks like
-/// "Novel - Chapter N | Name | Free Web Novel" (some older chapters separate
-/// the name with a space or a dash instead of the pipe). Anchors on
-/// " - Chapter " so a novel name containing " - " doesn't break it.
-///
-/// The site name is trimmed off the *end*, not by splitting on the first `|` —
-/// the pipe before the chapter name is the same character, so splitting from
-/// the front threw the name away and left a bare "Chapter N".
 fn parse_chapter_title(html: &str) -> Option<String> {
     let doc = Html::parse_document(html);
     let sel = Selector::parse("title").ok()?;
@@ -315,8 +292,6 @@ fn parse_chapter_title(html: &str) -> Option<String> {
     (!cleaned.is_empty()).then_some(cleaned)
 }
 
-/// Drop the trailing "| Free Web Novel" branding, leaving any earlier `|` (the
-/// one separating "Chapter N" from its name) intact.
 fn strip_site_suffix(title: &str) -> &str {
     match title.rsplit_once('|') {
         Some((head, tail)) if tail.trim().eq_ignore_ascii_case("Free Web Novel") => head.trim(),
@@ -361,8 +336,6 @@ mod tests {
         assert_eq!(parse_chapter_title(&html).as_deref(), Some("How It All Began"));
     }
 
-    /// The common freewebnovel shape: the chapter name is separated from
-    /// "Chapter N" by a pipe, the same character the site-name suffix uses.
     #[test]
     fn parses_chapter_title_separated_by_pipe() {
         let html = title_html(
@@ -371,8 +344,6 @@ mod tests {
         assert_eq!(parse_chapter_title(&html).as_deref(), Some("The Three Wives"));
     }
 
-    /// A name containing a comma/pipe-free run still survives the end-anchored
-    /// suffix strip.
     #[test]
     fn parses_chapter_title_with_punctuation() {
         let html = title_html(
@@ -384,7 +355,6 @@ mod tests {
         );
     }
 
-    /// Some chapters omit the separator entirely.
     #[test]
     fn parses_chapter_title_separated_by_space() {
         let html = title_html(
@@ -393,8 +363,6 @@ mod tests {
         assert_eq!(parse_chapter_title(&html).as_deref(), Some("Gifts & Forgiveness"));
     }
 
-    /// No name on the page — the caller's "Chapter N" placeholder is what we
-    /// end up with either way.
     #[test]
     fn unnamed_chapter_falls_back_to_number() {
         let html = title_html("The Bloodline System - Chapter 5 | Free Web Novel");

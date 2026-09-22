@@ -1,7 +1,3 @@
-//! `vesper` CLI.
-//!
-//! Runs on a current-thread Tokio runtime: the SQLite connection is not `Send`,
-//! and a poller has no need for a multi-threaded work-stealing runtime anyway.
 
 mod service;
 
@@ -170,8 +166,6 @@ enum Command {
         delay_ms: Option<u64>,
     },
     /// Manage the background sync task (install/uninstall/status).
-    // `-h`/`--help` already covers this; clap's generated `help` subcommand is
-    // a second way to say the same thing.
     #[command(disable_help_subcommand = true)]
     Service {
         #[command(subcommand)]
@@ -210,12 +204,8 @@ enum ServiceAction {
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    // Loading also generates config.ini with defaults on first run.
     let config = Config::load_or_create()?;
 
-    // One-shot library migrations, before the command runs so it sees the
-    // migrated library. Skipped for commands that don't touch it, so `config`
-    // or `service status` never pays for a network probe.
     if cli.cmd.touches_library() {
         run_pending_migrations(&config).await;
     }
@@ -261,9 +251,6 @@ async fn main() -> Result<()> {
 }
 
 impl Command {
-    /// Whether this command reads or writes the library DB. Migrations only run
-    /// for those — there's no reason for `vesper config` to open the library,
-    /// let alone go to the network.
     fn touches_library(&self) -> bool {
         !matches!(
             self,
@@ -272,16 +259,9 @@ impl Command {
     }
 }
 
-/// Apply any pending one-shot library migration, reporting what changed.
-///
-/// Best-effort by design: a migration that can't finish (offline, site down)
-/// must never stop the command the user actually asked for. It leaves its
-/// marker unset and runs again next launch.
 async fn run_pending_migrations(config: &Config) {
     let store = match Store::open_default() {
         Ok(s) => s,
-        // The command is about to open the library itself and will report the
-        // real error with proper context; don't pre-empt it with a duplicate.
         Err(_) => return,
     };
     let delay = Duration::from_millis(config.request_delay_ms);
@@ -292,8 +272,6 @@ async fn run_pending_migrations(config: &Config) {
     }
 }
 
-/// Print what the lightnovelworld -> chikari migration did. Quiet when there
-/// was nothing to move.
 fn report_migration(report: &MigrationReport) {
     if report.is_empty() {
         return;
@@ -341,8 +319,6 @@ fn source_for(url: &str, delay_ms: u64) -> Result<Box<dyn Source>> {
         .ok_or_else(|| anyhow!("no known source handles this URL: {url}"))
 }
 
-/// Build a source adapter per stored source (priority order), skipping any whose
-/// host we have no adapter for.
 fn build_sources(novel: &StoredNovel, delay_ms: u64) -> Result<Vec<(StoredSource, Box<dyn Source>)>> {
     let mut sources = Vec::new();
     for s in &novel.sources {
@@ -354,9 +330,6 @@ fn build_sources(novel: &StoredNovel, delay_ms: u64) -> Result<Vec<(StoredSource
     Ok(sources)
 }
 
-/// Build a novel's EPUB(s) from stored chapters, honouring the split setting.
-/// Returns the written paths; marks all chapters exported. Embeds the cover if
-/// one can be downloaded (best-effort).
 async fn export_novel(store: &Store, novel: &StoredNovel, config: &Config) -> Result<Vec<PathBuf>> {
     let chapters = store.load_chapters(novel.id)?;
     if chapters.is_empty() {
@@ -400,7 +373,6 @@ fn write_epubs(
             &meta.title,
             Some((i + 1) as u32),
         );
-        // Only list gaps that fall within this volume's chapter range.
         let vol_gaps: Vec<u32> = match (chunk.first(), chunk.last()) {
             (Some(f), Some(l)) => {
                 gaps.iter().copied().filter(|g| *g >= f.number && *g <= l.number).collect()
@@ -413,15 +385,6 @@ fn write_epubs(
     Ok(paths)
 }
 
-/// After a sync/fetch: re-evaluate completion and run auto-export/append.
-/// Export a novel, recording the outcome so a locked EPUB is retried by the
-/// next sync instead of being quietly skipped. Returns the files written, which
-/// is empty when the novel has no chapters or the export had to be deferred.
-///
-/// Shared by the sync path and by the commands that rewrite stored text.
-/// Rewriting a chapter clears its `exported` flag but produces no new or
-/// upgraded chapters, so a later sync would never export on its own and the
-/// EPUB would sit stale against a corrected library.
 async fn export_and_track(store: &Store, config: &Config, novel: &StoredNovel) -> Vec<PathBuf> {
     match export_novel(store, novel, config).await {
         Ok(paths) => {
@@ -452,7 +415,6 @@ async fn post_sync(
 
     let just_caught_up =
         prev_state == DerivedState::Backfilling && report.new_state == DerivedState::Live;
-    // New chapters or content upgrades both make an existing EPUB stale.
     let content_changed = report.newly_fetched > 0 || report.upgraded > 0;
     let gained_new =
         content_changed && matches!(prev_state, DerivedState::Live | DerivedState::LikelyComplete);
@@ -478,8 +440,6 @@ async fn post_sync(
     Ok(())
 }
 
-/// Append a timestamped line to the log file (best-effort). Used by `sync` so
-/// windowless background runs leave a trail (their stderr is discarded).
 fn log_line(config: &Config, msg: &str) {
     if let Some(parent) = config.log_path.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -489,16 +449,10 @@ fn log_line(config: &Config, msg: &str) {
     }
 }
 
-/// Current local wall-clock time, e.g. `2026-07-17 21:39:12`. Local (not UTC) so
-/// the log reads naturally; DST is handled by the OS via `chrono::Local`.
 fn local_timestamp() -> String {
     chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string()
 }
 
-/// One-line summary of a novel's unavailable (404-gap) chapters, or "" if none.
-/// A capped, comma-separated chapter-number list ("1, 2, 3, … (+9 more)").
-/// Kept separate from any wording about *why* the numbers are interesting, so
-/// callers don't inherit a caption that doesn't apply to them.
 fn describe_numbers(numbers: &BTreeSet<u32>) -> String {
     const CAP: usize = 15;
     let mut list = numbers.iter().take(CAP).map(|n| n.to_string()).collect::<Vec<_>>().join(", ");
@@ -519,11 +473,6 @@ fn describe_gaps(gaps: &BTreeSet<u32>) -> String {
     )
 }
 
-/// A single-line, self-overwriting `n/m` progress indicator on stderr. It draws
-/// only when stderr is a terminal, so piped, redirected, and windowless
-/// background runs stay clean (they get the final summary line instead). The
-/// line updates in place with a carriage return and is erased on `finish`, so
-/// the summary that follows starts on a clean line.
 struct ProgressBar {
     enabled: bool,
     last_len: usize,
@@ -531,9 +480,6 @@ struct ProgressBar {
 
 impl ProgressBar {
     fn new() -> Self {
-        // Draw when stderr is a terminal; `VESPER_FORCE_PROGRESS` forces it on
-        // for cases where detection is wrong (some multiplexers / CI) or to make
-        // the raw output observable when capturing.
         let forced = std::env::var_os("VESPER_FORCE_PROGRESS").is_some();
         Self {
             enabled: forced || std::io::stderr().is_terminal(),
@@ -549,7 +495,6 @@ impl ProgressBar {
             SyncProgress::Fetching { done, total } => format!("  Fetching {done}/{total}..."),
             SyncProgress::Upgrading { done, total } => format!("  Upgrading {done}/{total}..."),
         };
-        // Pad over any leftover from a previously longer line, then reset to col 0.
         let pad = " ".repeat(self.last_len.saturating_sub(msg.len()));
         let mut err = std::io::stderr();
         let _ = write!(err, "\r{msg}{pad}");
@@ -575,11 +520,6 @@ fn acquire_sync_lock() -> Result<Option<File>> {
     try_lock_file(&lock_path)
 }
 
-/// Take an exclusive advisory lock on `path`, returning the held `File` on
-/// success or `None` if another process already holds it. Cross-platform via
-/// `fs2` (LockFileEx on Windows, `flock` on Unix) — this is what makes
-/// overlapping `sync` runs skip on every platform, not just Windows. The lock is
-/// released when the returned `File` is dropped (i.e. at the end of the run).
 fn try_lock_file(path: &Path) -> Result<Option<File>> {
     use fs2::FileExt;
     if let Some(parent) = path.parent() {
@@ -593,10 +533,6 @@ fn try_lock_file(path: &Path) -> Result<Option<File>> {
     }
 }
 
-/// Whether a `try_lock_exclusive` error means "already locked by someone else".
-/// On Unix `flock` returns `EWOULDBLOCK`, which std maps to `WouldBlock`; on
-/// Windows `LockFileEx` returns `ERROR_LOCK_VIOLATION` (os error 33), which it
-/// does not, so match that explicitly.
 fn lock_would_block(e: &std::io::Error) -> bool {
     e.kind() == std::io::ErrorKind::WouldBlock || (cfg!(windows) && e.raw_os_error() == Some(33))
 }
@@ -608,10 +544,6 @@ async fn subscribe(config: &Config, url: String, force: bool, delay_ms: Option<u
 
     let store = Store::open_default()?;
 
-    // Guard against forking a novel you already follow (the same story is titled
-    // differently across sites, so this matches on a normalized title). To add
-    // another source use `add-source`; `--force` overrides for a genuine distinct
-    // novel.
     if !force {
         if let Some(existing) = store.find_novel_by_normalized_title(&meta.title)? {
             let from = existing
@@ -650,9 +582,6 @@ async fn add_source(config: &Config, novel: String, url: String, delay_ms: Optio
 
     eprintln!("Checking new source...");
     if let Ok(meta) = source.fetch_novel(&url).await {
-        // Compare normalized (case/spacing/punctuation-insensitive) so a curly vs
-        // straight apostrophe — or any punctuation difference between sites —
-        // doesn't trip a spurious "different title" warning.
         use vesper_core::util::normalize_title;
         if normalize_title(&meta.title) != normalize_title(&found.title) {
             eprintln!(
@@ -666,8 +595,6 @@ async fn add_source(config: &Config, novel: String, url: String, delay_ms: Optio
     let sid = store.add_source(found.id, source.name(), &url)?;
     println!("Added {} as a fallback source (#{sid}) for \"{}\".", source.name(), found.title);
 
-    // If the novel has gaps, re-open its backfill so the next sync does a full
-    // walk and tries to fill those holes from the new source.
     if !store.unfilled_gaps(found.id)?.is_empty() {
         store.set_derived_state(found.id, DerivedState::Backfilling)?;
         println!("  It has unavailable chapters; the next sync will try to fill them from this source.");
@@ -675,8 +602,6 @@ async fn add_source(config: &Config, novel: String, url: String, delay_ms: Optio
     Ok(())
 }
 
-/// Re-fetch one novel's metadata from its primary source and update the row.
-/// Returns `Some((old, new))` if the author (and thus the export path) changed.
 async fn refresh_one(store: &Store, novel: &StoredNovel, delay_ms: u64) -> Result<Option<(String, String)>> {
     let primary = novel
         .primary_source()
@@ -690,8 +615,6 @@ async fn refresh_one(store: &Store, novel: &StoredNovel, delay_ms: u64) -> Resul
     Ok((old != new).then_some((old, new)))
 }
 
-/// Re-read every stored chapter's title from the primary source and overwrite
-/// the ones that differ. One request per chapter, so it's deliberately opt-in.
 async fn retitle_one(store: &Store, novel: &StoredNovel, delay_ms: u64) -> Result<usize> {
     let primary = novel
         .primary_source()
@@ -702,8 +625,6 @@ async fn retitle_one(store: &Store, novel: &StoredNovel, delay_ms: u64) -> Resul
     if have.is_empty() {
         return Ok(0);
     }
-    // Discovery gives us the per-chapter URLs; only chapters we actually store
-    // are worth a request.
     let refs = source.discover_chapters(&primary.url, None).await?;
     let mut progress = ProgressBar::new();
     let total = have.len();
@@ -719,7 +640,6 @@ async fn retitle_one(store: &Store, novel: &StoredNovel, delay_ms: u64) -> Resul
                     fixed += 1;
                 }
             }
-            // A chapter that 404s now keeps whatever title it already has.
             Err(e) => eprintln!("\n  ! chapter {} — {e}", r.number),
         }
     }
@@ -855,11 +775,6 @@ fn subs(gaps_only: bool) -> Result<()> {
     Ok(())
 }
 
-/// Re-download stored chapters, replacing their text with the source's current
-/// version. This is the escape hatch for a site that changed under us — a run
-/// of duplicated chapters since corrected, or a chapter updated with text it
-/// was missing — which an ordinary sync can never pick up, because it never
-/// revisits a chapter it already has.
 async fn refetch(
     config: &Config,
     novel: String,
@@ -873,8 +788,6 @@ async fn refetch(
 
     let targets = match chapters.as_deref() {
         Some(spec) => {
-            // Chapter 152 is a different chapter in every novel, so a range
-            // across the whole library is a mistake rather than a shortcut.
             ensure!(!every, "--chapters needs a single novel, not `all`");
             Some(vesper_core::util::parse_chapter_spec(spec).map_err(|e| anyhow!("{e}"))?)
         }
@@ -930,7 +843,6 @@ async fn refetch(
 
         let report = match report {
             Ok(r) => r,
-            // One unreachable novel shouldn't abandon the rest of the library.
             Err(e) if every => {
                 eprintln!("  ! {} — {e}", n.title);
                 continue;
@@ -964,8 +876,6 @@ async fn refetch(
     Ok(())
 }
 
-/// Print one novel's refetch result. Under `all`, a novel with nothing to say
-/// stays silent so the handful that changed are actually visible.
 fn report_refetch(report: &RefetchReport, novel: &StoredNovel, quiet: bool, dry_run: bool) {
     let verb = if dry_run { "would be " } else { "" };
     let interesting = report.changed() || !report.skipped.is_empty();
@@ -1001,7 +911,6 @@ fn report_refetch(report: &RefetchReport, novel: &StoredNovel, quiet: bool, dry_
     }
 }
 
-/// Re-fetch placeholder chapters for one novel, or every subscription.
 async fn repair(
     config: &Config,
     novel: String,
@@ -1038,7 +947,6 @@ async fn repair(
 
         match report {
             Ok(r) if r.is_empty() => {
-                // Staying quiet for `all` keeps the healthy majority off screen.
                 if novels.len() == 1 {
                     println!("{}: nothing to repair.", n.title);
                 }
@@ -1079,8 +987,6 @@ async fn repair(
     Ok(())
 }
 
-/// Pick the source a `set-primary` argument names: the stored URL first, then
-/// the site name, so either column of `vesper subs` works. An ambiguous name
 fn resolve_source<'a>(sources: &'a [StoredSource], needle: &str) -> Result<&'a StoredSource> {
     let needle = needle.trim();
     if let Some(exact) = sources.iter().find(|s| s.url == needle) {
@@ -1107,8 +1013,6 @@ fn resolve_source<'a>(sources: &'a [StoredSource], needle: &str) -> Result<&'a S
     }
 }
 
-/// Promote one of a novel's sources to primary. `source` is matched against the
-/// stored URL first, then the site name, so either column of `vesper subs`
 fn set_primary(novel: String, source: String) -> Result<()> {
     let store = Store::open_default()?;
     let found = store
@@ -1186,10 +1090,6 @@ async fn fetch(
     let before = store.stored_chapter_numbers(found.id)?.len();
     eprintln!("Syncing \"{}\" from {} source(s)...", found.title, sources.len());
 
-    // Ctrl+C during a manual fetch pauses gracefully: a watcher flips this flag,
-    // the progress callback returns Break, and sync_novel stops after the current
-    // (already-saved) chapter. A second Ctrl+C hits the default handler and hard-
-    // aborts. Downloaded chapters are durable regardless, so the run resumes.
     let cancel = Arc::new(AtomicBool::new(false));
     let watcher = {
         let cancel = cancel.clone();
@@ -1461,8 +1361,6 @@ async fn sync_all(config: &Config, limit: usize, delay_ms: Option<u64>) -> Resul
 
     let mut total_new = 0u32;
     for novel in &novels {
-        // Poll finished novels less often: skip a LikelyComplete novel that was
-        // re-checked within the recheck window.
         if novel.derived_state == DerivedState::LikelyComplete {
             if let Ok(Some(last)) = store.last_synced_at(novel.id) {
                 let window = config.likely_complete_recheck_days as i64 * 86_400;
@@ -1508,8 +1406,6 @@ async fn sync_all(config: &Config, limit: usize, delay_ms: Option<u64>) -> Resul
                 } else {
                     String::new()
                 };
-                // Surface gaps in the log (background stderr is discarded) and on
-                // screen for a manual/visible run.
                 if !report.gaps.is_empty() {
                     let gaps: BTreeSet<u32> = report.gaps.iter().copied().collect();
                     extra.push_str(&format!(", {}", describe_gaps(&gaps)));
@@ -1528,7 +1424,6 @@ async fn sync_all(config: &Config, limit: usize, delay_ms: Option<u64>) -> Resul
         }
     }
 
-    // Auto-prune per config after the pass.
     match store.apply_retention(config.retention_days) {
         Ok(n) if n > 0 => {
             println!("Pruned {n} exported chapter(s) from completed novels.");
@@ -1627,7 +1522,6 @@ fn status(config: &Config) -> Result<()> {
 
 fn profiles_show() -> Result<()> {
     use vesper_core::profiles;
-    // Calling all() also generates the README in the profiles folder.
     let loaded = profiles::all();
     if let Some(dir) = profiles::profiles_dir() {
         println!("Add custom site profiles (.ini) in: {}", dir.display());
@@ -1676,7 +1570,6 @@ mod tests {
 
     #[test]
     fn local_timestamp_has_expected_shape() {
-        // e.g. "2026-07-17 21:39:12" — 19 chars, no offset suffix.
         let ts = local_timestamp();
         println!("sample log timestamp: {ts}");
         assert_eq!(ts.len(), 19, "unexpected shape: {ts}");
@@ -1705,21 +1598,16 @@ mod tests {
             source("lightnovelworld", "https://lightnovelworld.org/novel/a/", 1),
             source("freewebnovel", "https://freewebnovel.com/novel/a", 2),
         ];
-        // By site name, case-insensitively...
         assert_eq!(resolve_source(&sources, "freewebnovel").unwrap().priority, 2);
         assert_eq!(resolve_source(&sources, "FreeWebNovel").unwrap().priority, 2);
-        // ...or by the URL printed beside it.
         assert_eq!(
             resolve_source(&sources, "https://freewebnovel.com/novel/a").unwrap().priority,
             2
         );
-        // An unknown name lists what is actually there.
         let err = resolve_source(&sources, "royalroad").unwrap_err().to_string();
         assert!(err.contains("freewebnovel"), "{err}");
     }
 
-    /// The same site attached twice can't be disambiguated by name, and picking
-    /// the wrong one would change which source is authoritative.
     #[test]
     fn set_primary_refuses_an_ambiguous_site_name() {
         let sources = vec![
@@ -1729,15 +1617,12 @@ mod tests {
         ];
         let err = resolve_source(&sources, "freewebnovel").unwrap_err().to_string();
         assert!(err.contains("matches 2 sources"), "{err}");
-        // The URL still resolves it unambiguously.
         assert_eq!(
             resolve_source(&sources, "https://freewebnovel.com/novel/a-alt").unwrap().priority,
             3
         );
     }
 
-    /// Migrations run before library commands and are skipped for the rest —
-    /// `vesper config` must not open the library or reach the network.
     #[test]
     fn only_library_commands_trigger_migrations() {
         assert!(Command::Subs { gaps: false }.touches_library());
@@ -1759,8 +1644,6 @@ mod tests {
         let first = try_lock_file(&path).unwrap();
         assert!(first.is_some(), "first acquisition should succeed");
 
-        // A second acquisition while the first is held must be refused — this is
-        // the guarantee that was silently missing on non-Windows.
         let second = try_lock_file(&path).unwrap();
         assert!(second.is_none(), "second acquisition must be refused while held");
 

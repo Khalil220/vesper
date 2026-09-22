@@ -1,41 +1,3 @@
-//! One-shot library migrations.
-//!
-//! Currently one: lightnovelworld's novel library moved to chikari.moe, so
-//! subscriptions pointing at the old host are repointed at the new one on the
-//! first launch after the upgrade.
-//!
-//! ## Why this is safe to do in place
-//!
-//! chikari inherited lightnovelworld's slugs *and its chapter numbering* — the
-//! two sites are the same catalogue. Spot-checking chapters across several
-//! novels, `chikari/<slug>` chapter N and `lightnovelworld/<slug>` chapter N
-//! are the same text, including the cases where a novel's *displayed* chapter
-//! label runs offset from its canonical number (chikari ch.1200 and
-//! lightnovelworld ch.1200 of `the-primal-hunter` are both titled "Chapter
-//! 1176"). So an already-downloaded ch.1200 stays correct after the move, and
-//! the migration is a URL rewrite rather than a re-download.
-//!
-//! That is why this repoints the existing `sources` row via
-//! [`Store::repoint_source`] instead of adding chikari as a new source: the row
-//! keeps its id, so every stored chapter stays attributed to it. Adding a new
-//! primary would instead make sync's content-upgrade pass re-fetch the novel's
-//! entire back catalogue from chikari — thousands of requests per novel, for
-//! byte-identical prose.
-//!
-//! ## What it refuses to do
-//!
-//! A subscription is only moved once chikari has confirmed the novel exists
-//! there, by slug or — if the slug didn't carry over — by an exact normalized
-//! title match in its search. A novel is never bound to a merely similar title.
-//!
-//! Anything unconfirmed is left pointing at lightnovelworld and reported. That
-//! is not a working fallback: lightnovelworld is frozen and shutting down (it
-//! 302s every novel page to a merge notice), and its own announcement says the
-//! long tail of low-traffic novels was dropped rather than migrated, so those
-//! titles are not going to turn up on chikari later. Leaving the row alone is
-//! simply the least-destructive option — the chapters already downloaded stay
-//! readable and exportable — and the CLI tells the user to export while they
-//! can rather than implying the subscription will keep updating.
 
 use std::time::Duration;
 
@@ -46,31 +8,22 @@ use crate::fetch::{is_not_found, Fetcher, ReqwestFetcher};
 use crate::lightnovelworld;
 use crate::store::Store;
 
-/// `meta` key recording that the lightnovelworld -> chikari move has been done.
 pub const MIGRATION_KEY: &str = "migration.lightnovelworld_to_chikari";
 
-/// What happened to one subscription.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MigrationOutcome {
-    /// Repointed at chikari.
     Moved {
         novel_id: i64,
         title: String,
         from: String,
         to: String,
-        /// The slug changed and was recovered by title search.
         via_title_search: bool,
     },
-    /// chikari doesn't have this novel. If it had another working source, that
-    /// one was promoted to primary (`promoted` names it); otherwise the
-    /// subscription is left on lightnovelworld with nowhere to go.
     NotOnChikari {
         novel_id: i64,
         title: String,
         promoted: Option<String>,
     },
-    /// Couldn't tell (network error, or the URL didn't yield a slug). Left
-    /// alone, and the migration will be retried on the next launch.
     Undetermined {
         novel_id: i64,
         title: String,
@@ -78,12 +31,9 @@ pub enum MigrationOutcome {
     },
 }
 
-/// Result of a migration pass.
 #[derive(Debug, Default)]
 pub struct MigrationReport {
     pub outcomes: Vec<MigrationOutcome>,
-    /// Every subscription reached a definite verdict, so the pass need not run
-    /// again. False when something was [`MigrationOutcome::Undetermined`].
     pub complete: bool,
 }
 
@@ -94,17 +44,11 @@ impl MigrationReport {
             .filter(|o| matches!(o, MigrationOutcome::Moved { .. }))
     }
 
-    /// Nothing to report to the user.
     pub fn is_empty(&self) -> bool {
         self.outcomes.is_empty()
     }
 }
 
-/// Run the lightnovelworld -> chikari migration if it hasn't already been done.
-///
-/// Cheap when there's nothing to do: with the marker set it is a single
-/// `SELECT`, and with no lightnovelworld subscriptions it makes no network
-/// request at all. Returns `None` when the migration had already run.
 pub async fn migrate_lightnovelworld(store: &Store, delay: Duration) -> Result<Option<MigrationReport>> {
     if store.meta_get(MIGRATION_KEY)?.is_some() {
         return Ok(None);
@@ -117,8 +61,6 @@ pub async fn migrate_lightnovelworld(store: &Store, delay: Duration) -> Result<O
     Ok(Some(report))
 }
 
-/// The migration proper, against a caller-supplied chikari adapter (the seam
-/// the tests substitute a canned fetcher through).
 pub async fn migrate_with<F: Fetcher>(
     store: &Store,
     chikari: &ChikariSource<F>,
@@ -170,9 +112,6 @@ async fn migrate_one<F: Fetcher>(
                     to,
                     via_title_search,
                 },
-                // `repoint_source` refuses a chikari URL another source row
-                // already holds. Both rows stay as they are and the error is
-                // reported.
                 Err(e) => MigrationOutcome::Undetermined {
                     novel_id,
                     title: title.to_string(),
@@ -183,8 +122,6 @@ async fn migrate_one<F: Fetcher>(
         Ok(None) => MigrationOutcome::NotOnChikari {
             novel_id,
             title: title.to_string(),
-            // Nothing to move it to, but the novel may have another source that
-            // can take over from the site that's going away.
             promoted: promote_surviving_source(store, novel_id, source.id).unwrap_or(None),
         },
         Err(e) => MigrationOutcome::Undetermined {
@@ -195,13 +132,6 @@ async fn migrate_one<F: Fetcher>(
     }
 }
 
-/// Hand a novel that didn't make the move to whatever other source it has.
-///
-/// Only when the dead lightnovelworld source is the *primary* — a
-/// lightnovelworld fallback behind a working primary changes nothing. Any
-/// other lightnovelworld source is skipped as a candidate for the obvious
-/// reason. Best-effort: failing to promote must not fail the migration, so the
-/// caller treats an error as "nothing promoted".
 fn promote_surviving_source(
     store: &Store,
     novel_id: i64,
@@ -225,14 +155,6 @@ fn promote_surviving_source(
     Ok(Some(alt.name.clone()))
 }
 
-/// Find the novel's slug on chikari: the inherited one if it still resolves,
-/// otherwise whatever the title search turns up. `Ok(None)` means chikari
-/// definitively doesn't have it; `Err` means we couldn't reach chikari to find
-/// out, which must not be mistaken for the former.
-///
-/// The `bool` reports whether the answer came from the title search (i.e. the
-/// slug changed). Public so the `live_migration` example can preview a real
-/// library's migration without writing to it.
 pub async fn resolve_on_chikari<F: Fetcher>(
     chikari: &ChikariSource<F>,
     slug: &str,
@@ -241,16 +163,11 @@ pub async fn resolve_on_chikari<F: Fetcher>(
     use crate::source::Source;
 
     match chikari.fetch_novel(&chikari::novel_url(slug)).await {
-        // The slug carried over. Confirm it's really the same novel: slugs are
-        // shared across a merged catalogue, but a collision would otherwise
-        // silently retarget the subscription.
         Ok(meta) => {
             if crate::util::normalize_title(&meta.title) == crate::util::normalize_title(title) {
                 return Ok(Some((slug.to_string(), false)));
             }
         }
-        // A 404 is a definite "not at that slug" — fall through to the search.
-        // Anything else (timeout, 5xx, a Cloudflare hiccup) is not an answer.
         Err(e) if !is_not_found(&e) => return Err(e),
         Err(_) => {}
     }
@@ -270,9 +187,6 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Mutex;
 
-    /// A fetcher serving canned JSON per URL, so the migration's decisions can
-    /// be exercised without the network. A URL with no canned response 404s;
-    /// URLs listed in `unreachable` fail transiently instead.
     struct CannedFetcher {
         responses: HashMap<String, String>,
         unreachable: Vec<String>,
@@ -293,7 +207,6 @@ mod tests {
             self
         }
 
-        /// Register a novel at `slug` with the given title.
         fn with_novel(self, slug: &str, title: &str) -> Self {
             let body = format!(
                 r#"{{"slug":"{slug}","title":"{title}","status":"releasing","authors":[]}}"#
@@ -324,9 +237,6 @@ mod tests {
         }
     }
 
-    /// Adapter name for a URL's host, matching how the real adapters are named
-    /// ("royalroad.com" -> "royalroad"). Derived rather than hard-coded so a
-    /// fixture can't quietly label a royalroad URL "lightnovelworld".
     fn source_name_for(url: &str) -> String {
         ::url::Url::parse(url)
             .ok()
@@ -389,8 +299,6 @@ mod tests {
         assert_eq!(source_url(&store, 1), "https://chikari.moe/novels/shadow-slave");
     }
 
-    /// The whole point of repointing in place: the source row keeps its id, so
-    /// stored chapters stay attributed to it and none are re-downloaded.
     #[tokio::test]
     async fn stored_chapters_keep_their_source_and_are_not_orphaned() {
         let store = store_with(&[("Shadow Slave", "https://lightnovelworld.org/novel/shadow-slave/")]);
@@ -423,7 +331,6 @@ mod tests {
         assert_eq!(primary.id, source_id, "same row, so chapters stay attributed");
         assert_eq!(primary.name, "chikari");
         assert_eq!(novel.chapter_count, 3, "chapters survived untouched");
-        // Nothing is pending a re-fetch from the "new" primary.
         assert!(store.chapters_from_other_sources(1, source_id).unwrap().is_empty());
     }
 
@@ -431,9 +338,7 @@ mod tests {
     async fn recovers_a_changed_slug_by_title_search() {
         let store = store_with(&[("Reverend Insanity", "https://lightnovelworld.org/novel/reverend-insanity-old/")]);
         let fetcher = CannedFetcher::new()
-            // The old slug 404s...
             .with_novel("reverend-insanity", "Reverend Insanity")
-            // ...but search finds it under the new one.
             .with(
                 "https://chikari.moe/api/novels/search?q=Reverend+Insanity&limit=20",
                 r#"[{"slug":"reverend-insanity","title":"Reverend Insanity"}]"#,
@@ -449,10 +354,6 @@ mod tests {
         assert_eq!(source_url(&store, 1), "https://chikari.moe/novels/reverend-insanity");
     }
 
-    /// A novel chikari genuinely doesn't carry stays put. lightnovelworld is
-    /// shutting down, so this isn't a working fallback — but dropping the
-    /// subscription would take its downloaded chapters with it, and those are
-    /// still readable and exportable. Least destructive wins.
     #[tokio::test]
     async fn leaves_a_novel_chikari_lacks_alone() {
         let store = store_with(&[("Obscure Web Serial", "https://lightnovelworld.org/novel/obscure-web-serial/")]);
@@ -472,8 +373,6 @@ mod tests {
         );
     }
 
-    /// A novel that didn't make the move but has another source hands over to
-    /// it, rather than sitting behind a primary that is going away.
     #[tokio::test]
     async fn a_novel_left_behind_promotes_its_surviving_source() {
         let store = store_with(&[("Obscure Serial", "https://lightnovelworld.org/novel/obscure-serial/")]);
@@ -509,13 +408,10 @@ mod tests {
             store.chapters_from_other_sources(1, primary.id).unwrap().is_empty(),
             "and not queued for a pointless re-download"
         );
-        // The dead source is demoted, not deleted — its URL stays on record.
         assert_eq!(novel.sources.len(), 2);
         assert!(novel.sources.iter().any(|s| s.priority == 2 && s.url.contains("lightnovelworld")));
     }
 
-    /// With nowhere to go, the subscription is left intact — its downloaded
-    /// chapters are still readable and exportable.
     #[tokio::test]
     async fn a_novel_left_behind_with_no_other_source_is_untouched() {
         let store = store_with(&[("Only Here", "https://lightnovelworld.org/novel/only-here/")]);
@@ -532,8 +428,6 @@ mod tests {
         assert_eq!(source_url(&store, 1), "https://lightnovelworld.org/novel/only-here/");
     }
 
-    /// A lightnovelworld *fallback* that can't move leaves the working primary
-    /// alone — there is nothing to promote.
     #[tokio::test]
     async fn a_dead_fallback_does_not_disturb_a_working_primary() {
         let store = store_with(&[("Kept", "https://www.royalroad.com/fiction/1/kept")]);
@@ -553,13 +447,10 @@ mod tests {
         assert_eq!(novel.primary_source().unwrap().name, "royalroad");
     }
 
-    /// A slug that resolves to a *different* novel must not be taken at face
-    /// value — the title decides, and search gets the final say.
     #[tokio::test]
     async fn a_slug_collision_does_not_retarget_the_subscription() {
         let store = store_with(&[("The Innkeeper", "https://lightnovelworld.org/novel/the-innkeeper/")]);
         let fetcher = CannedFetcher::new()
-            // Same slug on chikari, but it's someone else's novel.
             .with_novel("the-innkeeper", "The Innkeeper's Daughter")
             .with(
                 "https://chikari.moe/api/novels/search?q=The+Innkeeper&limit=20",
@@ -576,8 +467,6 @@ mod tests {
         );
     }
 
-    /// Offline (or chikari down) must not be mistaken for "not on chikari":
-    /// nothing is changed and the marker stays unset so it retries next launch.
     #[tokio::test]
     async fn an_unreachable_site_defers_instead_of_deciding() {
         let store = store_with(&[("Shadow Slave", "https://lightnovelworld.org/novel/shadow-slave/")]);
@@ -589,7 +478,6 @@ mod tests {
         assert_eq!(source_url(&store, 1), "https://lightnovelworld.org/novel/shadow-slave/");
     }
 
-    /// Sources on other sites are none of this migration's business.
     #[tokio::test]
     async fn other_sites_are_untouched_and_cost_no_requests() {
         let store = store_with(&[
@@ -608,7 +496,6 @@ mod tests {
         );
     }
 
-    /// A fallback source on lightnovelworld moves too, keeping its priority.
     #[tokio::test]
     async fn a_lightnovelworld_fallback_moves_and_keeps_its_priority() {
         let store = store_with(&[("Shadow Slave", "https://freewebnovel.com/novel/shadow-slave")]);
@@ -627,9 +514,6 @@ mod tests {
         assert_eq!(fallback.name, "chikari");
     }
 
-    /// If the user already added the chikari URL by hand, repointing would
-    /// collide with the UNIQUE(url) constraint — report it rather than
-    /// destroying either row.
     #[tokio::test]
     async fn an_existing_chikari_source_is_reported_not_clobbered() {
         let store = store_with(&[("Shadow Slave", "https://lightnovelworld.org/novel/shadow-slave/")]);
@@ -654,7 +538,6 @@ mod tests {
         assert!(report.complete);
         store.meta_set(MIGRATION_KEY, "done").unwrap();
 
-        // The public entry point now short-circuits without touching the network.
         assert!(migrate_lightnovelworld(&store, Duration::ZERO).await.unwrap().is_none());
     }
 }

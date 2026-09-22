@@ -1,12 +1,3 @@
-//! SQLite persistence: the single source of truth.
-//!
-//! Schema is multi-source aware from the start (see DESIGN.md): a logical
-//! `novels` row has one or more `sources` (primary + fallbacks), and `chapters`
-//! are keyed by (novel, number) with a note of which source supplied each.
-//!
-//! `rusqlite::Connection` is not `Send`, so the CLI runs on a current-thread
-//! Tokio runtime and never holds the connection across a `spawn`. All methods
-//! here are synchronous.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -18,7 +9,6 @@ use rusqlite::{params, Connection, OptionalExtension};
 use crate::model::{Chapter, DerivedState, NovelMeta, NovelStatus};
 use crate::util::now_unix;
 
-/// A source feeding a novel: primary (priority 1) or a fallback.
 #[derive(Debug, Clone)]
 pub struct StoredSource {
     pub id: i64,
@@ -28,7 +18,6 @@ pub struct StoredSource {
     pub last_seen_chapter: Option<u32>,
 }
 
-/// A subscribed novel with its sources and a downloaded-chapter count.
 #[derive(Debug, Clone)]
 pub struct StoredNovel {
     pub id: i64,
@@ -38,19 +27,16 @@ pub struct StoredNovel {
     pub genre: Option<String>,
     pub status_hint: NovelStatus,
     pub derived_state: DerivedState,
-    /// A previous auto-export was blocked (e.g. the EPUB was locked); retry later.
     pub export_pending: bool,
     pub sources: Vec<StoredSource>,
     pub chapter_count: i64,
 }
 
 impl StoredNovel {
-    /// The primary (highest-priority) source, if any.
     pub fn primary_source(&self) -> Option<&StoredSource> {
         self.sources.iter().min_by_key(|s| s.priority)
     }
 
-    /// Reconstruct novel metadata for EPUB packaging.
     pub fn to_meta(&self) -> NovelMeta {
         NovelMeta {
             title: self.title.clone(),
@@ -70,7 +56,6 @@ pub struct Store {
     conn: Connection,
 }
 
-/// Default library DB path: `%LOCALAPPDATA%/vesper/data/library.db`.
 pub fn default_db_path() -> Result<PathBuf> {
     let dirs = ProjectDirs::from("", "", "vesper")
         .ok_or_else(|| anyhow!("could not resolve a local data directory"))?;
@@ -78,8 +63,6 @@ pub fn default_db_path() -> Result<PathBuf> {
 }
 
 impl Store {
-    /// Open (creating if needed) the DB at `path`, enabling WAL + foreign keys
-    /// and applying the schema.
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
@@ -87,7 +70,6 @@ impl Store {
         }
         let conn = Connection::open(path)
             .with_context(|| format!("opening database {}", path.display()))?;
-        // journal_mode returns a row; consume it so it isn't treated as an error.
         conn.query_row("PRAGMA journal_mode=WAL;", [], |_| Ok(()))?;
         conn.execute_batch("PRAGMA foreign_keys=ON;")?;
         let store = Store { conn };
@@ -95,12 +77,10 @@ impl Store {
         Ok(store)
     }
 
-    /// Open the default library DB.
     pub fn open_default() -> Result<Self> {
         Self::open(&default_db_path()?)
     }
 
-    /// An ephemeral in-memory DB (tests, dry runs).
     pub fn open_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory()?;
         conn.execute_batch("PRAGMA foreign_keys=ON;")?;
@@ -147,9 +127,6 @@ impl Store {
                 PRIMARY KEY (novel_id, number)
             );
 
-            -- Chapter numbers that discovery expects but no source can provide
-            -- (a permanent 404 hole in the site). Tracked so a novel with such
-            -- holes can still complete/export, and so the gap is visible.
             CREATE TABLE IF NOT EXISTS chapter_gaps (
                 novel_id    INTEGER NOT NULL REFERENCES novels(id) ON DELETE CASCADE,
                 number      INTEGER NOT NULL,
@@ -157,17 +134,12 @@ impl Store {
                 PRIMARY KEY (novel_id, number)
             );
 
-            -- Small key/value scratchpad for library-wide facts that aren't
-            -- per-novel. Currently just one-shot migration markers, so a
-            -- completed migration costs a single SELECT on later launches
-            -- instead of re-running.
             CREATE TABLE IF NOT EXISTS meta (
                 key   TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             );
             "#,
         )?;
-        // Upgrade older DBs (harmless no-ops if the columns already exist).
         let _ = self
             .conn
             .execute("ALTER TABLE chapters ADD COLUMN exported_at INTEGER", []);
@@ -178,26 +150,10 @@ impl Store {
         let _ = self
             .conn
             .execute("ALTER TABLE novels ADD COLUMN genre TEXT", []);
-        // Runs last: it copies a fixed column list, so every column added above
-        // has to exist first.
         self.migrate_novels_autoincrement()?;
         Ok(())
     }
 
-    /// Give `novels.id` an AUTOINCREMENT high-water mark on DBs created before
-    /// it had one.
-    ///
-    /// A plain `INTEGER PRIMARY KEY` is a rowid: the next one is `max(id) + 1`
-    /// over *surviving* rows, so deleting the highest-numbered novel handed its
-    /// id straight to the next subscription (gaps in the middle persisted, which
-    /// made the recycling easy to miss). Ids are a user-facing handle —
-    /// `vesper export 14` — so a recycled id silently retargets a command at a
-    /// different novel. AUTOINCREMENT tracks the largest id ever used in
-    /// `sqlite_sequence` and never hands it out twice.
-    ///
-    /// SQLite can't add AUTOINCREMENT via `ALTER`, so `novels` gets rebuilt.
-    /// That's a handful of rows; the large `chapters` table is never touched,
-    /// and ids are copied verbatim so child foreign keys stay valid.
     fn migrate_novels_autoincrement(&self) -> Result<()> {
         let existing: Option<String> = self
             .conn
@@ -208,24 +164,17 @@ impl Store {
             )
             .optional()?;
         match existing {
-            // Already migrated (or created fresh with AUTOINCREMENT).
             Some(sql) if sql.to_ascii_uppercase().contains("AUTOINCREMENT") => return Ok(()),
             Some(_) => {}
             None => return Ok(()),
         }
 
-        // `DROP TABLE` performs an implicit DELETE, which fires the children's
-        // ON DELETE CASCADE and would take every chapter with it. Enforcement
-        // must be off across the swap — and it can't be toggled inside a
-        // transaction, hence out here.
         self.conn.execute_batch("PRAGMA foreign_keys=OFF;")?;
         let outcome = self.swap_in_autoincrement_novels();
         self.conn.execute_batch("PRAGMA foreign_keys=ON;")?;
         outcome.context("rebuilding the novels table with AUTOINCREMENT")
     }
 
-    /// The rebuild proper, wrapped so a failure anywhere rolls back and leaves
-    /// the original `novels` in place.
     fn swap_in_autoincrement_novels(&self) -> Result<()> {
         self.conn.execute_batch("BEGIN;")?;
         match self.copy_novels_into_autoincrement_table() {
@@ -269,7 +218,6 @@ impl Store {
             "#,
         )?;
 
-        // Refuse to drop the original unless every row made it across.
         let copied: i64 = self
             .conn
             .query_row("SELECT count(*) FROM novels_migrate", [], |r| r.get(0))?;
@@ -282,8 +230,6 @@ impl Store {
              ALTER TABLE novels_migrate RENAME TO novels;",
         )?;
 
-        // Children reference novels(id) by name, so the rename should have left
-        // them intact — confirm before committing rather than trusting it.
         let orphans: i64 = self
             .conn
             .query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| {
@@ -295,9 +241,6 @@ impl Store {
         Ok(())
     }
 
-    /// Create a new subscription: a novel plus its primary source. Errors if the
-    /// URL is already subscribed, or if the same novel (title+author) already
-    /// exists from another source (that is the future `add-source` path).
     pub fn subscribe(&self, meta: &NovelMeta, source_name: &str) -> Result<i64> {
         if self.source_id_for_url(&meta.source_url)?.is_some() {
             bail!("already subscribed to this source URL");
@@ -334,9 +277,6 @@ impl Store {
         Ok(novel_id)
     }
 
-    /// Add an alternate (fallback) source to an existing novel, at the next
-    /// priority. The caller is responsible for confirming it is the same novel
-    /// (cross-site titles differ). Errors if the URL is already in the library.
     pub fn add_source(&self, novel_id: i64, source_name: &str, url: &str) -> Result<i64> {
         if self.source_id_for_url(url)?.is_some() {
             bail!("that source URL is already in the library");
@@ -354,7 +294,6 @@ impl Store {
         Ok(self.conn.last_insert_rowid())
     }
 
-    /// Read a `meta` key (see the table comment). `None` if unset.
     pub fn meta_get(&self, key: &str) -> Result<Option<String>> {
         Ok(self
             .conn
@@ -364,7 +303,6 @@ impl Store {
             .optional()?)
     }
 
-    /// Write a `meta` key, replacing any previous value.
     pub fn meta_set(&self, key: &str, value: &str) -> Result<()> {
         self.conn.execute(
             "INSERT INTO meta (key, value) VALUES (?1, ?2)
@@ -374,9 +312,6 @@ impl Store {
         Ok(())
     }
 
-    /// Every source in the library, paired with its novel's id and title.
-    /// Site-agnostic on purpose: callers that care about a particular host
-    /// (a site migration) filter it themselves.
     pub fn all_sources(&self) -> Result<Vec<(i64, String, StoredSource)>> {
         let mut stmt = self.conn.prepare(
             "SELECT n.id, n.title, s.id, s.source_name, s.url, s.priority, s.last_seen_chapter
@@ -399,18 +334,6 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    /// Point an existing source row at a new site, in place.
-    ///
-    /// This is how a site *move* is recorded, and it is deliberately not
-    /// "remove the old source, add a new one": keeping the same `sources.id`
-    /// keeps every already-downloaded chapter attributed to it, so nothing is
-    /// re-downloaded and the priority ordering is untouched. Dropping and
-    /// re-adding would orphan that attribution and make the content-upgrade
-    /// pass re-fetch the novel's entire back catalogue from the new primary.
-    ///
-    /// Errors if `url` is already in the library on some *other* source row
-    /// (`sources.url` is UNIQUE); repointing a row at the URL it already holds
-    /// is a no-op.
     pub fn repoint_source(&self, source_id: i64, source_name: &str, url: &str) -> Result<()> {
         if let Some(existing) = self.source_id_for_url(url)? {
             if existing != source_id {
@@ -427,18 +350,6 @@ impl Store {
         Ok(())
     }
 
-    /// Make `source_id` its novel's primary, demoting the others while keeping
-    /// their relative order. Returns whether anything changed.
-    ///
-    /// Chapters held from the *previous* primary are re-attributed to the
-    /// promoted source. That is not cosmetic: `chapters_from_other_sources`
-    /// treats anything not attributed to the primary as an upgrade candidate,
-    /// so without it the content-upgrade pass would re-download the novel's
-    /// entire back catalogue from the new primary — thousands of requests for
-    /// prose already on disk, and typically from a site that is being promoted
-    /// precisely because the old one is gone. The `source_id` column records
-    /// which source is authoritative for a chapter's text, and after a
-    /// promotion the promoted source is exactly that.
     pub fn promote_source(&self, novel_id: i64, source_id: i64) -> Result<bool> {
         let sources = self.sources_for(novel_id)?;
         if !sources.iter().any(|s| s.id == source_id) {
@@ -472,8 +383,6 @@ impl Store {
         old_primary: i64,
         sources: &[StoredSource],
     ) -> Result<()> {
-        // `sources` arrives in priority order, so demoting in sequence preserves
-        // the existing ranking among the remaining fallbacks.
         let mut next = 2i64;
         for s in sources {
             let priority = if s.id == source_id {
@@ -537,12 +446,6 @@ impl Store {
             .optional()?)
     }
 
-    /// Find a novel whose title matches `title` ignoring case, spacing, and
-    /// punctuation (via `util::normalize_title`). Catches the same novel
-    /// re-subscribed from a differently-formatted source so we can point the user
-    /// at `add-source` instead of forking a duplicate. Normalization is done in
-    /// Rust (SQLite can't strip punctuation), so this scans the novels table —
-    /// fine for a personal library.
     pub fn find_novel_by_normalized_title(&self, title: &str) -> Result<Option<StoredNovel>> {
         let target = crate::util::normalize_title(title);
         if target.is_empty() {
@@ -561,8 +464,6 @@ impl Store {
         Ok(None)
     }
 
-    /// All subscriptions, ordered by id — so the `#N` labels `subs` and `status`
-    /// print run in sequence and stay put as titles come and go.
     pub fn list_subscriptions(&self) -> Result<Vec<StoredNovel>> {
         let ids: Vec<i64> = {
             let mut stmt = self.conn.prepare("SELECT id FROM novels ORDER BY id")?;
@@ -577,7 +478,6 @@ impl Store {
             .collect()
     }
 
-    /// Resolve a novel by selector: a numeric id, or a case-insensitive title.
     pub fn find_novel(&self, selector: &str) -> Result<Option<StoredNovel>> {
         let id = if let Ok(n) = selector.parse::<i64>() {
             Some(n)
@@ -659,14 +559,12 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    /// Remove a subscription and all its sources/chapters (cascade).
     pub fn remove_subscription(&self, novel_id: i64) -> Result<()> {
         self.conn
             .execute("DELETE FROM novels WHERE id = ?1", params![novel_id])?;
         Ok(())
     }
 
-    /// Chapter numbers already stored for a novel (for resume / skip).
     pub fn stored_chapter_numbers(&self, novel_id: i64) -> Result<BTreeSet<u32>> {
         let mut stmt = self
             .conn
@@ -679,7 +577,6 @@ impl Store {
         Ok(set)
     }
 
-    /// Chapter numbers recorded as permanent gaps (source 404 holes) for a novel.
     pub fn gaps(&self, novel_id: i64) -> Result<BTreeSet<u32>> {
         let mut stmt = self
             .conn
@@ -692,9 +589,6 @@ impl Store {
         Ok(set)
     }
 
-    /// Recorded gaps whose chapter is *not* stored from any source — i.e. truly
-    /// missing chapters (a gap filled from a fallback is excluded). This is what
-    /// the UI and EPUB notice should show.
     pub fn unfilled_gaps(&self, novel_id: i64) -> Result<BTreeSet<u32>> {
         let mut stmt = self.conn.prepare(
             "SELECT number FROM chapter_gaps
@@ -709,7 +603,6 @@ impl Store {
         Ok(set)
     }
 
-    /// Mark a chapter number as a permanent gap (no-op if already recorded).
     pub fn record_gap(&self, novel_id: i64, number: u32) -> Result<()> {
         self.conn.execute(
             "INSERT OR IGNORE INTO chapter_gaps (novel_id, number, detected_at)
@@ -719,7 +612,6 @@ impl Store {
         Ok(())
     }
 
-    /// Clear a recorded gap (e.g. the chapter became available or was filled).
     pub fn clear_gap(&self, novel_id: i64, number: u32) -> Result<()> {
         self.conn.execute(
             "DELETE FROM chapter_gaps WHERE novel_id = ?1 AND number = ?2",
@@ -728,8 +620,6 @@ impl Store {
         Ok(())
     }
 
-    /// Insert a chapter if that number isn't already stored. Returns whether it
-    /// was newly inserted (false = already present, left untouched).
     pub fn insert_chapter_if_absent(
         &self,
         novel_id: i64,
@@ -745,7 +635,6 @@ impl Store {
         Ok(changed > 0)
     }
 
-    /// Load all stored chapters for a novel, ascending by number.
     pub fn load_chapters(&self, novel_id: i64) -> Result<Vec<Chapter>> {
         let mut stmt = self.conn.prepare(
             "SELECT number, title, body FROM chapters WHERE novel_id = ?1 ORDER BY number",
@@ -763,7 +652,6 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    /// Load a single stored chapter by number, if present.
     pub fn load_chapter(&self, novel_id: i64, number: u32) -> Result<Option<Chapter>> {
         Ok(self
             .conn
@@ -783,9 +671,6 @@ impl Store {
             .optional()?)
     }
 
-    /// Stored chapters whose body is shorter than `max_chars`. Narrows the scan
-    /// for placeholder text (see `crate::repair`) to a handful of rows instead
-    /// of loading a novel's whole back catalogue into memory.
     pub fn chapters_shorter_than(&self, novel_id: i64, max_chars: usize) -> Result<Vec<Chapter>> {
         let mut stmt = self.conn.prepare(
             "SELECT number, title, body FROM chapters
@@ -804,8 +689,6 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    /// Chapter numbers currently sourced from something other than
-    /// `primary_source_id` — candidates to upgrade if the primary now has them.
     pub fn chapters_from_other_sources(
         &self,
         novel_id: i64,
@@ -824,10 +707,6 @@ impl Store {
         Ok(out)
     }
 
-    /// Replace a stored chapter's content (used when upgrading a fallback-sourced
-    /// chapter to the primary's authoritative version). Re-attributes the source
-    /// and clears the exported flag so the change propagates to a re-export.
-    /// Leaves `fetched_at` intact so it doesn't disturb quiet/completion timing.
     pub fn update_chapter_content(
         &self,
         novel_id: i64,
@@ -858,11 +737,6 @@ impl Store {
         Ok(changed > 0)
     }
 
-    /// Overwrite a stored chapter's title, leaving its body and source alone.
-    /// Repair hatch for chapters saved while an adapter's title parsing was
-    /// wrong — sync inserts are `OR IGNORE`, so a re-sync can't fix them.
-    /// Returns whether the title actually changed; clears `exported` when it did
-    /// so the next export rebuilds the EPUB.
     pub fn update_chapter_title(&self, novel_id: i64, number: u32, title: &str) -> Result<bool> {
         let changed = self.conn.execute(
             "UPDATE chapters SET title = ?3, exported = 0, exported_at = NULL
@@ -872,7 +746,6 @@ impl Store {
         Ok(changed > 0)
     }
 
-    /// Record a source's progress after a sync pass.
     pub fn update_source_progress(&self, source_id: i64, last_seen_chapter: u32) -> Result<()> {
         self.conn.execute(
             "UPDATE sources SET last_seen_chapter = ?2, last_synced_at = ?3 WHERE id = ?1",
@@ -881,9 +754,6 @@ impl Store {
         Ok(())
     }
 
-    /// Refresh a novel's mutable metadata (author, cover, genre, status hint) from
-    /// a freshly-fetched `NovelMeta`. Leaves the title (the identity) and chapters
-    /// untouched.
     pub fn update_novel_meta(&self, novel_id: i64, meta: &NovelMeta) -> Result<()> {
         self.conn.execute(
             "UPDATE novels SET author = ?2, cover_url = ?3, genre = ?4, status_hint = ?5, updated_at = ?6
@@ -900,8 +770,6 @@ impl Store {
         Ok(())
     }
 
-    /// Mark every stored chapter of a novel as exported, stamping the time (for
-    /// the retention grace period).
     pub fn mark_all_exported(&self, novel_id: i64) -> Result<()> {
         self.conn.execute(
             "UPDATE chapters SET exported = 1, exported_at = ?2 WHERE novel_id = ?1",
@@ -910,8 +778,6 @@ impl Store {
         Ok(())
     }
 
-    /// The most recent `fetched_at` across a novel's chapters — i.e. when we last
-    /// stored a new chapter. Used to gauge how long a novel has been quiet.
     pub fn latest_fetch_time(&self, novel_id: i64) -> Result<Option<i64>> {
         Ok(self
             .conn
@@ -924,7 +790,6 @@ impl Store {
             .flatten())
     }
 
-    /// The most recent `last_synced_at` across a novel's sources.
     pub fn last_synced_at(&self, novel_id: i64) -> Result<Option<i64>> {
         Ok(self
             .conn
@@ -937,12 +802,6 @@ impl Store {
             .flatten())
     }
 
-    /// Re-evaluate a novel's completion: a *Live* novel whose site status is
-    /// Completed and which has stored no new chapter for `quiet_grace_days`
-    /// becomes *LikelyComplete*. Returns the (possibly unchanged) state.
-    ///
-    /// The reverse (LikelyComplete -> Live on new activity) is handled by
-    /// `sync_novel`, which sets Live whenever it fetches something.
     pub fn reevaluate_completion(
         &self,
         novel_id: i64,
@@ -969,10 +828,6 @@ impl Store {
         }
     }
 
-    /// Purge exported chapters of *LikelyComplete* novels once they are at least
-    /// `retention_days` old (0 = as soon as exported). Never touches un-exported
-    /// chapters, nor novels in any other state (ongoing novels keep their working
-    /// set). Returns how many chapters were deleted.
     pub fn apply_retention(&self, retention_days: u32) -> Result<usize> {
         let cutoff = now_unix() - retention_days as i64 * 86_400;
         let n = self.conn.execute(
@@ -984,7 +839,6 @@ impl Store {
         Ok(n)
     }
 
-    /// Flag (or clear) that a novel has a pending export to retry next pass.
     pub fn set_export_pending(&self, novel_id: i64, pending: bool) -> Result<()> {
         self.conn.execute(
             "UPDATE novels SET export_pending = ?2 WHERE id = ?1",
@@ -1011,9 +865,6 @@ mod tests {
         Store::open_in_memory().unwrap()
     }
 
-    /// A DB carrying the pre-AUTOINCREMENT schema with novels, sources,
-    /// chapters and a gap already in it — so the migration is exercised the way
-    /// a real upgrade hits it, rather than on an empty table.
     fn legacy_store() -> Store {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
@@ -1058,7 +909,6 @@ mod tests {
                 PRIMARY KEY (novel_id, number)
             );
 
-            -- Note the hole at 2..4: a mid-range unsubscribe, like the real DB.
             INSERT INTO novels (id, title, author, status_hint, derived_state, created_at, updated_at)
             VALUES (1, 'First', 'Ann', 'ongoing', 'live', 100, 100),
                    (5, 'Second', 'Bo', 'completed', 'likely_complete', 100, 100);
@@ -1094,11 +944,9 @@ mod tests {
         let s = legacy_store();
         assert!(novels_ddl(&s).to_ascii_uppercase().contains("AUTOINCREMENT"));
 
-        // Novels kept their ids, including the 2..4 hole.
         let ids: Vec<i64> = s.list_subscriptions().unwrap().iter().map(|n| n.id).collect();
         assert_eq!(ids, vec![1, 5]);
 
-        // Chapters, sources and gaps all survived the table swap.
         assert_eq!(s.load_chapters(1).unwrap().len(), 1);
         assert_eq!(s.load_chapters(5).unwrap().len(), 2);
         assert_eq!(s.unfilled_gaps(5).unwrap(), BTreeSet::from([3]));
@@ -1108,20 +956,15 @@ mod tests {
         assert_eq!(novel.derived_state, DerivedState::LikelyComplete);
     }
 
-    /// The rename must leave the children's foreign keys pointing at the new
-    /// table, or unsubscribing would silently orphan chapters instead of
-    /// cascading.
     #[test]
     fn cascade_still_works_after_the_rebuild() {
         let s = legacy_store();
         s.remove_subscription(5).unwrap();
         assert!(s.load_chapters(5).unwrap().is_empty());
         assert!(s.unfilled_gaps(5).unwrap().is_empty());
-        // The untouched novel is unaffected.
         assert_eq!(s.load_chapters(1).unwrap().len(), 1);
     }
 
-    /// The point of the whole migration: the highest id used to be recycled.
     #[test]
     fn top_id_is_never_reused_after_unsubscribe() {
         let s = mem_store();
@@ -1138,8 +981,6 @@ mod tests {
         assert_eq!(c, 3, "id {b} was handed out twice");
     }
 
-    /// A migrated DB carries its high-water mark across too, so the first new
-    /// subscription continues past the old maximum rather than filling the hole.
     #[test]
     fn migrated_db_continues_past_the_old_maximum() {
         let s = legacy_store();
@@ -1186,8 +1027,6 @@ mod tests {
         assert!(err.to_string().contains("already subscribed"));
     }
 
-    /// `subs` prints `#<id>` per line, so the listing has to come back in id
-    /// order — sorting by title made those numbers jump around.
     #[test]
     fn subscriptions_list_in_id_order() {
         let s = mem_store();
@@ -1207,10 +1046,8 @@ mod tests {
     fn normalized_title_matches_across_formatting() {
         let s = mem_store();
         let id = s.subscribe(&sample_meta("https://example.com/a.html"), "example").unwrap();
-        // "Test Novel" subscribed; a differently-formatted same title matches.
         let found = s.find_novel_by_normalized_title("test-novel!").unwrap();
         assert_eq!(found.map(|n| n.id), Some(id));
-        // A genuinely different title does not.
         assert!(s.find_novel_by_normalized_title("Other Story").unwrap().is_none());
     }
 
@@ -1221,7 +1058,6 @@ mod tests {
         let src = s.find_novel(&id.to_string()).unwrap().unwrap().primary_source().unwrap().id;
 
         assert!(s.insert_chapter_if_absent(id, src, &chapter(1)).unwrap());
-        // Second insert of the same number is a no-op.
         assert!(!s.insert_chapter_if_absent(id, src, &chapter(1)).unwrap());
         assert!(s.insert_chapter_if_absent(id, src, &chapter(2)).unwrap());
 
@@ -1231,8 +1067,6 @@ mod tests {
         assert_eq!(loaded[0].paragraphs, vec!["Para one.", "Para two."]);
     }
 
-    /// Sync inserts are `OR IGNORE`, so chapters stored with a bad title need an
-    /// explicit overwrite; a corrected title must also un-export the chapter.
     #[test]
     fn retitle_overwrites_and_marks_for_re_export() {
         let s = mem_store();
@@ -1243,12 +1077,9 @@ mod tests {
 
         assert!(s.update_chapter_title(id, 1, "The Three Wives").unwrap());
         assert_eq!(s.load_chapters(id).unwrap()[0].title, "The Three Wives");
-        // Body survived the retitle.
         assert_eq!(s.load_chapters(id).unwrap()[0].paragraphs, vec!["Para one.", "Para two."]);
 
-        // Same title again is a no-op, so a repeat pass reports nothing changed.
         assert!(!s.update_chapter_title(id, 1, "The Three Wives").unwrap());
-        // Unknown chapter number is a no-op, not an error.
         assert!(!s.update_chapter_title(id, 99, "Nope").unwrap());
     }
 
@@ -1264,7 +1095,6 @@ mod tests {
         let fallback = novel.sources.iter().find(|s| s.priority == 2).unwrap();
         assert_eq!(fallback.name, "othersite");
 
-        // Duplicate URL is rejected.
         let err = s
             .add_source(id, "example", "https://example.com/a.html")
             .unwrap_err();
@@ -1283,17 +1113,13 @@ mod tests {
 
         let novel = s.find_novel(&id.to_string()).unwrap().unwrap();
         assert_eq!(novel.primary_source().unwrap().name, "freewebnovel");
-        // The demoted sources keep their relative order behind the new primary.
         let order: Vec<&str> = novel.sources.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(order, vec!["freewebnovel", "example", "royalroad"]);
         assert_eq!(novel.sources.iter().map(|s| s.priority).collect::<Vec<_>>(), vec![1, 2, 3]);
 
-        // Promoting the current primary again is a no-op.
         assert!(!s.promote_source(id, fwn).unwrap());
     }
 
-    /// The point of re-attributing: a promotion must not turn the whole stored
-    /// back catalogue into upgrade candidates, or the next sync re-downloads it.
     #[test]
     fn promote_does_not_leave_stored_chapters_pending_re_download() {
         let s = mem_store();
@@ -1305,7 +1131,6 @@ mod tests {
         }
         let fwn = s.find_novel(&id.to_string()).unwrap().unwrap().sources[1].id;
 
-        // Before: nothing to upgrade, since every chapter is from the primary.
         assert!(s.chapters_from_other_sources(id, old_primary).unwrap().is_empty());
 
         s.promote_source(id, fwn).unwrap();
@@ -1314,7 +1139,6 @@ mod tests {
             s.chapters_from_other_sources(id, fwn).unwrap().is_empty(),
             "chapters were re-attributed, so the upgrade pass has nothing to do"
         );
-        // The prose itself is untouched.
         assert_eq!(s.load_chapters(id).unwrap().len(), 3);
         assert_eq!(s.load_chapters(id).unwrap()[0].paragraphs, vec!["Para one.", "Para two."]);
     }
@@ -1330,7 +1154,6 @@ mod tests {
 
         let err = s.promote_source(a, b_source).unwrap_err();
         assert!(err.to_string().contains("does not belong"), "{err}");
-        // The rejected call changed nothing.
         assert_eq!(s.find_novel(&b.to_string()).unwrap().unwrap().sources[0].priority, 1);
     }
 
@@ -1391,15 +1214,12 @@ mod tests {
         s.insert_chapter_if_absent(id, src, &chapter(1)).unwrap();
         s.insert_chapter_if_absent(id, src, &chapter(2)).unwrap();
 
-        // Not exported, not LikelyComplete: nothing purged.
         assert_eq!(s.apply_retention(0).unwrap(), 0);
 
         s.mark_all_exported(id).unwrap();
-        // Exported but still Backfilling: nothing purged.
         assert_eq!(s.apply_retention(0).unwrap(), 0);
 
         s.set_derived_state(id, DerivedState::LikelyComplete).unwrap();
-        // Exported + LikelyComplete + grace 0: purged.
         assert_eq!(s.apply_retention(0).unwrap(), 2);
         assert!(s.stored_chapter_numbers(id).unwrap().is_empty());
     }
@@ -1423,7 +1243,6 @@ mod tests {
         s.insert_chapter_if_absent(id, src, &chapter(1)).unwrap();
         s.mark_all_exported(id).unwrap();
         s.set_derived_state(id, DerivedState::LikelyComplete).unwrap();
-        // Just exported; a 30-day grace keeps it.
         assert_eq!(s.apply_retention(30).unwrap(), 0);
         assert_eq!(s.stored_chapter_numbers(id).unwrap().len(), 1);
     }
@@ -1442,12 +1261,10 @@ mod tests {
     #[test]
     fn reevaluate_keeps_ongoing_or_recent_novels_live() {
         let s = mem_store();
-        // Ongoing status never becomes LikelyComplete.
         let ongoing = s.subscribe(&sample_meta("https://example.com/a.html"), "example").unwrap();
         s.set_derived_state(ongoing, DerivedState::Live).unwrap();
         assert_eq!(s.reevaluate_completion(ongoing, 0).unwrap(), DerivedState::Live);
 
-        // Completed but recently active with a huge grace stays Live.
         let done = s.subscribe(&completed_meta("https://example.com/done.html"), "example").unwrap();
         let src = primary_source_id(&s, done);
         s.insert_chapter_if_absent(done, src, &chapter(1)).unwrap();
