@@ -450,19 +450,28 @@ Because the sync runs unnoticed, it must be inspectable. **Partially implemented
   which we don't parse), as do royalroad and scribblehub.
 
 - **Injected site adverts (`vesper scrub`).** freewebnovel salts chapter text
-  with promo lines, either as their own paragraph or appended after the last
-  sentence of a real one ("...Alice asked coldly. Find more chapters on
-  empire"). Both forms end on the site naming itself, so detection is
-  structural: a short pitch, a preposition, then `freewebnovel` /
-  `freewebnovel.com` / `empire` as the final word — no length threshold and no
-  repeat-count heuristic, both of which would eat author's notes and
-  "Thanks for reading..." lines that legitimately repeat across a novel. The
-  ambiguous token is `empire` (a sister site), which counts only in lower case,
-  since novels are full of an in-story "Empire" that prose always continues
-  past. Validated against a real 20,051-chapter library before being written:
-  186 marks in 186 chapters, all genuine, with 1,424 other mentions of an empire
-  untouched; the shipped Rust agrees with that count exactly. The adapter
-  filters at fetch time, and because a stored chapter is never revisited,
+  with promo lines, either as their own paragraph or appended to a real one.
+  Detection is structural and starts from the site name, walking back over the
+  preposition to the capitalised word the injected sentence begins on. It does
+  **not** key on a sentence break: the mark lands after a full stop, a bracket,
+  an ellipsis, an em dash, or nothing at all. No length threshold and no
+  repeat-count heuristic either, since both would eat author's notes and the
+  "Thanks for reading..." lines that legitimately repeat across a novel.
+  `freewebnovel` is stripped wherever it occurs, because no story says it;
+  `empire` (a sister site) additionally needs a pitch, must end the paragraph,
+  and counts only in lower case, since novels are full of an in-story "Empire"
+  that prose continues past.
+
+  The first cut of this keyed on "sentence break, then a space", and the library
+  scan that validated it was written from the same idea: they agreed exactly,
+  186 marks for 186, and were both blind to the same 8. An EPUB grep for the
+  bare site name found those, which is the lesson worth keeping — **validate
+  with a check that doesn't share the matcher's assumptions.** The blind check
+  is "every occurrence of the site name anywhere in the library", and it now
+  returns nothing: 194 marks across 194 chapters, 104 distinct wordings, every
+  removal containing the site name, longest 46 characters, nothing added.
+
+  The adapter filters at fetch time, and because a stored chapter is never revisited,
   `core::scrub` does the same over text already saved — a local DB pass rather
   than thousands of requests to re-download prose that is already right apart
   from one line. It writes through `store::update_chapter_body`, which leaves

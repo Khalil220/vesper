@@ -27,8 +27,16 @@ const PARAGRAPH_SELECTOR: &str = "p";
 /// Words the promo lines put between the pitch and the site's name.
 const PROMO_PREPOSITIONS: &[&str] = &["on", "at", "from", "with", "by", "through", "via", "to"];
 
-/// Longest a promo line runs. The observed ones are three to seven words.
-const PROMO_MAX_WORDS: usize = 10;
+/// Longest pitch a mark uses. "Your next journey awaits at ..." is four words.
+const PROMO_MAX_PITCH_WORDS: usize = 6;
+
+/// Punctuation the site wraps a mark in, on the opening side.
+const MARK_OPENERS: &[char] = &['"', '\'', '\u{201c}', '\u{2018}', '(', '[', '<', '*'];
+
+/// The same on the closing side, plus the stop a mark sometimes carries.
+const MARK_CLOSERS: &[char] = &[
+    '"', '\'', '\u{201d}', '\u{2019}', ')', ']', '>', '*', '.', '!', ',',
+];
 
 pub struct FreewebnovelSource<F: Fetcher> {
     fetcher: F,
@@ -40,99 +48,188 @@ impl<F: Fetcher> FreewebnovelSource<F> {
     }
 }
 
-/// Whether a word is the site naming itself, spelled as the marks spell it.
-///
-/// `empire` (a sister site) only counts in lower case: novels are full of prose
-/// about an in-story "Empire", and the capital is what tells the two apart.
-/// `freewebnovel` needs no such care, since no story says it.
-fn is_site_name(word: &str) -> bool {
-    let trimmed = word.trim_end_matches(['.', '!', ',']);
-    let base = trimmed.strip_suffix(".com").unwrap_or(trimmed);
-    base.eq_ignore_ascii_case("freewebnovel") || base == "empire"
-}
-
-/// Whether `text` is exactly one of the site's promo lines, e.g. "Enjoy
-/// exclusive adventures from freewebnovel" or "Updates by Freewebnovel. com".
-///
-/// The shape is fixed: a short pitch, a preposition, then the site's name at
-/// the very end. Requiring the name to come last is what keeps real sentences
-/// safe, because prose that mentions a site name carries on past it.
-fn is_promo(text: &str) -> bool {
-    let mut words: Vec<&str> = text.split_whitespace().collect();
-    // The injection sometimes arrives with a separator glued to its front.
-    while words
-        .first()
-        .is_some_and(|w| !w.chars().any(char::is_alphanumeric))
-    {
-        words.remove(0);
-    }
-    if words.len() < 2 || words.len() > PROMO_MAX_WORDS {
-        return false;
-    }
-
-    let (last, head) = words.split_last().expect("checked above");
-    // "Freewebnovel. com" splits the domain across two words.
-    let (site, rest) = match head.split_last() {
-        Some((prev, before)) if last.eq_ignore_ascii_case("com") && prev.ends_with('.') => {
-            (format!("{prev}com"), before)
-        }
-        _ => ((*last).to_string(), head),
-    };
-    if !is_site_name(&site) {
-        return false;
-    }
-
-    let Some((preposition, pitch)) = rest.split_last() else {
-        return false;
-    };
-    PROMO_PREPOSITIONS
-        .iter()
-        .any(|p| preposition.eq_ignore_ascii_case(p))
-        && pitch
-            .iter()
-            .all(|w| w.chars().all(|c| c.is_alphabetic() || "'\u{2019}-".contains(c)))
-}
-
-/// Where an appended promo starts, if the paragraph ends with one.
-///
-/// The mark is tacked on after a sentence break, so every break is a candidate
-/// and the last one that parses as a promo wins.
-fn promo_tail_start(text: &str) -> Option<usize> {
-    const SENTENCE_END: [char; 7] = ['.', '!', '?', '"', '\'', '\u{2019}', '\u{201d}'];
-    let mut starts = Vec::new();
-    let mut after_end = false;
-    for (i, c) in text.char_indices() {
-        if c.is_whitespace() {
-            if after_end {
-                starts.push(i + c.len_utf8());
-            }
-        } else {
-            after_end = SENTENCE_END.contains(&c);
-        }
-    }
-    starts
-        .into_iter()
-        .rev()
-        .find(|&s| s < text.len() && is_promo(text[s..].trim()))
-}
-
-/// Remove freewebnovel's injected advert from a paragraph.
-///
-/// Returns `None` when the paragraph was nothing but the advert. The site
-/// either drops one in as a paragraph of its own or tacks it onto the end of
-/// real prose; anything else comes back unchanged.
-pub fn strip_promo(paragraph: &str) -> Option<String> {
-    let text = paragraph.trim();
-    if text.is_empty() || is_promo(text) {
+/// Find `needle` (ASCII) from `from`, ignoring case.
+fn ascii_ci_find(haystack: &str, needle: &str, from: usize) -> Option<usize> {
+    let (h, n) = (haystack.as_bytes(), needle.as_bytes());
+    if n.is_empty() || h.len() < n.len() || from > h.len() - n.len() {
         return None;
     }
-    match promo_tail_start(text) {
-        Some(cut) => {
-            let kept = text[..cut].trim_end();
-            (!kept.is_empty()).then(|| kept.to_string())
+    (from..=h.len() - n.len())
+        .find(|&i| haystack.is_char_boundary(i) && h[i..i + n.len()].eq_ignore_ascii_case(n))
+}
+
+/// The word ending before `pos`, with its start index.
+///
+/// A word is letters plus inner apostrophes and hyphens, so punctuation glued
+/// to one ("so long.\u{201c}Please") ends the word instead of joining it, which is
+/// what keeps a mark's pitch from reaching back into the sentence before it.
+fn previous_word(text: &str, pos: usize) -> Option<(usize, &str)> {
+    let mut end = pos;
+    while let Some(c) = text[..end].chars().next_back() {
+        if c == ' ' || c == '\t' {
+            end -= c.len_utf8();
+        } else {
+            break;
         }
-        None => Some(text.to_string()),
     }
+    let word_end = end;
+    while let Some(c) = text[..end].chars().next_back() {
+        if c.is_alphabetic() || c == '\'' || c == '\u{2019}' || c == '-' {
+            end -= c.len_utf8();
+        } else {
+            break;
+        }
+    }
+    (end < word_end).then(|| (end, &text[end..word_end]))
+}
+
+/// Take in the quote or bracket the site opened the mark with, if it is glued
+/// to the front of it.
+fn absorb_openers(text: &str, start: usize) -> usize {
+    let mut at = start;
+    while let Some(c) = text[..at].chars().next_back() {
+        if MARK_OPENERS.contains(&c) {
+            at -= c.len_utf8();
+        } else {
+            break;
+        }
+    }
+    at
+}
+
+/// Take in the punctuation trailing a mark, including a detached run like
+/// " >\u{201d}".
+fn absorb_closers(text: &str, end: usize) -> usize {
+    let mut at = end;
+    loop {
+        let rest = &text[at..];
+        let trimmed = rest.trim_start_matches([' ', '\t']);
+        let gap = rest.len() - trimmed.len();
+        match trimmed.chars().next() {
+            Some(c) if MARK_CLOSERS.contains(&c) => at += gap + c.len_utf8(),
+            _ => return at,
+        }
+    }
+}
+
+/// Where the injected sentence ending at `site_start` begins, if the words
+/// before the site name are a promo pitch.
+///
+/// The site name is preceded by a preposition, and the pitch before that runs
+/// back to the capitalised word the injection starts on. Only spaces may
+/// separate those words, so a mark glued onto real prose can't swallow it.
+fn phrase_start(text: &str, site_start: usize) -> Option<usize> {
+    let (prep_start, preposition) = previous_word(text, site_start)?;
+    if !PROMO_PREPOSITIONS
+        .iter()
+        .any(|p| preposition.eq_ignore_ascii_case(p))
+    {
+        return None;
+    }
+
+    let mut cursor = prep_start;
+    for _ in 0..PROMO_MAX_PITCH_WORDS {
+        let (start, word) = previous_word(text, cursor)?;
+        if word.chars().next().is_some_and(char::is_uppercase) {
+            return Some(absorb_openers(text, start));
+        }
+        if !matches!(text[..start].chars().next_back(), Some(' ')) {
+            return None;
+        }
+        cursor = start;
+    }
+    None
+}
+
+/// Whether only the mark's own trailing punctuation follows.
+fn only_decoration(rest: &str) -> bool {
+    rest.chars()
+        .all(|c| c.is_whitespace() || MARK_CLOSERS.contains(&c))
+}
+
+/// Byte ranges of the injected marks in `text`.
+///
+/// `freewebnovel` is removed wherever it appears, with its pitch when it has
+/// one: no story says the word, so every occurrence is the site talking,
+/// including a bare "\u{2018}Freewebnovel.com*\u{2019}" dropped between sentences. `empire`
+/// (a sister site) is the ambiguous one and gets two extra conditions: it must
+/// carry a pitch, and the mark must end the paragraph. Prose is full of an
+/// in-story empire, but it says "the Empire" and carries on past the word.
+fn promo_spans(text: &str) -> Vec<(usize, usize)> {
+    let mut spans: Vec<(usize, usize)> = Vec::new();
+
+    let mut from = 0;
+    while let Some(start) = ascii_ci_find(text, "freewebnovel", from) {
+        let mut end = start + "freewebnovel".len();
+        for suffix in [".com", ". com"] {
+            if text[end..].len() >= suffix.len()
+                && text.as_bytes()[end..end + suffix.len()].eq_ignore_ascii_case(suffix.as_bytes())
+            {
+                end += suffix.len();
+                break;
+            }
+        }
+        end = absorb_closers(text, end);
+        let begin = phrase_start(text, start).unwrap_or_else(|| absorb_openers(text, start));
+        spans.push((begin, end));
+        from = end;
+    }
+
+    let mut from = 0;
+    while let Some(start) = ascii_find_word(text, "empire", from) {
+        let end = absorb_closers(text, start + "empire".len());
+        from = start + "empire".len();
+        if let Some(begin) = phrase_start(text, start) {
+            if only_decoration(&text[end..]) {
+                spans.push((begin, end));
+            }
+        }
+    }
+
+    spans.sort_unstable();
+    spans
+}
+
+/// Find `needle` as a whole word, case-sensitively.
+fn ascii_find_word(haystack: &str, needle: &str, from: usize) -> Option<usize> {
+    let mut at = from;
+    while let Some(i) = haystack[at..].find(needle).map(|i| i + at) {
+        let before = haystack[..i].chars().next_back();
+        let after = haystack[i + needle.len()..].chars().next();
+        let bounded = !before.is_some_and(char::is_alphanumeric)
+            && !after.is_some_and(char::is_alphanumeric);
+        if bounded {
+            return Some(i);
+        }
+        at = i + needle.len();
+    }
+    None
+}
+
+/// Remove freewebnovel's injected adverts from a paragraph.
+///
+/// Returns `None` when nothing but the advert (and stray punctuation) is left.
+pub fn strip_promo(paragraph: &str) -> Option<String> {
+    let text = paragraph.trim();
+    let spans = promo_spans(text);
+    if spans.is_empty() {
+        return (!text.is_empty()).then(|| text.to_string());
+    }
+
+    let mut kept = String::with_capacity(text.len());
+    let mut cursor = 0;
+    for (start, end) in spans {
+        if start > cursor {
+            kept.push_str(&text[cursor..start]);
+        }
+        cursor = cursor.max(end);
+    }
+    kept.push_str(&text[cursor..]);
+
+    // Taking a mark out can leave a doubled space, or a lone separator where
+    // the mark arrived with one glued to its front.
+    let tidy = kept.split_whitespace().collect::<Vec<_>>().join(" ");
+    tidy.chars().any(char::is_alphanumeric).then_some(tidy)
 }
 
 /// Apply [`strip_promo`] across a chapter, keeping the original if the marks
@@ -409,6 +506,60 @@ mod tests {
             strip_promo_paragraphs(&paragraphs),
             vec!["He drew his sword.".to_string(), "The blade sang.".to_string()]
         );
+    }
+
+    /// Marks that survived the first pass, because it looked for a mark after a
+    /// full stop and a space. The site also appends after a bracket, an
+    /// ellipsis or a dash, glues one on with no space at all, and drops a bare
+    /// decorated domain between two sentences.
+    #[test]
+    fn strips_marks_the_punctuation_hid() {
+        let cases = [
+            (
+                "Then\u{2014}without hesitation\u{2014} Enjoy exclusive content from freewebnovel",
+                "Then\u{2014}without hesitation\u{2014}",
+            ),
+            (
+                "[Energy decreased by 0.1] Discover more stories at freewebnovel",
+                "[Energy decreased by 0.1]",
+            ),
+            (
+                "Just when the countdown reach 10, 9, 8\u{2026} Find your next read on empire",
+                "Just when the countdown reach 10, 9, 8\u{2026}",
+            ),
+            ("[Max] Explore stories at empire", "[Max]"),
+            (
+                "\u{2013} Battle Coins: [9240] Stay updated via empire",
+                "\u{2013} Battle Coins: [9240]",
+            ),
+            (
+                "See you in the Battle Realm at noon tomorrow.] Read exclusive adventures at empire",
+                "See you in the Battle Realm at noon tomorrow.]",
+            ),
+            (
+                "ordinary people would not last so long.\u{201c}Please reading on Freewebnovel.com >\u{201d}",
+                "ordinary people would not last so long.",
+            ),
+            (
+                "Those were the Mad Blood weapons. \u{2018}Freewebnovel.com*\u{2019}It turned out that they were gone.",
+                "Those were the Mad Blood weapons. It turned out that they were gone.",
+            ),
+        ];
+        for (raw, want) in cases {
+            assert_eq!(strip_promo(raw).as_deref(), Some(want), "input: {raw:?}");
+        }
+    }
+
+    /// The reason `empire` has to end the paragraph: mid-sentence it is prose,
+    /// preposition in front of it or not.
+    #[test]
+    fn keeps_an_empire_that_the_sentence_carries_past() {
+        for prose in [
+            "In the war with empire forces, the column marched on.",
+            "He rode to empire lands and never came back.",
+        ] {
+            assert_eq!(strip_promo(prose).as_deref(), Some(prose), "{prose:?}");
+        }
     }
 
     /// A chapter that is nothing but marks keeps its text: losing the advert is

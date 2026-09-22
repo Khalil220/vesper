@@ -86,20 +86,33 @@ rules-of-the-road.
   it being retried every sync; the chapter is stored, so `unfilled_gaps` never
   shows it to the user.
 - **Site adverts are stripped on the site's own wording, never on length or
-  frequency.** freewebnovel injects promo lines into chapter text: either a
-  paragraph of its own or appended to the end of a real one, after the sentence
-  break ("...Alice asked coldly. Find more chapters on empire"). Both forms end
-  on the site naming itself, and that is the whole test: a short pitch, a
-  preposition, then `freewebnovel` / `freewebnovel.com` / `empire` (a sister
-  site) as the last word. `freewebnovel.strip_promo` handles both shapes; the
-  adapter runs it at fetch time and `core::scrub` (`vesper scrub`) over stored
-  text. **`empire` only counts in lower case** — novels are full of prose about
-  an in-story "Empire", and the capital is what separates them. Checked against
-  a 20,051-chapter library: 186 marks in 186 chapters, every one real, and all
-  1,424 other mentions of an empire left alone. A chapter that is *nothing* but
-  marks keeps its text — losing the advert isn't worth losing the chapter. Don't
-  switch this to a length or repeat-count heuristic; "Thanks for reading..." and
-  "Author's Note: ..." repeat across hundreds of chapters and are the author's.
+  frequency.** freewebnovel injects promo lines into chapter text. Detection
+  (`freewebnovel::strip_promo`) starts from the **site name** and walks *back*
+  over the preposition to the capitalised word the injected sentence starts on;
+  it does not look for a sentence break, because the mark lands after anything:
+  a full stop, a bracket (`[Max] Explore stories at empire`), an ellipsis, an
+  em dash, or no space at all (`so long.“Please reading on Freewebnovel.com >”`).
+  Wrapping punctuation goes with it. The adapter runs it at fetch time and
+  `core::scrub` (`vesper scrub`) over stored text.
+  - **`freewebnovel` is removed wherever it appears**, pitch or no pitch: no
+    story says the word, so a bare `‘Freewebnovel.com*’` dropped between two
+    sentences is still the site talking.
+  - **`empire` (a sister site) needs a pitch *and* must end the paragraph**, and
+    **only counts in lower case**. Prose is thick with an in-story "Empire" and
+    says "with empire forces" mid-sentence; the mark stops at the word.
+  - A chapter that is *nothing* but marks keeps its text. Losing the advert is
+    not worth losing the chapter.
+  - Don't switch this to a length or repeat-count heuristic: "Thanks for
+    reading..." and "Author's Note: ..." repeat across hundreds of chapters and
+    belong to the author.
+  - **Validate with a scan that doesn't share the matcher's assumptions.** The
+    first version keyed on "sentence break, then a space" and a library scan
+    written the same way agreed with it perfectly, 186 for 186; both were blind
+    to the same 8 marks, which an EPUB grep for the bare site name then found.
+    The punctuation-blind check is "every occurrence of the site name anywhere",
+    and on a 20,051-chapter library it now comes back empty: 194 marks removed
+    across 194 chapters, 104 distinct wordings, every removal containing the
+    site name and the longest 46 characters.
 - **Refetch overwrites; it never deletes.** `refetch` re-downloads stored
   chapters and replaces their text, which is the escape hatch for a site that
   changed one after we saved it. Sync can't see those: a stored chapter is
