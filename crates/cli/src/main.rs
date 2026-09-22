@@ -18,8 +18,8 @@ use anyhow::{anyhow, bail, ensure, Result};
 use clap::{Parser, Subcommand};
 use vesper_core::{
     build_epub, build_source, download_cover, epub_path, migrate_lightnovelworld, sync_novel,
-    Config, DerivedState, MigrationOutcome, MigrationReport, RefetchReport, Source, Store,
-    StoredNovel, StoredSource, SyncProgress, SyncReport,
+    Chapter, Config, Cover, DerivedState, MigrationOutcome, MigrationReport, NovelMeta,
+    RefetchReport, Source, Store, StoredNovel, StoredSource, SyncProgress, SyncReport,
 };
 
 #[derive(Parser)]
@@ -32,6 +32,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Subscribe to a novel (registers it and its primary source).
+    #[command(alias = "sub")]
     Subscribe {
         /// Novel landing-page URL.
         url: String,
@@ -119,17 +120,30 @@ enum Command {
         /// (quote it if it contains spaces).
         novel: String,
     },
-    /// Download missing chapters for a subscribed novel (resume-aware).
+    /// Download chapters for a subscribed novel, or a URL straight to an EPUB.
     Fetch {
-        /// Novel to fetch: its id (from `vesper subs`), or the exact title
-        /// (quote it if it contains spaces).
+        /// Novel to fetch: its id (from `vesper subs`), the exact title (quote
+        /// it if it contains spaces), or a novel's URL. A URL you don't follow
+        /// is downloaded and exported without being stored.
         novel: String,
         /// Max new chapters to fetch this run (0 = all missing).
         #[arg(long, default_value_t = 0)]
         limit: usize,
+        /// Output path for the EPUB (only for a URL you don't follow).
+        #[arg(long)]
+        out: Option<PathBuf>,
         /// Override the request delay, in milliseconds (default: config value).
         #[arg(long)]
         delay_ms: Option<u64>,
+    },
+    /// Strip injected site adverts from stored chapters (no network).
+    Scrub {
+        /// Novel to scrub: its id (from `vesper subs`) or exact title (quote if
+        /// it has spaces), or `all` for every subscription.
+        novel: String,
+        /// Report what would change without writing anything.
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Build an EPUB from a subscribed novel's stored chapters.
     Export {
@@ -156,6 +170,9 @@ enum Command {
         delay_ms: Option<u64>,
     },
     /// Manage the background sync task (install/uninstall/status).
+    // `-h`/`--help` already covers this; clap's generated `help` subcommand is
+    // a second way to say the same thing.
+    #[command(disable_help_subcommand = true)]
     Service {
         #[command(subcommand)]
         action: ServiceAction,
@@ -222,7 +239,10 @@ async fn main() -> Result<()> {
         }
         Command::SetPrimary { novel, source } => set_primary(novel, source),
         Command::Unsubscribe { novel } => unsubscribe(novel),
-        Command::Fetch { novel, limit, delay_ms } => fetch(&config, novel, limit, delay_ms).await,
+        Command::Fetch { novel, limit, out, delay_ms } => {
+            fetch(&config, novel, limit, out, delay_ms).await
+        }
+        Command::Scrub { novel, dry_run } => scrub(&config, novel, dry_run).await,
         Command::Export { novel, out } => export(&config, novel, out).await,
         Command::Prune { retention_days } => prune(&config, retention_days),
         Command::Sync { limit, delay_ms } => sync_all(&config, limit, delay_ms).await,
@@ -348,33 +368,53 @@ async fn export_novel(store: &Store, novel: &StoredNovel, config: &Config) -> Re
         None => None,
     };
     let gaps: Vec<u32> = store.unfilled_gaps(novel.id)?.into_iter().collect();
-    let mut paths = Vec::new();
+    let paths = write_epubs(config, &meta, &chapters, cover.as_ref(), &gaps, None)?;
+    store.mark_all_exported(novel.id)?;
+    Ok(paths)
+}
 
+/// Write a novel's EPUB: one file, or volumes when `split_every_chapters` is
+/// set. `out` overrides both with a single file at that path.
+///
+/// Shared by the library export and by a URL fetched straight to a file, so a
+/// one-off download splits into volumes the same way a subscription does.
+fn write_epubs(
+    config: &Config,
+    meta: &NovelMeta,
+    chapters: &[Chapter],
+    cover: Option<&Cover>,
+    gaps: &[u32],
+    out: Option<&Path>,
+) -> Result<Vec<PathBuf>> {
+    if let Some(path) = out {
+        build_epub(meta, chapters, path, cover, gaps)?;
+        return Ok(vec![path.to_path_buf()]);
+    }
     if config.split_every_chapters == 0 {
         let path = epub_path(&config.output_dir, meta.author.as_deref(), &meta.title, None);
-        build_epub(&meta, &chapters, &path, cover.as_ref(), &gaps)?;
-        paths.push(path);
-    } else {
-        let size = config.split_every_chapters as usize;
-        for (i, chunk) in chapters.chunks(size).enumerate() {
-            let path = epub_path(
-                &config.output_dir,
-                meta.author.as_deref(),
-                &meta.title,
-                Some((i + 1) as u32),
-            );
-            // Only list gaps that fall within this volume's chapter range.
-            let vol_gaps: Vec<u32> = match (chunk.first(), chunk.last()) {
-                (Some(f), Some(l)) => {
-                    gaps.iter().copied().filter(|g| *g >= f.number && *g <= l.number).collect()
-                }
-                _ => Vec::new(),
-            };
-            build_epub(&meta, chunk, &path, cover.as_ref(), &vol_gaps)?;
-            paths.push(path);
-        }
+        build_epub(meta, chapters, &path, cover, gaps)?;
+        return Ok(vec![path]);
     }
-    store.mark_all_exported(novel.id)?;
+
+    let size = config.split_every_chapters as usize;
+    let mut paths = Vec::new();
+    for (i, chunk) in chapters.chunks(size).enumerate() {
+        let path = epub_path(
+            &config.output_dir,
+            meta.author.as_deref(),
+            &meta.title,
+            Some((i + 1) as u32),
+        );
+        // Only list gaps that fall within this volume's chapter range.
+        let vol_gaps: Vec<u32> = match (chunk.first(), chunk.last()) {
+            (Some(f), Some(l)) => {
+                gaps.iter().copied().filter(|g| *g >= f.number && *g <= l.number).collect()
+            }
+            _ => Vec::new(),
+        };
+        build_epub(meta, chunk, &path, cover, &vol_gaps)?;
+        paths.push(path);
+    }
     Ok(paths)
 }
 
@@ -1115,11 +1155,40 @@ fn unsubscribe(novel: String) -> Result<()> {
     Ok(())
 }
 
-async fn fetch(config: &Config, novel: String, limit: usize, delay_ms: Option<u64>) -> Result<()> {
+/// Whether an argument is a URL rather than an id or a title.
+fn is_url(arg: &str) -> bool {
+    arg.starts_with("http://") || arg.starts_with("https://")
+}
+
+async fn fetch(
+    config: &Config,
+    novel: String,
+    limit: usize,
+    out: Option<PathBuf>,
+    delay_ms: Option<u64>,
+) -> Result<()> {
     let store = Store::open_default()?;
-    let found = store
-        .find_novel(&novel)?
-        .ok_or_else(|| anyhow!("no subscription matches \"{novel}\""))?;
+    let subscribed = if is_url(&novel) {
+        store.find_novel_by_source_url(&novel)?
+    } else {
+        Some(
+            store
+                .find_novel(&novel)?
+                .ok_or_else(|| anyhow!("no subscription matches \"{novel}\""))?,
+        )
+    };
+
+    // A URL nobody follows goes straight to an EPUB, library untouched.
+    let Some(found) = subscribed else {
+        return fetch_to_epub(config, &novel, limit, out, delay_ms).await;
+    };
+    ensure!(
+        out.is_none(),
+        "--out is for a URL you don't follow; \"{}\" is in your library, so \
+         `vesper export {} --out <path>` writes its EPUB",
+        found.title,
+        found.id
+    );
 
     let sources = build_sources(&found, delay_ms.unwrap_or(config.request_delay_ms))?;
     ensure!(!sources.is_empty(), "no usable sources for \"{}\"", found.title);
@@ -1195,6 +1264,153 @@ async fn fetch(config: &Config, novel: String, limit: usize, delay_ms: Option<u6
              add an alternate source (`vesper add-source {}`) to try to fill them.",
             describe_gaps(&gaps),
             found.id
+        );
+    }
+    Ok(())
+}
+
+/// Download a novel straight to an EPUB, storing nothing.
+///
+/// For a novel you don't want to follow — a finished one, typically, where
+/// subscribing, fetching and unsubscribing is three commands to get one file.
+/// Nothing lands in the library, so there is nothing to resume: an interrupted
+/// run writes what it got and says how far it reached.
+async fn fetch_to_epub(
+    config: &Config,
+    url: &str,
+    limit: usize,
+    out: Option<PathBuf>,
+    delay_ms: Option<u64>,
+) -> Result<()> {
+    let source = source_for(url, delay_ms.unwrap_or(config.request_delay_ms))?;
+
+    eprintln!("Fetching novel metadata...");
+    let meta = source.fetch_novel(url).await?;
+    eprintln!(
+        "  {} by {}",
+        meta.title,
+        meta.author.as_deref().unwrap_or("Unknown Author")
+    );
+
+    eprintln!("Walking the table of contents...");
+    let mut refs = source.discover_chapters(url, None).await?;
+    ensure!(!refs.is_empty(), "no chapters found for {url}");
+    if limit > 0 {
+        refs.truncate(limit);
+    }
+
+    let cancel = Arc::new(AtomicBool::new(false));
+    let watcher = {
+        let cancel = cancel.clone();
+        tokio::spawn(async move {
+            if tokio::signal::ctrl_c().await.is_ok() {
+                cancel.store(true, Ordering::SeqCst);
+            }
+        })
+    };
+
+    let total = refs.len();
+    let mut chapters = Vec::with_capacity(total);
+    let mut failed: Vec<u32> = Vec::new();
+    let mut bar = ProgressBar::new();
+    let mut interrupted = false;
+
+    for (done, chapter_ref) in refs.iter().enumerate() {
+        bar.update(SyncProgress::Fetching { done, total });
+        match source.fetch_chapter(chapter_ref).await {
+            Ok(c) => chapters.push(c),
+            Err(e) => {
+                bar.finish();
+                eprintln!("  ! ch.{}: {e}", chapter_ref.number);
+                failed.push(chapter_ref.number);
+            }
+        }
+        if cancel.load(Ordering::SeqCst) {
+            interrupted = true;
+            break;
+        }
+    }
+    bar.finish();
+    watcher.abort();
+    ensure!(
+        !chapters.is_empty(),
+        "no chapters could be downloaded from {url}; no EPUB was written"
+    );
+
+    let cover = match &meta.cover_url {
+        Some(u) => download_cover(u).await,
+        None => None,
+    };
+    let paths = write_epubs(config, &meta, &chapters, cover.as_ref(), &[], out.as_deref())?;
+
+    println!(
+        "Downloaded {} of {total} chapter(s) of \"{}\" to {} file(s):",
+        chapters.len(),
+        meta.title,
+        paths.len()
+    );
+    for p in &paths {
+        println!("  {}", p.display());
+    }
+    if !failed.is_empty() {
+        let numbers: Vec<String> = failed.iter().map(u32::to_string).collect();
+        println!("Missing from the EPUB: ch. {}", numbers.join(", "));
+    }
+    if interrupted {
+        println!("Stopped early on Ctrl+C, so the EPUB holds only what was downloaded.");
+    }
+    println!("Nothing was added to your library.");
+    Ok(())
+}
+
+async fn scrub(config: &Config, novel: String, dry_run: bool) -> Result<()> {
+    let store = Store::open_default()?;
+    let novels = if novel.eq_ignore_ascii_case("all") {
+        store.list_subscriptions()?
+    } else {
+        vec![store
+            .find_novel(&novel)?
+            .ok_or_else(|| anyhow!("no subscription matches \"{novel}\""))?]
+    };
+
+    let mut total_marks = 0usize;
+    let mut total_chapters = 0usize;
+    for n in &novels {
+        let report = vesper_core::scrub_novel(&store, n.id, dry_run)?;
+        if report.is_empty() {
+            // Staying quiet for `all` keeps the clean majority off screen.
+            if novels.len() == 1 {
+                println!("{}: no site marks found.", n.title);
+            }
+            continue;
+        }
+        total_marks += report.marks;
+        total_chapters += report.chapters.len();
+        println!(
+            "{}: {} mark(s) {} in {} chapter(s).",
+            n.title,
+            report.marks,
+            if dry_run { "found" } else { "removed" },
+            report.chapters.len()
+        );
+        if !dry_run && config.auto_append {
+            let paths = export_and_track(&store, config, n).await;
+            if !paths.is_empty() {
+                println!("  {} — exported", n.title);
+            }
+        }
+    }
+
+    if total_chapters == 0 {
+        if novels.len() > 1 {
+            println!("No site marks found.");
+        }
+    } else if dry_run {
+        println!("\n{total_marks} mark(s) in {total_chapters} chapter(s). Run without --dry-run to remove them.");
+    } else if !config.auto_append {
+        println!(
+            "\n{total_marks} mark(s) removed from {total_chapters} chapter(s). \
+             Run `vesper export <novel>` to update the EPUBs."
         );
     }
     Ok(())

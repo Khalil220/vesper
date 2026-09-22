@@ -49,6 +49,7 @@ either the numeric id or the title. `vesper subs` shows both.
 
 ```
 vesper subscribe <url> [--force]
+vesper sub <url>
 ```
 
 Start following a novel, with the page you gave as its main source. This
@@ -118,13 +119,23 @@ would actually help.
 ### fetch
 
 ```
-vesper fetch <novel> [--limit N]
+vesper fetch <novel|url> [--limit N] [--out PATH]
 ```
 
 Download missing chapters into the database. It always resumes from
 wherever it left off, so interrupting it costs you nothing. `--limit`
 caps how many chapters this run downloads (`--limit 0` means everything
 that's missing, which is also the default behavior).
+
+You can also give it a URL. If you already follow that novel, it fetches as
+usual. If you don't, Vesper downloads the chapters, writes the EPUB and stores
+nothing: no subscription, no chapters in the database. That's the short way to
+grab a finished novel you have no reason to keep following, instead of
+subscribing, fetching and unsubscribing to get one file. `--out` puts the book
+where you want it; without it, it lands in the usual library folder, split into
+volumes if you have that configured. Nothing is stored, so there's nothing to
+resume: Ctrl+C part-way writes the chapters it already has and says how far it
+got.
 
 Ctrl+C is handled gracefully: the chapter currently downloading is finished
 and saved, then the command stops and tells you how to resume. If you press
@@ -246,6 +257,26 @@ Fallbacks are used. Repair tries each of a novel's sources in turn, so if the
 main site is still gating a chapter but a fallback carries it in full, the
 fallback is what you get. That's a good reason to attach one
 (`vesper add-source`) before repairing a novel whose main site gates chapters.
+
+### scrub
+
+```
+vesper scrub <novel|all> [--dry-run]
+```
+
+Take out the adverts some sites inject into chapter text: short lines like
+"Enjoy more content from freewebnovel", either sitting there as their own
+paragraph or tacked onto the end of a real one. New downloads are cleaned as
+they arrive, so this is for chapters you saved before that existed. It reads and
+rewrites the database only, so it costs no requests and takes seconds.
+
+What makes it safe is that the advert ends on the site's name. A novel about an
+in-story empire is untouched, because prose says "the Empire" and carries on
+past it, while the advert stops there. `--dry-run` counts them first so you can
+see what it would touch.
+
+Chapters it changes are marked for re-export, so run `vesper export <novel>`
+afterwards, or let `auto_append` handle it.
 
 ### unsubscribe
 

@@ -85,6 +85,21 @@ rules-of-the-road.
   instead (the primary genuinely cannot provide that chapter), which also stops
   it being retried every sync; the chapter is stored, so `unfilled_gaps` never
   shows it to the user.
+- **Site adverts are stripped on the site's own wording, never on length or
+  frequency.** freewebnovel injects promo lines into chapter text: either a
+  paragraph of its own or appended to the end of a real one, after the sentence
+  break ("...Alice asked coldly. Find more chapters on empire"). Both forms end
+  on the site naming itself, and that is the whole test: a short pitch, a
+  preposition, then `freewebnovel` / `freewebnovel.com` / `empire` (a sister
+  site) as the last word. `freewebnovel.strip_promo` handles both shapes; the
+  adapter runs it at fetch time and `core::scrub` (`vesper scrub`) over stored
+  text. **`empire` only counts in lower case** — novels are full of prose about
+  an in-story "Empire", and the capital is what separates them. Checked against
+  a 20,051-chapter library: 186 marks in 186 chapters, every one real, and all
+  1,424 other mentions of an empire left alone. A chapter that is *nothing* but
+  marks keeps its text — losing the advert isn't worth losing the chapter. Don't
+  switch this to a length or repeat-count heuristic; "Thanks for reading..." and
+  "Author's Note: ..." repeat across hundreds of chapters and are the author's.
 - **Refetch overwrites; it never deletes.** `refetch` re-downloads stored
   chapters and replaces their text, which is the escape hatch for a site that
   changed one after we saved it. Sync can't see those: a stored chapter is
@@ -155,7 +170,9 @@ rules-of-the-road.
   pipe-separated, the **same** character as the site-name suffix, so strip the
   branding off the *end*; splitting on the first `|` eats the name and leaves a
   bare "Chapter N". Content `.txt`; metadata `og:novel:*`; status word form
-  ("Completed"/"Ongoing").
+  ("Completed"/"Ongoing"). **Injects promo lines into the prose** (see the
+  site-advert invariant above), sometimes mangled: "Updates by Freewebnovel.
+  com", "Continue -reading on Freewebnovel.com".
 - **chikari.moe** (hand-written adapter, Tier 1): where lightnovelworld's novel
   library moved. A SvelteKit app whose chapter pages are **client-rendered**
   (the HTML for `/novels/<slug>/<n>` is an empty app shell), so there is nothing
@@ -297,6 +314,10 @@ Cargo workspace, two crates under `crates/`:
     preview a real library without writing to it.
   - `refetch` — re-download stored chapters and replace their text (see the
     invariant above). Overwrite-only; there is no delete path by design.
+  - `scrub` — strip injected site adverts from *stored* chapters, no network
+    (see the site-advert invariant above). Uses `freewebnovel::strip_promo`,
+    the same pure function the adapter applies at fetch time, and writes through
+    `store::update_chapter_body` so the source attribution is left alone.
   - `repair` — re-fetch chapters stored as a site's gating placeholder (see the
     invariant above). `looks_like_gate_stub` and the replacement check are pure
     and unit-tested, including the short-author's-note case that length-based
@@ -318,7 +339,10 @@ Cargo workspace, two crates under `crates/`:
     content-upgrade pass and `repair`. `repoint_source` (site moved) and
     `promote_source` (fallback takes over) both keep stored chapters
     attributed to a live source — see their invariants above.
-    `chapters_shorter_than` narrows the placeholder scan. `meta` is the
+    `update_chapter_body` is the no-network body edit (the advert scrub), which
+    keeps `source_id` so the upgrade pass has nothing to redo.
+    `find_novel_by_source_url` is how `fetch <url>` tells a subscription from a
+    one-off. `chapters_shorter_than` narrows the placeholder scan. `meta` is the
     key/value table one-shot migrations mark themselves done in. `migrate()` is
     additive and idempotent; the one destructive step is the `novels` rebuild
     that adds `AUTOINCREMENT`, which runs with `foreign_keys=OFF` (`DROP
@@ -340,6 +364,11 @@ Cargo workspace, two crates under `crates/`:
     interrupted backfill does not transition to Live).
   - `util` — filename sanitization, chapter number/title parsing, `now_unix`.
 - `cli` (bin `vesper`): clap subcommands on a current-thread Tokio runtime.
+  `fetch` takes an id, a title or a URL: a URL that no subscription holds
+  downloads straight to an EPUB and stores **nothing** (no novel row, no
+  chapters), which is the answer to "I just want this finished novel as a file".
+  `write_epubs` is shared by that path and the library export, so volume
+  splitting behaves the same in both.
   `sync` takes a single-instance advisory file lock (`fs2`) and appends to a
   log file. The in-place `n/m` progress line draws only when stderr is a
   terminal (`VESPER_FORCE_PROGRESS` forces it). `fetch` watches

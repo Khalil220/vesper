@@ -449,6 +449,34 @@ Because the sync runs unnoticed, it must be inspectable. **Partially implemented
   `dc:subject`. lightnovelworld leaves it `None` (genre is only in its JSON-LD,
   which we don't parse), as do royalroad and scribblehub.
 
+- **Injected site adverts (`vesper scrub`).** freewebnovel salts chapter text
+  with promo lines, either as their own paragraph or appended after the last
+  sentence of a real one ("...Alice asked coldly. Find more chapters on
+  empire"). Both forms end on the site naming itself, so detection is
+  structural: a short pitch, a preposition, then `freewebnovel` /
+  `freewebnovel.com` / `empire` as the final word — no length threshold and no
+  repeat-count heuristic, both of which would eat author's notes and
+  "Thanks for reading..." lines that legitimately repeat across a novel. The
+  ambiguous token is `empire` (a sister site), which counts only in lower case,
+  since novels are full of an in-story "Empire" that prose always continues
+  past. Validated against a real 20,051-chapter library before being written:
+  186 marks in 186 chapters, all genuine, with 1,424 other mentions of an empire
+  untouched; the shipped Rust agrees with that count exactly. The adapter
+  filters at fetch time, and because a stored chapter is never revisited,
+  `core::scrub` does the same over text already saved — a local DB pass rather
+  than thousands of requests to re-download prose that is already right apart
+  from one line. It writes through `store::update_chapter_body`, which leaves
+  `source_id` alone: the source did supply the chapter, and re-attributing it
+  would hand the content-upgrade pass work to redo.
+- **One-off download (`vesper fetch <url>`).** A URL no subscription holds is
+  downloaded and written straight to an EPUB, storing nothing. The database
+  earns its keep for a novel being followed (resume, delta sync, appends), and
+  none of that applies to a finished novel someone wants as a file once;
+  subscribe/fetch/unsubscribe was three commands and a pile of rows to get one
+  book. A URL that *is* subscribed behaves exactly as before, so the shortcut
+  can't quietly bypass the library. EPUB writing is shared with the library
+  export (`write_epubs`), so volume splitting works the same either way.
+
 ### Decided against (for now)
 
 - **zstd compression of stored text.** A chapter is ~5–8 KB compressed and a

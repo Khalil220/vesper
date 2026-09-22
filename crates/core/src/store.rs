@@ -504,6 +504,31 @@ impl Store {
             .optional()?)
     }
 
+    /// The subscription a source URL belongs to, if any.
+    ///
+    /// Lets a URL stand in for an id or title on the command line. A trailing
+    /// slash is not a different novel, so both spellings are tried.
+    pub fn find_novel_by_source_url(&self, url: &str) -> Result<Option<StoredNovel>> {
+        let bare = url.trim_end_matches('/');
+        for candidate in [url, bare, &format!("{bare}/")] {
+            if let Some(id) = self.novel_id_for_source_url(candidate)? {
+                return self.find_novel(&id.to_string());
+            }
+        }
+        Ok(None)
+    }
+
+    fn novel_id_for_source_url(&self, url: &str) -> Result<Option<i64>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT novel_id FROM sources WHERE url = ?1",
+                params![url],
+                |r| r.get::<_, i64>(0),
+            )
+            .optional()?)
+    }
+
     fn novel_id_for(&self, title: &str, author: Option<&str>) -> Result<Option<i64>> {
         Ok(self
             .conn
@@ -820,6 +845,28 @@ impl Store {
             params![novel_id, chapter.number, chapter.title, body, source_id],
         )?;
         Ok(())
+    }
+
+    /// Overwrite a stored chapter's body, leaving its source attribution alone.
+    ///
+    /// For edits to text already in the library (the watermark scrub), as
+    /// opposed to replacing it from a site: the source did supply the chapter,
+    /// so re-attributing it would be wrong and would hand the content-upgrade
+    /// pass work to redo. Returns whether anything changed, and clears
+    /// `exported` when it did so the next export rebuilds the EPUB.
+    pub fn update_chapter_body(
+        &self,
+        novel_id: i64,
+        number: u32,
+        paragraphs: &[String],
+    ) -> Result<bool> {
+        let body = paragraphs.join("\n\n");
+        let changed = self.conn.execute(
+            "UPDATE chapters SET body = ?3, exported = 0, exported_at = NULL
+             WHERE novel_id = ?1 AND number = ?2 AND body <> ?3",
+            params![novel_id, number, body],
+        )?;
+        Ok(changed > 0)
     }
 
     /// Overwrite a stored chapter's title, leaving its body and source alone.
@@ -1296,6 +1343,29 @@ mod tests {
         assert!(err.to_string().contains("does not belong"), "{err}");
         // The rejected call changed nothing.
         assert_eq!(s.find_novel(&b.to_string()).unwrap().unwrap().sources[0].priority, 1);
+    }
+
+    /// `vesper fetch <url>` has to tell a subscribed novel from a stranger, and
+    /// a trailing slash must not decide it.
+    #[test]
+    fn finds_a_subscription_by_its_source_url() {
+        let s = mem_store();
+        let id = s
+            .subscribe(&sample_meta("https://example.com/a.html"), "example")
+            .unwrap();
+
+        assert_eq!(
+            s.find_novel_by_source_url("https://example.com/a.html").unwrap().map(|n| n.id),
+            Some(id)
+        );
+        assert_eq!(
+            s.find_novel_by_source_url("https://example.com/a.html/").unwrap().map(|n| n.id),
+            Some(id)
+        );
+        assert!(s
+            .find_novel_by_source_url("https://example.com/never-seen.html")
+            .unwrap()
+            .is_none());
     }
 
     #[test]

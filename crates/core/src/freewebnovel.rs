@@ -24,6 +24,12 @@ use crate::util::clean_chapter_title;
 const CONTENT_SELECTOR: &str = ".txt";
 const PARAGRAPH_SELECTOR: &str = "p";
 
+/// Words the promo lines put between the pitch and the site's name.
+const PROMO_PREPOSITIONS: &[&str] = &["on", "at", "from", "with", "by", "through", "via", "to"];
+
+/// Longest a promo line runs. The observed ones are three to seven words.
+const PROMO_MAX_WORDS: usize = 10;
+
 pub struct FreewebnovelSource<F: Fetcher> {
     fetcher: F,
 }
@@ -32,6 +38,112 @@ impl<F: Fetcher> FreewebnovelSource<F> {
     pub fn new(fetcher: F) -> Self {
         Self { fetcher }
     }
+}
+
+/// Whether a word is the site naming itself, spelled as the marks spell it.
+///
+/// `empire` (a sister site) only counts in lower case: novels are full of prose
+/// about an in-story "Empire", and the capital is what tells the two apart.
+/// `freewebnovel` needs no such care, since no story says it.
+fn is_site_name(word: &str) -> bool {
+    let trimmed = word.trim_end_matches(['.', '!', ',']);
+    let base = trimmed.strip_suffix(".com").unwrap_or(trimmed);
+    base.eq_ignore_ascii_case("freewebnovel") || base == "empire"
+}
+
+/// Whether `text` is exactly one of the site's promo lines, e.g. "Enjoy
+/// exclusive adventures from freewebnovel" or "Updates by Freewebnovel. com".
+///
+/// The shape is fixed: a short pitch, a preposition, then the site's name at
+/// the very end. Requiring the name to come last is what keeps real sentences
+/// safe, because prose that mentions a site name carries on past it.
+fn is_promo(text: &str) -> bool {
+    let mut words: Vec<&str> = text.split_whitespace().collect();
+    // The injection sometimes arrives with a separator glued to its front.
+    while words
+        .first()
+        .is_some_and(|w| !w.chars().any(char::is_alphanumeric))
+    {
+        words.remove(0);
+    }
+    if words.len() < 2 || words.len() > PROMO_MAX_WORDS {
+        return false;
+    }
+
+    let (last, head) = words.split_last().expect("checked above");
+    // "Freewebnovel. com" splits the domain across two words.
+    let (site, rest) = match head.split_last() {
+        Some((prev, before)) if last.eq_ignore_ascii_case("com") && prev.ends_with('.') => {
+            (format!("{prev}com"), before)
+        }
+        _ => ((*last).to_string(), head),
+    };
+    if !is_site_name(&site) {
+        return false;
+    }
+
+    let Some((preposition, pitch)) = rest.split_last() else {
+        return false;
+    };
+    PROMO_PREPOSITIONS
+        .iter()
+        .any(|p| preposition.eq_ignore_ascii_case(p))
+        && pitch
+            .iter()
+            .all(|w| w.chars().all(|c| c.is_alphabetic() || "'\u{2019}-".contains(c)))
+}
+
+/// Where an appended promo starts, if the paragraph ends with one.
+///
+/// The mark is tacked on after a sentence break, so every break is a candidate
+/// and the last one that parses as a promo wins.
+fn promo_tail_start(text: &str) -> Option<usize> {
+    const SENTENCE_END: [char; 7] = ['.', '!', '?', '"', '\'', '\u{2019}', '\u{201d}'];
+    let mut starts = Vec::new();
+    let mut after_end = false;
+    for (i, c) in text.char_indices() {
+        if c.is_whitespace() {
+            if after_end {
+                starts.push(i + c.len_utf8());
+            }
+        } else {
+            after_end = SENTENCE_END.contains(&c);
+        }
+    }
+    starts
+        .into_iter()
+        .rev()
+        .find(|&s| s < text.len() && is_promo(text[s..].trim()))
+}
+
+/// Remove freewebnovel's injected advert from a paragraph.
+///
+/// Returns `None` when the paragraph was nothing but the advert. The site
+/// either drops one in as a paragraph of its own or tacks it onto the end of
+/// real prose; anything else comes back unchanged.
+pub fn strip_promo(paragraph: &str) -> Option<String> {
+    let text = paragraph.trim();
+    if text.is_empty() || is_promo(text) {
+        return None;
+    }
+    match promo_tail_start(text) {
+        Some(cut) => {
+            let kept = text[..cut].trim_end();
+            (!kept.is_empty()).then(|| kept.to_string())
+        }
+        None => Some(text.to_string()),
+    }
+}
+
+/// Apply [`strip_promo`] across a chapter, keeping the original if the marks
+/// somehow account for all of it: a chapter with the advert still in it beats
+/// no chapter at all.
+pub fn strip_promo_paragraphs(paragraphs: &[String]) -> Vec<String> {
+    let cleaned: Vec<String> = paragraphs.iter().filter_map(|p| strip_promo(p)).collect();
+    if cleaned.is_empty() {
+        return paragraphs.to_vec();
+    }
+    cleaned
 }
 
 /// Strip any query/fragment from the novel URL so we can append `/chapter-N`.
@@ -81,6 +193,7 @@ impl<F: Fetcher> Source for FreewebnovelSource<F> {
     async fn fetch_chapter(&self, chapter: &ChapterRef) -> Result<Chapter> {
         let html = self.fetcher.get(&chapter.url).await?;
         let paragraphs = parse_chapter_body(&html, CONTENT_SELECTOR, PARAGRAPH_SELECTOR)?;
+        let paragraphs = strip_promo_paragraphs(&paragraphs);
         // Prefer the real title from the page; fall back to the placeholder.
         let title = parse_chapter_title(&html).unwrap_or_else(|| chapter.title.clone());
         Ok(Chapter {
@@ -220,5 +333,89 @@ mod tests {
         assert_eq!(meta.title, "The Bloodline System");
         assert_eq!(meta.author.as_deref(), Some("Timvic"));
         assert_eq!(meta.status_hint, crate::model::NovelStatus::Completed);
+    }
+
+    /// Marks taken verbatim from a real library, mangled spellings included.
+    const MARKS: &[&str] = &[
+        "Enjoy exclusive adventures from freewebnovel",
+        "Updates by Freewebnovel. com",
+        "Experience exclusive tales on freewebnovel.com",
+        "Continue -reading on Freewebnovel.com",
+        "Your next journey awaits at freewebnovel",
+        "--- Discover stories with empire",
+        "Continue your saga on empire",
+        "Stay tuned for updates on empire",
+        "Read the latest on freewebnovel",
+    ];
+
+    /// Real prose from the same library. Every one of these mentions an
+    /// in-story empire, which is why detection can't just look for the word.
+    const PROSE: &[&str] = &[
+        "Eldorath Empire.",
+        "Iron Empire.",
+        "\"The Empire is protected by the mighty War God. Of course they're not afraid to burn a temple.\"",
+        "Followers of War burned the temples of Shadow, and their empire spread, consuming many weaker realms.\"",
+        "'So the Nine were determined to destroy the Empire...'",
+        "\"WELCOME, LADIES AND GENTLEMEN, TO THE EMPIRE'S GRAND YOUTH TOURNAMENT!\"",
+        "He was a soldier of a militant empire which worshiped War God and had conquered many lands.",
+    ];
+
+    #[test]
+    fn drops_a_paragraph_that_is_only_a_mark() {
+        for m in MARKS {
+            assert_eq!(strip_promo(m), None, "{m:?} should be dropped");
+        }
+    }
+
+    #[test]
+    fn keeps_prose_about_an_in_story_empire() {
+        for p in PROSE {
+            assert_eq!(strip_promo(p).as_deref(), Some(*p), "{p:?} is prose");
+        }
+    }
+
+    #[test]
+    fn strips_a_mark_appended_to_a_real_paragraph() {
+        assert_eq!(
+            strip_promo("\"What do you want, Derek?\" Alice asked coldly. Find more chapters on empire")
+                .as_deref(),
+            Some("\"What do you want, Derek?\" Alice asked coldly.")
+        );
+        assert_eq!(
+            strip_promo("Bang! Your adventure continues at empire").as_deref(),
+            Some("Bang!")
+        );
+        assert_eq!(
+            strip_promo(
+                "Max sighed. \"Thorne Family sure is rich,\" he muttered, smiling. \
+                 Find your next read on freewebnovel.com"
+            )
+            .as_deref(),
+            Some("Max sighed. \"Thorne Family sure is rich,\" he muttered, smiling.")
+        );
+    }
+
+    #[test]
+    fn filters_a_whole_chapter() {
+        let paragraphs: Vec<String> = [
+            "He drew his sword.",
+            "Enjoy more content from freewebnovel",
+            "The blade sang. Stay updated with freewebnovel",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert_eq!(
+            strip_promo_paragraphs(&paragraphs),
+            vec!["He drew his sword.".to_string(), "The blade sang.".to_string()]
+        );
+    }
+
+    /// A chapter that is nothing but marks keeps its text: losing the advert is
+    /// not worth losing the chapter.
+    #[test]
+    fn a_chapter_of_nothing_but_marks_is_left_alone() {
+        let only = vec!["Read the latest on freewebnovel".to_string()];
+        assert_eq!(strip_promo_paragraphs(&only), only);
     }
 }
