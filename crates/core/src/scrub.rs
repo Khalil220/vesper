@@ -1,22 +1,11 @@
-//! Strip site watermarks from chapters that are already stored.
-//!
-//! The adapter filters these out at fetch time, but a stored chapter is never
-//! revisited, so everything downloaded before the filter existed still carries
-//! them. Re-downloading a novel to fix its text is thousands of requests for
-//! prose already on disk; this rewrites what is in the library instead, and
-//! touches the network not at all.
-
 use anyhow::Result;
 
 use crate::freewebnovel::strip_promo;
 use crate::store::Store;
 
-/// What a scrub pass did.
 #[derive(Debug, Default)]
 pub struct ScrubReport {
-    /// Chapter numbers whose text changed (or would, on a dry run).
     pub chapters: Vec<u32>,
-    /// How many marks came out across those chapters.
     pub marks: usize,
 }
 
@@ -26,11 +15,6 @@ impl ScrubReport {
     }
 }
 
-/// Remove injected site adverts from a novel's stored chapters.
-///
-/// Runs over every chapter whatever supplied it: the marks travel with the
-/// text, so a chapter gap-filled from freewebnovel carries them into a novel
-/// whose primary is elsewhere.
 pub fn scrub_novel(store: &Store, novel_id: i64, dry_run: bool) -> Result<ScrubReport> {
     let mut report = ScrubReport::default();
 
@@ -109,7 +93,6 @@ mod tests {
             vec!["He drew his sword.", "The blade sang."]
         );
 
-        // Nothing left to find, so a second pass is a no-op.
         assert!(scrub_novel(&store, id, false).unwrap().is_empty());
     }
 

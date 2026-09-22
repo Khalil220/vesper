@@ -504,10 +504,6 @@ impl Store {
             .optional()?)
     }
 
-    /// The subscription a source URL belongs to, if any.
-    ///
-    /// Lets a URL stand in for an id or title on the command line. A trailing
-    /// slash is not a different novel, so both spellings are tried.
     pub fn find_novel_by_source_url(&self, url: &str) -> Result<Option<StoredNovel>> {
         let bare = url.trim_end_matches('/');
         for candidate in [url, bare, &format!("{bare}/")] {
@@ -847,13 +843,6 @@ impl Store {
         Ok(())
     }
 
-    /// Overwrite a stored chapter's body, leaving its source attribution alone.
-    ///
-    /// For edits to text already in the library (the watermark scrub), as
-    /// opposed to replacing it from a site: the source did supply the chapter,
-    /// so re-attributing it would be wrong and would hand the content-upgrade
-    /// pass work to redo. Returns whether anything changed, and clears
-    /// `exported` when it did so the next export rebuilds the EPUB.
     pub fn update_chapter_body(
         &self,
         novel_id: i64,
@@ -1345,8 +1334,6 @@ mod tests {
         assert_eq!(s.find_novel(&b.to_string()).unwrap().unwrap().sources[0].priority, 1);
     }
 
-    /// `vesper fetch <url>` has to tell a subscribed novel from a stranger, and
-    /// a trailing slash must not decide it.
     #[test]
     fn finds_a_subscription_by_its_source_url() {
         let s = mem_store();

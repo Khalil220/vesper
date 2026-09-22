@@ -373,11 +373,6 @@ async fn export_novel(store: &Store, novel: &StoredNovel, config: &Config) -> Re
     Ok(paths)
 }
 
-/// Write a novel's EPUB: one file, or volumes when `split_every_chapters` is
-/// set. `out` overrides both with a single file at that path.
-///
-/// Shared by the library export and by a URL fetched straight to a file, so a
-/// one-off download splits into volumes the same way a subscription does.
 fn write_epubs(
     config: &Config,
     meta: &NovelMeta,
@@ -1086,8 +1081,6 @@ async fn repair(
 
 /// Pick the source a `set-primary` argument names: the stored URL first, then
 /// the site name, so either column of `vesper subs` works. An ambiguous name
-/// (the same site attached twice) is an error, since choosing wrong would change
-/// which source is authoritative for the novel's text.
 fn resolve_source<'a>(sources: &'a [StoredSource], needle: &str) -> Result<&'a StoredSource> {
     let needle = needle.trim();
     if let Some(exact) = sources.iter().find(|s| s.url == needle) {
@@ -1116,7 +1109,6 @@ fn resolve_source<'a>(sources: &'a [StoredSource], needle: &str) -> Result<&'a S
 
 /// Promote one of a novel's sources to primary. `source` is matched against the
 /// stored URL first, then the site name, so either column of `vesper subs`
-/// works. An ambiguous name (the same site twice) is an error.
 fn set_primary(novel: String, source: String) -> Result<()> {
     let store = Store::open_default()?;
     let found = store
@@ -1155,7 +1147,6 @@ fn unsubscribe(novel: String) -> Result<()> {
     Ok(())
 }
 
-/// Whether an argument is a URL rather than an id or a title.
 fn is_url(arg: &str) -> bool {
     arg.starts_with("http://") || arg.starts_with("https://")
 }
@@ -1178,7 +1169,6 @@ async fn fetch(
         )
     };
 
-    // A URL nobody follows goes straight to an EPUB, library untouched.
     let Some(found) = subscribed else {
         return fetch_to_epub(config, &novel, limit, out, delay_ms).await;
     };
@@ -1269,12 +1259,6 @@ async fn fetch(
     Ok(())
 }
 
-/// Download a novel straight to an EPUB, storing nothing.
-///
-/// For a novel you don't want to follow — a finished one, typically, where
-/// subscribing, fetching and unsubscribing is three commands to get one file.
-/// Nothing lands in the library, so there is nothing to resume: an interrupted
-/// run writes what it got and says how far it reached.
 async fn fetch_to_epub(
     config: &Config,
     url: &str,
@@ -1378,7 +1362,6 @@ async fn scrub(config: &Config, novel: String, dry_run: bool) -> Result<()> {
     for n in &novels {
         let report = vesper_core::scrub_novel(&store, n.id, dry_run)?;
         if report.is_empty() {
-            // Staying quiet for `all` keeps the clean majority off screen.
             if novels.len() == 1 {
                 println!("{}: no site marks found.", n.title);
             }

@@ -1,17 +1,3 @@
-//! Run the site-advert matcher over a library and report every removal.
-//!
-//! The regression check for [`vesper_core::freewebnovel::strip_promo`]: unit
-//! tests fix in the wordings someone thought of, while a real library holds the
-//! ones the site actually sent. Point this at a copy of a library (or at one
-//! already scrubbed, where it should find nothing) after touching the matcher.
-//!
-//! Every removal must contain the site's name. A removal that doesn't is the
-//! matcher eating prose, which is the failure this exists to catch.
-//!
-//!   cargo run -p vesper-core --example promo_audit -- <path-to-library.db>
-//!
-//! Read-only, and no network.
-
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
@@ -85,9 +71,6 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// The text `kept` lost: what sits between the shared head and the shared tail,
-/// so a mark taken out of the middle of a paragraph reports as itself rather
-/// than as the whole paragraph.
 fn difference(original: &str, kept: &str) -> String {
     let head = original
         .char_indices()
