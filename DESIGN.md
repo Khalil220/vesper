@@ -460,7 +460,13 @@ Because the sync runs unnoticed, it must be inspectable. **Partially implemented
   `freewebnovel` is stripped wherever it occurs, because no story says it;
   `empire` (a sister site) additionally needs a pitch, must end the paragraph,
   and counts only in lower case, since novels are full of an in-story "Empire"
-  that prose continues past.
+  that prose continues past. Even that leaves one real false-positive class:
+  "The road to empire." has a mark's exact shape, because English writes that
+  noun without an article. So the `empire` pitch must also open with one of the
+  nine words the site actually uses (Continue, Discover, Enjoy, Experience,
+  Explore, Find, Read, Stay, Your). That trade is deliberate: a pitch wording we
+  haven't seen gets missed until the list grows, and the next `scrub` takes it,
+  whereas a sentence eaten out of a chapter is silent and permanent.
 
   The first cut of this keyed on "sentence break, then a space", and the library
   scan that validated it was written from the same idea: they agreed exactly,

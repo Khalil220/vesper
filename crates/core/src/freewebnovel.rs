@@ -30,6 +30,26 @@ const PROMO_PREPOSITIONS: &[&str] = &["on", "at", "from", "with", "by", "through
 /// Longest pitch a mark uses. "Your next journey awaits at ..." is four words.
 const PROMO_MAX_PITCH_WORDS: usize = 6;
 
+/// Words the site opens a pitch with, required for the `empire` spelling only.
+///
+/// Without this, a paragraph ending "The road to empire." matches the shape of
+/// a mark: capitalised word, a couple of lowercase ones, preposition, then a
+/// lower-case `empire` that English writes without an article. That sentence is
+/// prose, and eating it would be silent and permanent, while missing a mark
+/// costs a cosmetic line that a later `vesper scrub` picks up. `freewebnovel`
+/// needs no list, since naming the site is never prose.
+const PROMO_OPENERS: &[&str] = &[
+    "Continue",
+    "Discover",
+    "Enjoy",
+    "Experience",
+    "Explore",
+    "Find",
+    "Read",
+    "Stay",
+    "Your",
+];
+
 /// Punctuation the site wraps a mark in, on the opening side.
 const MARK_OPENERS: &[char] = &['"', '\'', '\u{201c}', '\u{2018}', '(', '[', '<', '*'];
 
@@ -141,6 +161,16 @@ fn phrase_start(text: &str, site_start: usize) -> Option<usize> {
     None
 }
 
+/// Whether the phrase at `begin` opens with one of the site's pitch words.
+fn opens_a_pitch(text: &str, begin: usize) -> bool {
+    let word = text[begin..]
+        .trim_start_matches(MARK_OPENERS)
+        .split(|c: char| !(c.is_alphabetic() || c == '\'' || c == '\u{2019}' || c == '-'))
+        .next()
+        .unwrap_or_default();
+    PROMO_OPENERS.iter().any(|o| word.eq_ignore_ascii_case(o))
+}
+
 /// Whether only the mark's own trailing punctuation follows.
 fn only_decoration(rest: &str) -> bool {
     rest.chars()
@@ -180,7 +210,7 @@ fn promo_spans(text: &str) -> Vec<(usize, usize)> {
         let end = absorb_closers(text, start + "empire".len());
         from = start + "empire".len();
         if let Some(begin) = phrase_start(text, start) {
-            if only_decoration(&text[end..]) {
+            if only_decoration(&text[end..]) && opens_a_pitch(text, begin) {
                 spans.push((begin, end));
             }
         }
@@ -559,6 +589,60 @@ mod tests {
             "He rode to empire lands and never came back.",
         ] {
             assert_eq!(strip_promo(prose).as_deref(), Some(prose), "{prose:?}");
+        }
+    }
+
+    /// Prose that has a mark's exact shape: capitalised word, lowercase words,
+    /// preposition, then a bare lower-case "empire" at the end of the
+    /// paragraph. Only the pitch vocabulary tells this from an advert.
+    #[test]
+    fn keeps_prose_shaped_like_a_mark() {
+        for prose in [
+            "The road to empire.",
+            "Their long march to empire.",
+            "A thousand years of war, and every step on the road to empire.",
+        ] {
+            assert_eq!(strip_promo(prose).as_deref(), Some(prose), "{prose:?}");
+        }
+    }
+
+    /// Every distinct `empire` mark the library held, so tightening the pitch
+    /// list can't quietly stop catching one.
+    #[test]
+    fn catches_every_observed_empire_mark() {
+        for mark in [
+            "Continue reading on empire",
+            "Continue your saga on empire",
+            "Discover hidden content at empire",
+            "Discover more stories at empire",
+            "Discover stories with empire",
+            "Enjoy exclusive content from empire",
+            "Enjoy more content from empire",
+            "Enjoy new chapters from empire",
+            "Experience more on empire",
+            "Experience tales at empire",
+            "Explore more at empire",
+            "Explore stories at empire",
+            "Find adventures on empire",
+            "Find more chapters on empire",
+            "Find your next adventure on empire",
+            "Find your next read at empire",
+            "Find your next read on empire",
+            "Read exclusive adventures at empire",
+            "Read new adventures at empire",
+            "Read the latest on empire",
+            "Stay tuned for updates on empire",
+            "Stay updated through empire",
+            "Stay updated via empire",
+            "Your adventure continues at empire",
+        ] {
+            assert_eq!(strip_promo(mark), None, "{mark:?} should be dropped");
+            let appended = format!("She turned away. {mark}");
+            assert_eq!(
+                strip_promo(&appended).as_deref(),
+                Some("She turned away."),
+                "{appended:?}"
+            );
         }
     }
 

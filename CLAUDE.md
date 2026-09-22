@@ -100,6 +100,13 @@ rules-of-the-road.
   - **`empire` (a sister site) needs a pitch *and* must end the paragraph**, and
     **only counts in lower case**. Prose is thick with an in-story "Empire" and
     says "with empire forces" mid-sentence; the mark stops at the word.
+  - **The `empire` pitch must open with one of `PROMO_OPENERS`** (Continue,
+    Discover, Enjoy, Experience, Explore, Find, Read, Stay, Your). Without that
+    list, "The road to empire." is indistinguishable from a mark by shape alone:
+    capitalised word, lowercase words, preposition, bare lower-case `empire`
+    ending the paragraph, which is how English writes that noun. Keep the list
+    to wordings actually observed. A missed advert is cosmetic and the next
+    `scrub` takes it; eaten prose is silent and permanent.
   - A chapter that is *nothing* but marks keeps its text. Losing the advert is
     not worth losing the chapter.
   - Don't switch this to a length or repeat-count heuristic: "Thanks for
@@ -110,9 +117,12 @@ rules-of-the-road.
     written the same way agreed with it perfectly, 186 for 186; both were blind
     to the same 8 marks, which an EPUB grep for the bare site name then found.
     The punctuation-blind check is "every occurrence of the site name anywhere",
-    and on a 20,051-chapter library it now comes back empty: 194 marks removed
-    across 194 chapters, 104 distinct wordings, every removal containing the
-    site name and the longest 46 characters.
+    and on a 20,059-chapter library it now comes back empty. `cargo run -p
+    vesper-core --example promo_audit -- <library.db>` replays the matcher over
+    a whole library and flags any removal that doesn't name the site, which is
+    the matcher eating prose. Run it against a **pre-scrub copy** after touching
+    the matcher: 194 removals across 194 chapters, 103 distinct wordings,
+    longest 46 characters, none eating prose.
 - **Refetch overwrites; it never deletes.** `refetch` re-downloads stored
   chapters and replaces their text, which is the escape hatch for a site that
   changed one after we saved it. Sync can't see those: a stored chapter is
@@ -282,6 +292,11 @@ rules-of-the-road.
   `cargo test`. Sample chapters from across a novel's range: freewebnovel
   formats its `<title>` inconsistently, so checking only chapter 1 proves
   little.
+- The advert matcher gets the same treatment: `cargo run -p vesper-core
+  --example promo_audit -- <path-to-library.db>` runs it over every stored
+  chapter and reports each removal, flagging any that doesn't name the site.
+  Read-only and offline, but point it at a library copy that still *has* the
+  marks, since a scrubbed one has nothing left to catch.
 - Site *moves* need the same treatment on a real library: `cargo run -p
   vesper-core --example live_migration -- <path-to-library.db> [--apply]`
   resolves each stale subscription on the new site and compares stored chapter
