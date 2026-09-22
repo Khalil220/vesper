@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.4.0
+
+- Chapters from freewebnovel no longer carry the adverts the site drops into
+  the prose, lines like "Enjoy more content from freewebnovel". Run
+  `vesper scrub all` to clear them out of chapters you already downloaded.
+- `vesper fetch` now takes a URL. A novel you don't follow is downloaded and
+  saved as an EPUB without joining your library, so a finished novel no longer
+  needs subscribing to and unsubscribing from to get one file.
+- `vesper sub` is short for `vesper subscribe`.
+- `vesper service` no longer lists a help subcommand beside its own -h and
+  --help.
+
 ## 1.3.0
 
 - Add `vesper refetch <novel|all>`, which re-downloads chapters you already
