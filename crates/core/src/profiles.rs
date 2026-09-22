@@ -1,10 +1,10 @@
 //! Site profiles for the generic adapter.
 //!
-//! Vesper ships no profiles of its own. Users add *config-driven* profiles,
-//! with no recompile, by dropping `.ini` files into
-//! `<config_dir>/vesper/profiles/` for any site that fits the generic shape
-//! (server-rendered, CSS-selectable content, `?page=N` table of contents). A
-//! `README.txt` documenting the format is generated there on first use.
+//! novgo.net is built in; users add more *config-driven* profiles, with no
+//! recompile, by dropping `.ini` files into `<config_dir>/vesper/profiles/` for
+//! any site that fits the generic shape (server-rendered, CSS-selectable
+//! content, `?page=N` table of contents). A `README.txt` documenting the format
+//! is generated there on first use.
 
 use std::fs;
 use std::path::PathBuf;
@@ -15,6 +15,26 @@ use ini::{Ini, ParseOption};
 use url::Url;
 
 use crate::source::SiteProfile;
+
+/// Profile for novgo.net (built in).
+pub fn novgo() -> SiteProfile {
+    SiteProfile {
+        name: "novgo".into(),
+        host: "novgo.net".into(),
+        content_selector: "#chapter-content".into(),
+        paragraph_selector: "p".into(),
+        chapter_marker: "/chapter-".into(),
+        page_param: "page".into(),
+        max_pages: 500,
+    }
+}
+
+/// All profiles: the built-in novgo one plus any loaded from `.ini` files.
+pub fn all() -> Vec<SiteProfile> {
+    let mut v = vec![novgo()];
+    v.extend(external());
+    v
+}
 
 /// The profile whose host matches `url`, if any.
 pub fn for_url(url: &str) -> Option<SiteProfile> {
@@ -29,10 +49,9 @@ pub fn profiles_dir() -> Option<PathBuf> {
     ProjectDirs::from("", "", "vesper").map(|d| d.config_dir().join("profiles"))
 }
 
-/// Load every profile in the profiles folder, skipping (with a warning) any
-/// that fail to parse. Best-effort: returns an empty list if the directory is
-/// unavailable.
-pub fn all() -> Vec<SiteProfile> {
+/// Load the profiles folder, skipping (with a warning) any file that fails to
+/// parse. Best-effort: returns an empty list if the directory is unavailable.
+pub fn external() -> Vec<SiteProfile> {
     let Some(dir) = profiles_dir() else {
         return Vec::new();
     };

@@ -41,9 +41,8 @@ added without rewriting the core.
      recompiling.
   2. A **hand-written Rust adapter** implementing the same trait, for sites too
      weird for the generic one (JS-rendered, AJAX ToC, odd auth).
-- Reach for a bespoke adapter only when a site earns it. Every site Vesper ships
-  support for has earned one, so there are no built-in profiles; the generic
-  adapter only serves profiles users add themselves.
+- Reach for a bespoke adapter only when a site earns it. novgo.net is a profile
+  for the generic adapter; every other shipped site needed a hand-written one.
 - **The data model is a logical novel with one or more ranked sources**, not a
   per-source subscription. A novel (identified by author + title) is fed by a
   primary source plus optional fallbacks, ordered by preference. This revises an
@@ -141,8 +140,8 @@ lives in the DB, not in RAM — so the main thing a resident daemon would buy
   3. Further escalation, if a site ever needs it: `rquest` fingerprint
      impersonation, or a headless browser / FlareSolverr used once to obtain a
      `cf_clearance` cookie handed to a fast client — never a browser per chapter.
-     Not built. novgo.net was dropped instead when it started challenging every
-     request (see Decided against).
+     Not built: when novgo.net challenged every request for a week in September
+     2026, the profile was dropped instead (see Decided against).
 
 - **Adaptive rate control, per host.** Start at a modest delay (~1–2s) with a
   single request in flight per host and jitter on the delay. On 429/503 or a
@@ -253,7 +252,7 @@ export, regeneration is impossible. Resolution:
 
 - **Metadata comes from each site's own markup or API.** Title, author, cover
   URL and the status hint are stored on the novel, plus genre where the adapter
-  captures it (chikari, freewebnovel). The cover is downloaded and embedded at
+  captures it (novgo, chikari, freewebnovel). The cover is downloaded and embedded at
   export (see "EPUB cover embedding" under Resolved).
 
 ## Configuration
@@ -330,8 +329,8 @@ Because the sync runs unnoticed, it must be inspectable. **Partially implemented
 - **External config-driven profiles.** `SiteProfile` holds owned strings and
   exposes `chapter_marker` + `page_param`; generic sites are added via `.ini`
   files in `<config_dir>/profiles/` (required: name, host, content_selector).
-  `profiles::all()` loads them (there are no built-in profiles); bad files are
-  skipped with a warning; a `README.txt` self-documents; `vesper profiles` lists
+  `profiles::all()` merges the built-in novgo profile with the loaded files; bad
+  files are skipped with a warning; a `README.txt` self-documents; `vesper profiles` lists
   them.
 - **Windowless scheduled task.** The task runs `wscript.exe sync-hidden.vbs`
   (`WScript.Shell.Run "<exe> sync", 0, False`), which hides the console. Keeps
@@ -345,7 +344,7 @@ Because the sync runs unnoticed, it must be inspectable. **Partially implemented
   itself was never the blocker. Revisit when the crate/toolchain catch up.
 - **Status hints mapped**: word forms across sites (`ongoing`/`releasing` =
   Ongoing, `completed` = Completed; `hiatus`, `cancelled` and `dropped` stay
-  Unknown); default `poll_interval_minutes` = 60.
+  Unknown) plus novgo's numeric `1`/`2`; default `poll_interval_minutes` = 60.
 
 ### Resolved (wrap-up pass)
 
@@ -445,7 +444,7 @@ Because the sync runs unnoticed, it must be inspectable. **Partially implemented
   spurious warning. Also: the `<novel>` selector for id-or-title commands is an id
   *or the exact title* (quoted if it has spaces, since it's one arg); the help now
   says so and steers toward the id from `subs`.
-- **Genre metadata.** Captured from `og:novel:genre` (freewebnovel) and the
+- **Genre metadata.** Captured from `og:novel:genre` (novgo, freewebnovel) and the
   `genres` array in chikari's API, stored on the novel, emitted as EPUB
   `dc:subject`. lightnovelworld leaves it `None` (genre is only in its JSON-LD,
   which we don't parse), as do royalroad and scribblehub.
@@ -460,14 +459,15 @@ Because the sync runs unnoticed, it must be inspectable. **Partially implemented
   show the same profile name in `subs`/progress, but the URL shown beside each
   already disambiguates them and the real use case is cross-site (distinct
   names). Not worth special-casing the contrived same-site scenario.
-- **Passing Cloudflare's JavaScript challenge (novgo.net).** novgo.net was the
-  only built-in generic profile. In September 2026 it put a Cloudflare managed
-  challenge in front of every page: plain requests, the curl tier's full browser
-  header set and the real adapter all get a 403 with `cf-mitigated: challenge`
-  and the "Just a moment..." page, and only `robots.txt` still loads. Neither
-  fetch tier can pass that, and building the browser-based third tier for one
-  site wasn't worth it, so the profile was removed. A user can still write a
-  profile for it if plain requests start getting real pages again.
+- **Passing Cloudflare's JavaScript challenge.** For a week in September 2026
+  novgo.net put a Cloudflare managed challenge in front of every page: plain
+  requests, the curl tier's full browser header set and the real adapter all got
+  a 403 with `cf-mitigated: challenge` and the "Just a moment..." page, and only
+  `robots.txt` loaded. Neither fetch tier can pass that, so the profile was
+  dropped rather than build the browser-based third tier for one site. A week
+  later the challenge was gone and the profile came back. If a site does this
+  again, drop it again: a mitigation the operator can toggle is not worth a
+  browser dependency.
 
 ### Still open
 

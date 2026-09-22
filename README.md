@@ -5,8 +5,8 @@ URL, it tracks the story, fetches chapters at a polite pace, and keeps an
 EPUB in your library up to date — on demand, or on a schedule in the
 background if you set it up that way.
 
-It currently understands chikari.moe, freewebnovel.com, royalroad.com and
-scribblehub.com. A nice side effect of supporting several
+It currently understands novgo.net, chikari.moe, freewebnovel.com,
+royalroad.com and scribblehub.com. A nice side effect of supporting several
 sites: if a novel exists on more than one of them, you can attach the extra
 sites as fallbacks. Chapters that are missing or dead on the main site get
 quietly filled in from the others, and you still end up with one EPUB, not
@@ -395,7 +395,8 @@ text. The novel's title, author, genre and status are read from the page's
 `og:novel:novel_name` falls back to `og:title` or `<title>` for the title. The
 folder has a generated README.txt covering the optional keys, such as how
 chapter links are recognised and which query parameter paginates the chapter
-list. Vesper doesn't ship any profiles of its own.
+list. novgo.net ships as a built-in profile you can crib from; `vesper profiles`
+lists it.
 
 Sites that render their chapter list with JavaScript or need special
 request handling are hand-written adapters in the source; chikari,

@@ -167,7 +167,7 @@ fn sel(selector: &str) -> Result<Selector> {
     Selector::parse(selector).map_err(|e| anyhow!("invalid selector {selector:?}: {e:?}"))
 }
 
-/// Interpret a site's status label across sources.
+/// Interpret a site's status label (numeric or word form) across sources.
 ///
 /// Everything unrecognised — notably "hiatus", "cancelled" and "dropped" —
 /// stays `Unknown` on purpose. Only `Completed` lowers the poll cadence and
@@ -177,8 +177,10 @@ fn sel(selector: &str) -> Result<Selector> {
 /// DESIGN.md): observed activity decides.
 pub(crate) fn parse_status_hint(raw: &str) -> NovelStatus {
     match raw.trim().to_ascii_lowercase().as_str() {
-        "ongoing" | "on going" | "serializing" | "active" | "releasing" => NovelStatus::Ongoing,
-        "completed" | "complete" | "finished" => NovelStatus::Completed,
+        "1" | "ongoing" | "on going" | "serializing" | "active" | "releasing" => {
+            NovelStatus::Ongoing
+        }
+        "2" | "completed" | "complete" | "finished" => NovelStatus::Completed,
         _ => NovelStatus::Unknown,
     }
 }
@@ -334,6 +336,9 @@ mod tests {
         assert_eq!(parse_status_hint("releasing"), NovelStatus::Ongoing);
         assert_eq!(parse_status_hint("Ongoing"), NovelStatus::Ongoing);
         assert_eq!(parse_status_hint("completed"), NovelStatus::Completed);
+        // novgo encodes the same two states as numbers.
+        assert_eq!(parse_status_hint("1"), NovelStatus::Ongoing);
+        assert_eq!(parse_status_hint("2"), NovelStatus::Completed);
         for paused in ["hiatus", "cancelled", "dropped", ""] {
             assert_eq!(
                 parse_status_hint(paused),

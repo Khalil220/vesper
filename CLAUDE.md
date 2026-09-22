@@ -20,8 +20,8 @@ rules-of-the-road.
   text/XHTML, not raw HTML.
 - **Multi-source by design.** A `Source` trait abstracts each site; a generic
   config-driven adapter handles the server-rendered + CSS + `?page=N` case, so
-  such sites are declarative `.ini` profiles, no recompile. Every shipped site
-  has a hand-written adapter, so there are no built-in profiles. URL-to-source
+  such sites are declarative profiles, no recompile (novgo is the built-in one;
+  users add `.ini` files). Hand-written adapters for the rest. URL-to-source
   resolves by host.
 - **One logical novel, multiple ranked sources** (not per-source
   subscriptions). A novel has a primary source plus optional fallbacks — one
@@ -225,11 +225,14 @@ rules-of-the-road.
   page gives `#mypostid` + total; metadata `og:title` /
   `a[href*="/profile/"]` / `span.rnd_stats` + `og:image` (minus
   `noimagefound`); content `#chp_raw`.
-- **novgo.net**: dropped. Since September 2026 every page returns 403 with
-  `cf-mitigated: challenge` (Cloudflare's JavaScript challenge), which neither
-  fetch tier passes; only `robots.txt` still loads. It was the only built-in
-  generic profile. Don't bring it back while a plain request still gets the
-  challenge.
+- **novgo.net** (generic profile, the only built-in one): Cloudflare CDN-only,
+  Tier 1. Server-rendered; ToC paginated `?page=N` (~50/page); chapter URLs
+  `/<slug>/chapter-<n>-<slug>.html`; content `div#chapter-content.chapter-c`
+  (strip `div.ads*`); metadata/cover `og:novel:*` + `og:image`; status "1"/"2"
+  (the only site using the numeric form). For a week in September 2026 it sat
+  behind a Cloudflare JavaScript challenge that no fetch tier passes and the
+  profile was dropped; the challenge was lifted and it came back. If that
+  happens again, drop it again rather than chase the challenge.
 
 ## Build / Test / Run
 
@@ -298,8 +301,8 @@ Cargo workspace, two crates under `crates/`:
     invariant above). `looks_like_gate_stub` and the replacement check are pure
     and unit-tested, including the short-author's-note case that length-based
     detection would eat; `repair_novel` drives them over a novel's sources.
-  - `profiles` — user `.ini` files from `<config_dir>/profiles/` (no built-ins;
-    bad files skipped with a warning).
+  - `profiles` — built-in novgo profile plus user `.ini` files from
+    `<config_dir>/profiles/` (bad files skipped with a warning).
     `crate::build_source` (lib.rs) resolves a URL to adapter + fetch tier.
   - `model` — domain types (`NovelMeta`, `ChapterRef`, `Chapter`,
     `NovelStatus`).
