@@ -468,14 +468,28 @@ Because the sync runs unnoticed, it must be inspectable. **Partially implemented
   haven't seen gets missed until the list grows, and the next `scrub` takes it,
   whereas a sentence eaten out of a chapter is silent and permanent.
 
-  The first cut of this keyed on "sentence break, then a space", and the library
-  scan that validated it was written from the same idea: they agreed exactly,
-  186 marks for 186, and were both blind to the same 8. An EPUB grep for the
-  bare site name found those, which is the lesson worth keeping — **validate
-  with a check that doesn't share the matcher's assumptions.** The blind check
-  is "every occurrence of the site name anywhere in the library", and it now
-  returns nothing: 194 marks across 194 chapters, 104 distinct wordings, every
-  removal containing the site name, longest 46 characters, nothing added.
+  The site then escalated, and the matcher had to stop reading characters. It
+  now folds each paragraph (NFKD, combining marks dropped, lower-cased,
+  punctuation as a word break) and matches on that, keeping an index map back to
+  the original. That covers the styled-Unicode domains it started emitting in 98
+  interchangeable spellings, a letter-spaced `f r e e w e b n o v e l. c o m`
+  appended to dialogue, a bare `.Côm` with the name gone, and copies missing
+  their first letter. Literal matching cannot keep up with that and should not
+  come back.
+
+  Two lessons here, both expensive. The first cut keyed on "sentence break, then
+  a space", and the library scan that validated it was written from the same
+  idea: they agreed exactly, 186 for 186, and were blind to the same 8. So
+  **validate with a check that doesn't share the matcher's assumptions.** That
+  is still not sufficient: the obfuscation fix shipped a walk-back that
+  swallowed real clauses ("What's going on") whenever the word before the domain
+  was a preposition, and the audit's "does this removal name the site" flag
+  passed it, because the removal did contain the domain. So **read the removal
+  list, don't just check the flag.** Reading it produced the rule that the pitch
+  only comes along when it opens with one of the site's own eleven pitch words.
+  Current state: 2,690 marks across 2,689 of 21,588 chapters, 14 distinct folded
+  wordings, longest 38 characters, nothing added to any chapter, and a folded
+  sweep for the site name anywhere in the library comes back empty.
 
   The adapter filters at fetch time, and because a stored chapter is never revisited,
   `core::scrub` does the same over text already saved — a local DB pass rather

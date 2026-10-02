@@ -85,15 +85,35 @@ rules-of-the-road.
   instead (the primary genuinely cannot provide that chapter), which also stops
   it being retried every sync; the chapter is stored, so `unfilled_gaps` never
   shows it to the user.
-- **Site adverts are stripped on the site's own wording, never on length or
-  frequency.** freewebnovel injects promo lines into chapter text. Detection
-  (`freewebnovel::strip_promo`) starts from the **site name** and walks *back*
-  over the preposition to the capitalised word the injected sentence starts on;
-  it does not look for a sentence break, because the mark lands after anything:
-  a full stop, a bracket (`[Max] Explore stories at empire`), an ellipsis, an
-  em dash, or no space at all (`so long.“Please reading on Freewebnovel.com >”`).
-  Wrapping punctuation goes with it. The adapter runs it at fetch time and
-  `core::scrub` (`vesper scrub`) over stored text.
+- **Site adverts are matched on a *folded* copy of the paragraph, never on the
+  literal characters.** freewebnovel obfuscates its own marks, so
+  `freewebnovel::strip_promo` folds each paragraph first (NFKD via
+  `unicode-normalization`, combining marks dropped, lower-cased, punctuation
+  treated as a word break) and keeps an index map back to the original so
+  removal stays exact. One rule then covers every form seen: ASCII
+  (`Enjoy more content from freewebnovel`), styled Unicode
+  (`𝐟𝐫𝕖𝗲𝘄𝚎𝗯𝕟𝐨𝕧𝐞𝚕.𝕔𝕠𝐦`, 98 spellings since each copy picks different style
+  blocks, including the irregular letterlike holes), letter-spaced
+  (`f r e e w e b n o v e l. c o m` after real dialogue), split
+  (`Updates by Freewebnovel. com`), hyphen-broken (`Continue -reading on ...`)
+  and **missing its first letter** (`reewebnovel.com`), which is why the needle
+  is `reewebnovel`. Do not go back to literal matching; the next trick is a
+  style block away. The adapter runs it at fetch time and `core::scrub`
+  (`vesper scrub`) over stored text.
+  - **A multi-word name match must be letter-spaced** (every word ≤ 2 chars) or
+    it is prose: folding joins words, so "a free web novel" reads as the domain
+    otherwise.
+  - **The pitch only comes along when it opens with one of `PITCH_OPENERS`**
+    (Continue, Discover, Enjoy, Experience, Explore, Find, Read, Stay, Your,
+    Updates, Please). Otherwise only the domain goes. Without that guard the
+    walk-back eats prose whenever the word before the domain happens to be a
+    preposition: it took "What's going on" and "Then someone stepped through"
+    with it, both now pinned by tests.
+  - **A pitch ending in a bare TLD is a mark even with no name**
+    (`Explore more stories with .Côm`), as is one naming another site
+    (`Updates by vipnovel.com`): preposition, optional `novel`-ish word, then
+    `com`/`net`/`org` at the paragraph end. `discord.gg` in a translator's note
+    is neither, which is the point of the TLD list.
   - **`freewebnovel` is removed wherever it appears**, pitch or no pitch: no
     story says the word, so a bare `‘Freewebnovel.com*’` dropped between two
     sentences is still the site talking.
@@ -112,17 +132,20 @@ rules-of-the-road.
   - Don't switch this to a length or repeat-count heuristic: "Thanks for
     reading..." and "Author's Note: ..." repeat across hundreds of chapters and
     belong to the author.
-  - **Validate with a scan that doesn't share the matcher's assumptions.** The
-    first version keyed on "sentence break, then a space" and a library scan
-    written the same way agreed with it perfectly, 186 for 186; both were blind
-    to the same 8 marks, which an EPUB grep for the bare site name then found.
-    The punctuation-blind check is "every occurrence of the site name anywhere",
-    and on a 20,059-chapter library it now comes back empty. `cargo run -p
-    vesper-core --example promo_audit -- <library.db>` replays the matcher over
-    a whole library and flags any removal that doesn't name the site, which is
-    the matcher eating prose. Run it against a **pre-scrub copy** after touching
-    the matcher: 194 removals across 194 chapters, 103 distinct wordings,
-    longest 46 characters, none eating prose.
+  - **Validate with a scan that doesn't share the matcher's assumptions, then
+    read the list.** Twice now the assumption-sharing scan agreed with the
+    matcher and both were wrong together: a "sentence break, then a space" rule
+    plus a scan written the same way scored 186 for 186 while missing the same
+    8 marks, and the literal-character rule missed 2,690 obfuscated ones. The
+    blind check is "every occurrence of the site name anywhere in the folded
+    text". `cargo run -p vesper-core --example promo_audit -- <library.db>`
+    replays the matcher over a library, groups removals by folded form and
+    flags any that doesn't name the site. **Its flag is not enough on its own:**
+    the prose-eating walk-back passed it, because the removal did contain the
+    domain. Read the grouped list. Current numbers against a pre-scrub copy:
+    2,690 removals across 2,689 of 21,588 chapters, 14 distinct folded
+    wordings, longest 38 characters, 30 whole paragraphs dropped and 2,660
+    trailing edits, nothing added to any chapter.
 - **Refetch overwrites; it never deletes.** `refetch` re-downloads stored
   chapters and replaces their text, which is the escape hatch for a site that
   changed one after we saved it. Sync can't see those: a stored chapter is
@@ -193,9 +216,10 @@ rules-of-the-road.
   pipe-separated, the **same** character as the site-name suffix, so strip the
   branding off the *end*; splitting on the first `|` eats the name and leaves a
   bare "Chapter N". Content `.txt`; metadata `og:novel:*`; status word form
-  ("Completed"/"Ongoing"). **Injects promo lines into the prose** (see the
-  site-advert invariant above), sometimes mangled: "Updates by Freewebnovel.
-  com", "Continue -reading on Freewebnovel.com".
+  ("Completed"/"Ongoing"). **Injects promo lines into the prose and obfuscates
+  them** (see the site-advert invariant above): styled Unicode letters, a
+  letter-spaced domain, a split domain, a missing first letter, a bare `.Côm`,
+  and occasionally a sister site (`empire`, `vipnovel.com`).
 - **chikari.moe** (hand-written adapter, Tier 1): where lightnovelworld's novel
   library moved. A SvelteKit app whose chapter pages are **client-rendered**
   (the HTML for `/novels/<slug>/<n>` is an empty app shell), so there is nothing

@@ -3,6 +3,7 @@ use std::path::PathBuf;
 
 use anyhow::{anyhow, Result};
 use rusqlite::{Connection, OpenFlags};
+use unicode_normalization::char::{decompose_compatible, is_combining_mark};
 use vesper_core::freewebnovel::strip_promo;
 
 fn main() -> Result<()> {
@@ -37,7 +38,7 @@ fn main() -> Result<()> {
             if !names_the_site(&removed) {
                 prose_eaten.push((novel_id, number, removed.clone()));
             }
-            *removals.entry(removed).or_default() += 1;
+            *removals.entry(fold_key(&removed)).or_default() += 1;
         }
         if changed {
             touched += 1;
@@ -92,7 +93,35 @@ fn difference(original: &str, kept: &str) -> String {
     original[head..rest_original.len() + head - tail].trim().to_string()
 }
 
+fn fold_key(removed: &str) -> String {
+    let folded = fold(removed);
+    if folded.len() > 44 {
+        format!("{}~", &folded[..44])
+    } else {
+        folded
+    }
+}
+
+fn fold(text: &str) -> String {
+    let mut out = String::new();
+    for c in text.chars() {
+        let mut pieces = String::new();
+        decompose_compatible(c, |d| {
+            if !is_combining_mark(d) {
+                pieces.push(d);
+            }
+        });
+        for d in pieces.chars().flat_map(char::to_lowercase) {
+            if d.is_alphanumeric() {
+                out.push(d);
+            }
+        }
+    }
+    out
+}
+
 fn names_the_site(text: &str) -> bool {
-    let lower = text.to_lowercase();
-    lower.contains("freewebnovel") || lower.contains("empire")
+    let folded = fold(text);
+    let tld = ["com", "net", "org"].iter().any(|t| folded.ends_with(t));
+    folded.contains("reewebnovel") || folded.contains("empire") || tld
 }
