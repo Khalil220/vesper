@@ -331,6 +331,13 @@ three platforms. The interval defaults to whatever `poll_interval_minutes`
 says in the config; note that it's baked in at install time, so if you
 change the config value later, run `install` again to apply it.
 
+On Windows, a copy of `vesper.exe` downloaded with a browser is marked as
+coming from the internet, and SmartScreen stops the scheduled task from
+starting it until the mark is cleared. `install` and `status` tell you when
+that's the case. To clear it, open the file's Properties and tick Unblock, or
+run `Unblock-File` on it in PowerShell. You only need to do this once:
+versions installed by `vesper update` don't carry the mark.
+
 ### update
 
 ```

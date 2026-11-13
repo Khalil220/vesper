@@ -1636,6 +1636,9 @@ fn service_install(config: &Config, interval_minutes: Option<u32>) -> Result<()>
         exe.display(),
         count(interval as usize, "minute")
     );
+    if service::marked_as_downloaded(&exe) {
+        println!("\n{}", service::unblock_advice(&exe));
+    }
     Ok(())
 }
 
@@ -1649,6 +1652,9 @@ fn service_status() -> Result<()> {
     let st = service::manager()?.status()?;
     if st.installed {
         println!("Background sync is installed: {}.", st.detail);
+        if let Some(exe) = service::task_program().filter(|exe| service::marked_as_downloaded(exe)) {
+            println!("\n{}", service::unblock_advice(&exe));
+        }
     } else {
         println!("Background sync is not installed. Install with `vesper service install`.");
     }

@@ -272,6 +272,15 @@ rules-of-the-road.
   `meta`, off with `check_for_updates = false`) and save the latest version,
   which `vesper status` reports when it's newer. A failed check only logs.
   Asset names must match `.github/workflows/release.yml`; a test pins them.
+- **The mark of the web is reported, never removed.** A browser download of
+  `vesper.exe` carries a `Zone.Identifier` stream (ZoneId 3 or 4), and
+  SmartScreen then blocks the scheduled task's hidden launch. `service
+  install` checks the exe it registers and `service status` checks the one
+  the launcher VBS runs (`service::task_program`), and both say how to
+  unblock it. Vesper doesn't delete the stream itself, because malware does
+  exactly that and it would give Defender a reason to flag Vesper. A file
+  written by `vesper update` never gets the mark, since only the downloading
+  program adds it.
 - **Auto-export via a Backfilling -> Live state machine**, not a chapter-count
   heuristic. `auto_export` and `auto_append` are separate toggles.
 - **EPUB writes are atomic** (temp file + rename). A sharing-violation on
