@@ -350,6 +350,21 @@ fn write_epubs(
     gaps: &[u32],
     out: Option<&Path>,
 ) -> Result<Vec<PathBuf>> {
+    let existing = match out {
+        Some(path) => vec![path.to_path_buf()],
+        None => existing_epubs(config, meta),
+    };
+    let dropped = vesper_core::epub::chapters_dropped(&existing, chapters);
+    ensure!(
+        dropped.is_empty(),
+        "not replacing {}: it has {} that this copy would leave out (ch. {}). For a novel in \
+         your library, prune most likely deleted them after export, and `vesper fetch` on it \
+         downloads them again. Otherwise, save this copy somewhere else with --out",
+        existing.first().map(|p| p.display().to_string()).unwrap_or_default(),
+        count(dropped.len(), "chapter"),
+        describe_numbers(&dropped)
+    );
+
     if let Some(path) = out {
         build_epub(meta, chapters, path, cover, gaps)?;
         return Ok(vec![path.to_path_buf()]);
@@ -379,6 +394,15 @@ fn write_epubs(
         paths.push(path);
     }
     Ok(paths)
+}
+
+fn existing_epubs(config: &Config, meta: &NovelMeta) -> Vec<PathBuf> {
+    let author = meta.author.as_deref();
+    let single = epub_path(&config.output_dir, author, &meta.title, None);
+    let volumes = (1..)
+        .map(|v| epub_path(&config.output_dir, author, &meta.title, Some(v)))
+        .take_while(|p| p.is_file());
+    std::iter::once(single).filter(|p| p.is_file()).chain(volumes).collect()
 }
 
 async fn export_and_track(store: &Store, config: &Config, novel: &StoredNovel) -> Vec<PathBuf> {
@@ -1378,7 +1402,7 @@ async fn export(config: &Config, novel: String, out: Option<PathBuf>) -> Result<
             None => None,
         };
         let gaps: Vec<u32> = store.unfilled_gaps(found.id)?.into_iter().collect();
-        build_epub(&meta, &chapters, &out_path, cover.as_ref(), &gaps)?;
+        write_epubs(config, &meta, &chapters, cover.as_ref(), &gaps, Some(&out_path))?;
         store.mark_all_exported(found.id)?;
         println!(
             "Exported {} of \"{}\" to {}",
@@ -1869,6 +1893,50 @@ mod tests {
         assert_eq!(summary.finished, Some(("2026-11-13 06:14:40", "1 new across 2 novels")));
         assert_eq!(summary.unfinished, None);
         assert_eq!(summary.errors.len(), 1);
+    }
+
+    fn book_chapters(numbers: std::ops::RangeInclusive<u32>) -> Vec<Chapter> {
+        numbers
+            .map(|n| Chapter {
+                number: n,
+                title: format!("Chapter {n}"),
+                paragraphs: vec![format!("Text {n}.")],
+            })
+            .collect()
+    }
+
+    #[test]
+    fn an_epub_is_never_replaced_by_a_shorter_book() {
+        let dir = std::env::temp_dir().join(format!("vesper-shrink-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let config = Config {
+            output_dir: dir.clone(),
+            ..Config::default()
+        };
+        let meta = NovelMeta {
+            title: "Pruned Saga".into(),
+            author: Some("Someone".into()),
+            cover_url: None,
+            genre: None,
+            status_hint: vesper_core::NovelStatus::Completed,
+            source_url: "https://example.com/saga".into(),
+        };
+
+        let written = write_epubs(&config, &meta, &book_chapters(1..=10), None, &[], None).unwrap();
+        let before = std::fs::read(&written[0]).unwrap();
+
+        let err = write_epubs(&config, &meta, &book_chapters(9..=11), None, &[], None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("8 chapters that this copy would leave out"), "{err}");
+        assert_eq!(std::fs::read(&written[0]).unwrap(), before, "the full book is untouched");
+
+        let out = dir.join("elsewhere.epub");
+        std::fs::copy(&written[0], &out).unwrap();
+        assert!(write_epubs(&config, &meta, &book_chapters(1..=3), None, &[], Some(&out)).is_err());
+
+        write_epubs(&config, &meta, &book_chapters(1..=11), None, &[], None).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

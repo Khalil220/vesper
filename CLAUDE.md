@@ -250,6 +250,16 @@ rules-of-the-road.
   heuristic. `auto_export` and `auto_append` are separate toggles.
 - **EPUB writes are atomic** (temp file + rename). A sharing-violation on
   replace means the file is locked -> mark export `pending`, retry next cycle.
+- **An EPUB is never replaced by a shorter book.** `write_epubs` reads the
+  chapter numbers already in the target file or volumes
+  (`epub::chapters_in_epub`, from the `chapter_NNNNN.xhtml` entry names) and
+  refuses a write that would drop any of them. Prune makes the EPUB the only
+  full copy of a likely-complete novel, and the next recheck re-downloads it
+  from chapter 1, so a run cut short by `--limit`, a rate limit or an outage
+  would otherwise export the partial set over the archive. An automatic export
+  that hits this is marked pending and retried once the chapters are back.
+  Every EPUB write goes through `write_epubs`; don't call `build_epub` around
+  it.
 - **Filename sanitization is mandatory** on Windows (strip `<>:"/\|?*`,
   trailing dots/spaces, reserved names).
 - **Output layout: `<library>/<author>/<novel>/<novel>.epub`** (library

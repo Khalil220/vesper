@@ -1,12 +1,42 @@
 
+use std::collections::BTreeSet;
 use std::fs::File;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use epub_builder::{EpubBuilder, EpubContent, EpubVersion, ReferenceType, ZipLibrary};
 
 use crate::model::{Chapter, NovelMeta};
+
+fn chapter_number_of(entry: &str) -> Option<u32> {
+    entry
+        .rsplit('/')
+        .next()?
+        .strip_prefix("chapter_")?
+        .strip_suffix(".xhtml")?
+        .parse()
+        .ok()
+}
+
+pub fn chapters_in_epub(path: &Path) -> BTreeSet<u32> {
+    let Ok(file) = File::open(path) else {
+        return BTreeSet::new();
+    };
+    match zip::ZipArchive::new(file) {
+        Ok(archive) => archive.file_names().filter_map(chapter_number_of).collect(),
+        Err(_) => BTreeSet::new(),
+    }
+}
+
+pub fn chapters_dropped(existing: &[PathBuf], chapters: &[Chapter]) -> BTreeSet<u32> {
+    let keeping: BTreeSet<u32> = chapters.iter().map(|c| c.number).collect();
+    existing
+        .iter()
+        .flat_map(|path| chapters_in_epub(path))
+        .filter(|n| !keeping.contains(n))
+        .collect()
+}
 
 pub struct Cover {
     pub bytes: Vec<u8>,
@@ -158,4 +188,62 @@ fn escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::NovelStatus;
+
+    fn meta() -> NovelMeta {
+        NovelMeta {
+            title: "Guarded Novel".into(),
+            author: Some("An Author".into()),
+            cover_url: None,
+            genre: None,
+            status_hint: NovelStatus::Completed,
+            source_url: "https://example.com/n".into(),
+        }
+    }
+
+    fn chapters(numbers: impl IntoIterator<Item = u32>) -> Vec<Chapter> {
+        numbers
+            .into_iter()
+            .map(|n| Chapter {
+                number: n,
+                title: format!("Chapter {n}"),
+                paragraphs: vec![format!("Text of chapter {n}.")],
+            })
+            .collect()
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("vesper-epub-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn reads_back_which_chapters_an_epub_holds() {
+        let dir = scratch("read");
+        let path = dir.join("book.epub");
+        build_epub(&meta(), &chapters([1, 2, 5]), &path, None, &[3, 4]).unwrap();
+        assert_eq!(chapters_in_epub(&path), BTreeSet::from([1, 2, 5]));
+        assert!(chapters_in_epub(&dir.join("absent.epub")).is_empty());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_pruned_library_would_drop_chapters_from_the_book() {
+        let dir = scratch("dropped");
+        let path = dir.join("book.epub");
+        build_epub(&meta(), &chapters(1..=10), &path, None, &[]).unwrap();
+        let existing = vec![path];
+
+        assert_eq!(chapters_dropped(&existing, &chapters(8..=11)), BTreeSet::from_iter(1..=7));
+        assert!(chapters_dropped(&existing, &chapters(1..=11)).is_empty(), "a longer book is fine");
+        assert!(chapters_dropped(&[], &chapters(1..=2)).is_empty(), "nothing exported yet");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

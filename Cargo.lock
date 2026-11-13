@@ -2238,6 +2238,7 @@ dependencies = [
  "tokio",
  "unicode-normalization",
  "url",
+ "zip",
 ]
 
 [[package]]

@@ -202,7 +202,10 @@ export, regeneration is impossible. Resolution:
 - **Revival after purge:** if a purged novel later gets new chapters, it reverts
   to *Ongoing* and its working set is re-hydrated (re-fetch the tail from source,
   or read existing chapters back from the EPUB) before appending. The generous
-  quiet grace window makes this rare.
+  quiet grace window makes this rare. Until the working set is whole again, no
+  export may replace the EPUB: every write checks the chapter numbers already
+  in the file and refuses one that would drop any, so an interrupted
+  re-download can't overwrite the archive of record with a fragment.
 
 - **Safe retention semantics:** delete a raw chapter only after it has been
   successfully exported AND `retention_days` have passed. `0` = purge on export;
