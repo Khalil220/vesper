@@ -13,11 +13,14 @@ use std::time::Duration;
 use anyhow::{anyhow, bail, ensure, Result};
 use clap::{Parser, Subcommand};
 use vesper_core::paths::UNKNOWN_AUTHOR;
+use vesper_core::update;
 use vesper_core::{
     build_epub, build_source, download_cover, epub_path, migrate_lightnovelworld, sync_novel,
     Chapter, Config, Cover, DerivedState, MigrationOutcome, MigrationReport, NovelMeta,
     RefetchReport, Source, Store, StoredNovel, StoredSource, SyncProgress, SyncReport,
 };
+
+const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Parser)]
 #[command(
@@ -173,6 +176,8 @@ enum Command {
     Status,
     /// List the sites Vesper can read and where to add your own.
     Profiles,
+    /// Download the latest release of Vesper and replace this copy with it.
+    Update,
     /// Show how many chapters a novel's page lists, without saving anything.
     List {
         /// The novel's main page on a supported site.
@@ -200,6 +205,11 @@ enum ServiceAction {
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    if cfg!(windows) {
+        if let Ok(exe) = std::env::current_exe() {
+            update::remove_retired(&exe);
+        }
+    }
     let config = Config::load_or_create()?;
 
     if cli.cmd.touches_library() {
@@ -242,6 +252,7 @@ async fn main() -> Result<()> {
         Command::Config => config_show(&config),
         Command::Status => status(&config),
         Command::Profiles => profiles_show(),
+        Command::Update => update_vesper().await,
         Command::List { url, delay_ms } => list(&config, url, delay_ms).await,
     }
 }
@@ -250,7 +261,11 @@ impl Command {
     fn touches_library(&self) -> bool {
         !matches!(
             self,
-            Command::Config | Command::Profiles | Command::Service { .. } | Command::List { .. }
+            Command::Config
+                | Command::Profiles
+                | Command::Service { .. }
+                | Command::List { .. }
+                | Command::Update
         )
     }
 }
@@ -1743,6 +1758,51 @@ fn last_sync(log: &str) -> LastSync<'_> {
     }
 }
 
+async fn update_vesper() -> Result<()> {
+    let Some(_lock) = acquire_sync_lock()? else {
+        bail!("a sync is running right now. Run `vesper update` again once it finishes");
+    };
+    eprintln!("Checking for a newer version...");
+    let release = update::latest_release().await?;
+    if !update::is_newer(&release.version, VERSION) {
+        if update::parse_version(&release.version) == update::parse_version(VERSION) {
+            println!("Vesper {VERSION} is the latest version.");
+        } else {
+            println!(
+                "This is Vesper {VERSION}, newer than the latest release, {}. There's nothing to install.",
+                release.version
+            );
+        }
+        return Ok(());
+    }
+    let name = update::asset_name(&release.version).ok_or_else(|| {
+        anyhow!(
+            "Vesper {} is out, but there's no ready-made build for this system. Build it from source as the README describes",
+            release.version
+        )
+    })?;
+    let asset = release.asset(&name).ok_or_else(|| {
+        anyhow!(
+            "Vesper {} is out, but its download for this system isn't up yet. Try again in a few minutes",
+            release.version
+        )
+    })?;
+    eprintln!("Downloading Vesper {}...", release.version);
+    let download = update::download(asset).await?;
+    let binary = if name.ends_with(".tar.gz") {
+        update::binary_from_archive(&download)?
+    } else {
+        download
+    };
+    let exe = std::env::current_exe()?;
+    update::install(&exe, &binary, &release.version)?;
+    println!(
+        "Updated Vesper from {VERSION} to {}. What's new: {}",
+        release.version, release.page
+    );
+    Ok(())
+}
+
 fn profiles_show() -> Result<()> {
     use vesper_core::profiles;
     println!("Sites Vesper can read, with the name `vesper subs` shows for each:");
@@ -1853,6 +1913,7 @@ mod tests {
         assert!(!Command::Profiles.touches_library());
         assert!(!Command::Service { action: ServiceAction::Status }.touches_library());
         assert!(!Command::List { url: "x".into(), delay_ms: None }.touches_library());
+        assert!(!Command::Update.touches_library());
     }
 
     #[test]

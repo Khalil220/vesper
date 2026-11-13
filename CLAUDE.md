@@ -258,6 +258,17 @@ rules-of-the-road.
   back to live. Inserting a chapter clears its record; restored chapters are
   counted in `SyncReport.restored`, apart from `newly_fetched`, so they never
   read as new.
+- **Vesper updates itself only when asked.** `vesper update` (`core::update`)
+  reads GitHub's latest release, refuses anything not newer than the running
+  version, downloads this platform's asset (the bare `vesper.exe` on Windows,
+  the binary out of the tarball elsewhere), runs it with `--version`, and only
+  then swaps it in at `current_exe()`, so the scheduled task's launcher keeps
+  pointing at the right file. Windows can't overwrite or delete a running exe
+  but can rename it, so the old one becomes `vesper.exe.old` and the next
+  launch deletes it; Unix renames over it. It holds the sync lock. Sync never
+  installs anything: a bad release would break every background sync with
+  nobody watching, and migrations only go forward, so going back isn't clean.
+  Asset names must match `.github/workflows/release.yml`; a test pins them.
 - **Auto-export via a Backfilling -> Live state machine**, not a chapter-count
   heuristic. `auto_export` and `auto_append` are separate toggles.
 - **EPUB writes are atomic** (temp file + rename). A sharing-violation on
@@ -517,6 +528,11 @@ Cargo workspace, two crates under `crates/`:
     `Break` stops cleanly after the current committed chapter and sets
     `SyncReport.interrupted` (how Ctrl+C becomes a resumable pause; an
     interrupted backfill does not transition to Live).
+  - `update` — the self-updater (see the invariant above). The pure parts
+    (version comparison, the release JSON, asset names, tarball extraction,
+    the swap) are unit-tested. The network and swapping a running exe are only
+    provable live: build a copy whose workspace version is one release behind
+    and run `vesper update` from it.
   - `util` — filename sanitization, chapter number/title parsing, `now_unix`.
 - `cli` (bin `vesper`): clap subcommands on a current-thread Tokio runtime.
   `fetch` takes an id, a title or a URL: a URL that no subscription holds

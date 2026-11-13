@@ -331,6 +331,22 @@ three platforms. The interval defaults to whatever `poll_interval_minutes`
 says in the config; note that it's baked in at install time, so if you
 change the config value later, run `install` again to apply it.
 
+### update
+
+```
+vesper update
+```
+
+Download the latest release from GitHub and put it in place of the copy you
+ran. The background sync runs that same file, so it picks up the new version
+too, without reinstalling the service. Before replacing anything, Vesper runs
+the download and checks that it reports the version it should, and it never
+installs a version older than the one you have. If a sync is running, it
+stops without changing anything; run it again once the sync is done.
+
+On Windows a running program can't be deleted, so the old copy is left beside
+the new one as `vesper.exe.old` and removed the next time Vesper runs.
+
 ### status, config, profiles, list
 
 ```

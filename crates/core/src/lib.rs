@@ -18,6 +18,7 @@ pub mod repair;
 pub mod source;
 pub mod store;
 pub mod sync;
+pub mod update;
 pub mod util;
 
 pub use chikari::ChikariSource;
