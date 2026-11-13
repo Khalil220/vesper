@@ -1,7 +1,7 @@
 use std::ffi::OsStr;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, ensure, Context, Result};
@@ -12,6 +12,7 @@ const LATEST_RELEASE: &str = "https://api.github.com/repos/Khalil220/vesper/rele
 const LATEST_KEY: &str = "latest_release";
 const CHECKED_KEY: &str = "update_checked_at";
 const DAY: i64 = 86_400;
+pub const FINISH_COMMAND: &str = "finish-update";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Asset {
@@ -160,6 +161,34 @@ pub fn retired_path(exe: &Path) -> PathBuf {
 
 pub fn remove_retired(exe: &Path) {
     let _ = std::fs::remove_file(retired_path(exe));
+}
+
+pub fn remove_retired_when_free(exe: &Path, attempts: u32, pause: Duration) -> bool {
+    let retired = retired_path(exe);
+    for attempt in 0..attempts {
+        match std::fs::remove_file(&retired) {
+            Ok(()) => return true,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return true,
+            Err(_) if attempt + 1 < attempts => std::thread::sleep(pause),
+            Err(_) => {}
+        }
+    }
+    false
+}
+
+pub fn hand_over(exe: &Path) -> std::io::Result<()> {
+    let mut command = Command::new(exe);
+    command
+        .arg(FINISH_COMMAND)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000);
+    }
+    command.spawn().map(drop)
 }
 
 pub fn install(exe: &Path, binary: &[u8], version: &str) -> Result<()> {
@@ -370,6 +399,34 @@ mod tests {
         }
         remove_retired(&exe);
         assert!(!retired_path(&exe).exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_retired_copy_goes_as_soon_as_nothing_holds_it() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let dir = scratch("retire");
+        let exe = dir.join("vesper.exe");
+        let retired = retired_path(&exe);
+        std::fs::write(&retired, b"the old version").unwrap();
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&retired)
+            .unwrap();
+
+        assert!(!remove_retired_when_free(&exe, 3, Duration::from_millis(10)));
+        assert!(retired.exists());
+
+        let exits = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            drop(held);
+        });
+        assert!(remove_retired_when_free(&exe, 200, Duration::from_millis(10)));
+        exits.join().unwrap();
+        assert!(!retired.exists());
+        assert!(remove_retired_when_free(&exe, 1, Duration::ZERO), "nothing left to remove");
         std::fs::remove_dir_all(&dir).ok();
     }
 

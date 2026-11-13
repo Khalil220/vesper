@@ -351,8 +351,11 @@ the download and checks that it reports the version it should, and it never
 installs a version older than the one you have. If a sync is running, it
 stops without changing anything; run it again once the sync is done.
 
-On Windows a running program can't be deleted, so the old copy is left beside
-the new one as `vesper.exe.old` and removed the next time Vesper runs.
+On Windows a running program can't be deleted, so the old copy is renamed to
+`vesper.exe.old`, starts the new version in the background and exits, and the
+new version deletes the old file as soon as it's free. If something else still
+has the old file open, such as another Vesper command that was already
+running, it's removed the next time Vesper runs instead.
 
 ### status, config, profiles, list
 

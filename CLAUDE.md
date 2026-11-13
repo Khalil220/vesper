@@ -264,8 +264,15 @@ rules-of-the-road.
   the binary out of the tarball elsewhere), runs it with `--version`, and only
   then swaps it in at `current_exe()`, so the scheduled task's launcher keeps
   pointing at the right file. Windows can't overwrite or delete a running exe
-  but can rename it, so the old one becomes `vesper.exe.old` and the next
-  launch deletes it; Unix renames over it. It holds the sync lock. Sync never
+  but can rename it, so the old one becomes `vesper.exe.old`, starts the new
+  one with the hidden `finish-update` command (`update::hand_over`, no console,
+  output discarded) and exits; the new one retries the delete for up to ten
+  seconds until the old process has gone. **Every future version must keep
+  `finish-update`**: it's what the previous version calls. A version that
+  lacks it only costs the immediate cleanup, because every launch also tries
+  to delete `vesper.exe.old`. Don't swap the hand-over for a `cmd /c ping &
+  del` one-liner: that's the classic malware self-delete. Unix renames over
+  the running file and needs none of this. It holds the sync lock. Sync never
   installs anything: a bad release would break every background sync with
   nobody watching, and migrations only go forward, so going back isn't clean.
   What sync does instead is ask once a day (`update::check_due`, keyed in

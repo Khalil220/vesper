@@ -178,6 +178,8 @@ enum Command {
     Profiles,
     /// Download the latest release of Vesper and replace this copy with it.
     Update,
+    #[command(hide = true)]
+    FinishUpdate,
     /// Show how many chapters a novel's page lists, without saving anything.
     List {
         /// The novel's main page on a supported site.
@@ -205,6 +207,12 @@ enum ServiceAction {
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    if let Command::FinishUpdate = cli.cmd {
+        if let Ok(exe) = std::env::current_exe() {
+            update::remove_retired_when_free(&exe, 100, Duration::from_millis(100));
+        }
+        return Ok(());
+    }
     if cfg!(windows) {
         if let Ok(exe) = std::env::current_exe() {
             update::remove_retired(&exe);
@@ -253,6 +261,7 @@ async fn main() -> Result<()> {
         Command::Status => status(&config),
         Command::Profiles => profiles_show(),
         Command::Update => update_vesper().await,
+        Command::FinishUpdate => Ok(()),
         Command::List { url, delay_ms } => list(&config, url, delay_ms).await,
     }
 }
@@ -266,6 +275,7 @@ impl Command {
                 | Command::Service { .. }
                 | Command::List { .. }
                 | Command::Update
+                | Command::FinishUpdate
         )
     }
 }
@@ -1836,6 +1846,9 @@ async fn update_vesper() -> Result<()> {
         "Updated Vesper from {VERSION} to {}. What's new: {}",
         release.version, release.page
     );
+    if cfg!(windows) {
+        let _ = update::hand_over(&exe);
+    }
     Ok(())
 }
 
@@ -1950,6 +1963,7 @@ mod tests {
         assert!(!Command::Service { action: ServiceAction::Status }.touches_library());
         assert!(!Command::List { url: "x".into(), delay_ms: None }.touches_library());
         assert!(!Command::Update.touches_library());
+        assert!(!Command::FinishUpdate.touches_library());
     }
 
     #[test]
@@ -1977,6 +1991,16 @@ mod tests {
         assert!(help.contains("Usage: vesper <COMMAND>"), "{help}");
         assert!(!help.contains("vesper.exe"), "{help}");
         assert!(!help.contains("help         Print"), "{help}");
+    }
+
+    #[test]
+    fn the_new_version_understands_the_hand_over_and_keeps_it_out_of_help() {
+        let parsed = Cli::try_parse_from(["vesper", update::FINISH_COMMAND]).unwrap();
+        assert!(matches!(parsed.cmd, Command::FinishUpdate));
+        let Err(err) = Cli::try_parse_from(["vesper", "--help"]) else {
+            panic!("--help should print help");
+        };
+        assert!(!err.to_string().contains(update::FINISH_COMMAND));
     }
 
     #[test]
