@@ -679,7 +679,12 @@ pub fn strip_promo(paragraph: &str) -> Option<String> {
     }
     push_piece(&mut kept, &text[cursor..]);
 
-    let tidy = kept.split_whitespace().collect::<Vec<_>>().join(" ");
+    let tidy = kept
+        .lines()
+        .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
     let dialogue = tidy.contains(QUOTES) && tidy.chars().any(|c| !QUOTES.contains(&c) && !c.is_whitespace());
     (dialogue || tidy.chars().any(char::is_alphanumeric)).then_some(tidy)
 }
@@ -1176,7 +1181,7 @@ mod tests {
             ),
             (
                 "He had never seen it before. More chapters in Telegram with a link: t.me/+Z9CFfQjA6p9iM2My\nThe bidding went on.",
-                Some("He had never seen it before. The bidding went on."),
+                Some("He had never seen it before.\nThe bidding went on."),
             ),
             (
                 "\"That was a quick response,\" she said.(More chapters in Buyers club for TMT)",

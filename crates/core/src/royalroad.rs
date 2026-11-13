@@ -173,10 +173,7 @@ fn parse_body(html: &str) -> Result<Vec<String>> {
         if p.value().classes().any(|c| decoy.contains(c)) {
             continue;
         }
-        let text = p.text().collect::<String>().trim().to_string();
-        if !text.is_empty() {
-            paragraphs.push(text);
-        }
+        paragraphs.extend(crate::source::paragraph_texts(p));
     }
     if paragraphs.is_empty() {
         return Err(anyhow!("no paragraphs extracted from .chapter-inner"));

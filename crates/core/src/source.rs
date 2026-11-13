@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
-use scraper::{Html, Selector};
+use scraper::{ElementRef, Html, Node, Selector};
 use url::Url;
 
 use crate::fetch::Fetcher;
@@ -205,6 +205,52 @@ fn parse_chapter_links(html: &str, base_url: &str, marker: &str) -> Result<Vec<C
     Ok(out)
 }
 
+fn unfold_source_breaks(text: &str, out: &mut String) {
+    let mut run = String::new();
+    for c in text.chars() {
+        if c.is_whitespace() {
+            run.push(c);
+            continue;
+        }
+        if !run.is_empty() {
+            out.push_str(if run.contains(['\n', '\r']) { " " } else { &run });
+            run.clear();
+        }
+        out.push(c);
+    }
+    if !run.is_empty() {
+        out.push_str(if run.contains(['\n', '\r']) { " " } else { &run });
+    }
+}
+
+pub(crate) fn paragraph_texts(element: ElementRef) -> Vec<String> {
+    let mut raw = String::new();
+    for node in element.descendants() {
+        match node.value() {
+            Node::Text(text) => unfold_source_breaks(text, &mut raw),
+            Node::Element(e) if e.name().eq_ignore_ascii_case("br") => raw.push('\n'),
+            _ => {}
+        }
+    }
+
+    let mut paragraphs = Vec::new();
+    let mut lines: Vec<&str> = Vec::new();
+    for line in raw.split('\n').map(str::trim) {
+        if line.is_empty() {
+            if !lines.is_empty() {
+                paragraphs.push(lines.join("\n"));
+                lines.clear();
+            }
+        } else {
+            lines.push(line);
+        }
+    }
+    if !lines.is_empty() {
+        paragraphs.push(lines.join("\n"));
+    }
+    paragraphs
+}
+
 pub(crate) fn parse_chapter_body(
     html: &str,
     content_selector: &str,
@@ -221,10 +267,7 @@ pub(crate) fn parse_chapter_body(
 
     let mut paragraphs = Vec::new();
     for p in content.select(&para_sel) {
-        let text = p.text().collect::<String>().trim().to_string();
-        if !text.is_empty() {
-            paragraphs.push(text);
-        }
+        paragraphs.extend(paragraph_texts(p));
     }
 
     if paragraphs.is_empty() {
@@ -261,6 +304,26 @@ mod tests {
           <a href="/cultivation-online-novel/chapter-2-b.html">Chapter 2 - B (dup)</a>
           <a href="/some/other/page.html">Not a chapter</a>
         </body></html>"#;
+
+    #[test]
+    fn a_line_break_inside_a_paragraph_is_kept() {
+        let html = "<div id=\"c\">\
+            <p style=\"text-align: center\"><strong>Chapter 001<br></strong><strong>Good Morning Brother</strong></p>\
+            <p>Strength: 10<br/>Agility: 12<br>Luck: 3</p>\
+            <p>First thought.<br><br>Second thought.</p>\
+            <p>Source\n      formatting  is   not a break.</p>\
+            </div>";
+        assert_eq!(
+            parse_chapter_body(html, "#c", "p").unwrap(),
+            vec![
+                "Chapter 001\nGood Morning Brother",
+                "Strength: 10\nAgility: 12\nLuck: 3",
+                "First thought.",
+                "Second thought.",
+                "Source formatting  is   not a break.",
+            ]
+        );
+    }
 
     #[test]
     fn extracts_paragraphs_and_skips_ads_and_blanks() {

@@ -430,7 +430,13 @@ Cargo workspace, two crates under `crates/`:
   - `source` — `Source` trait, declarative `SiteProfile`, `GenericSource`
     adapter, shared HTML extraction reused by hand-written adapters. Keep
     parsing synchronous so the non-`Send` `scraper::Html` never crosses an
-    `.await`.
+    `.await`. `paragraph_texts` turns one `<p>` into stored paragraphs: a
+    `<br>` is a line break inside the paragraph (the EPUB renders it as
+    `<br/>`), a blank line from `<br><br>` starts a new paragraph, and a
+    newline that is only HTML source formatting becomes a space, as a browser
+    shows it. Taking `.text()` alone glued the words on either side of a
+    `<br>` ("Chapter 001Good Morning Brother"). `strip_promo` keeps these line
+    breaks when it cuts a mark.
   - `chikari` / `freewebnovel` / `lightnovelworld` / `royalroad` /
     `scribblehub` — hand-written adapters (site details above). `chikari` reads
     a JSON API rather than HTML, so it uses `serde_json` and no `scraper`.

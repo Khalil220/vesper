@@ -169,7 +169,7 @@ fn url_host(url: &str) -> Option<String> {
 fn render_chapter_xhtml(heading: &str, ch: &Chapter) -> String {
     let mut body = format!("<h1>{}</h1>\n", escape(heading));
     for p in &ch.paragraphs {
-        body.push_str(&format!("<p>{}</p>\n", escape(p)));
+        body.push_str(&format!("<p>{}</p>\n", escape(p).replace('\n', "<br/>")));
     }
     wrap_xhtml(heading, &body)
 }
@@ -231,6 +231,27 @@ mod tests {
         build_epub(&meta(), &chapters([1, 2, 5]), &path, None, &[3, 4]).unwrap();
         assert_eq!(chapters_in_epub(&path), BTreeSet::from([1, 2, 5]));
         assert!(chapters_in_epub(&dir.join("absent.epub")).is_empty());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_line_break_inside_a_paragraph_shows_in_the_book() {
+        let dir = scratch("breaks");
+        let path = dir.join("book.epub");
+        let mut chapter = chapters([1]);
+        chapter[0].paragraphs = vec!["Strength: 10\nAgility: 12".into(), "A <b> & c".into()];
+        build_epub(&meta(), &chapter, &path, None, &[]).unwrap();
+
+        let mut archive = zip::ZipArchive::new(File::open(&path).unwrap()).unwrap();
+        let name = archive
+            .file_names()
+            .find(|n| n.ends_with("chapter_00001.xhtml"))
+            .unwrap()
+            .to_string();
+        let mut page = String::new();
+        std::io::Read::read_to_string(&mut archive.by_name(&name).unwrap(), &mut page).unwrap();
+        assert!(page.contains("<p>Strength: 10<br/>Agility: 12</p>"), "{page}");
+        assert!(page.contains("<p>A &lt;b&gt; &amp; c</p>"), "{page}");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
