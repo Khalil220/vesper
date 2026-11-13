@@ -268,6 +268,9 @@ rules-of-the-road.
   launch deletes it; Unix renames over it. It holds the sync lock. Sync never
   installs anything: a bad release would break every background sync with
   nobody watching, and migrations only go forward, so going back isn't clean.
+  What sync does instead is ask once a day (`update::check_due`, keyed in
+  `meta`, off with `check_for_updates = false`) and save the latest version,
+  which `vesper status` reports when it's newer. A failed check only logs.
   Asset names must match `.github/workflows/release.yml`; a test pins them.
 - **Auto-export via a Backfilling -> Live state machine**, not a chapter-count
   heuristic. `auto_export` and `auto_append` are separate toggles.

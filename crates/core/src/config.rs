@@ -17,6 +17,7 @@ pub struct Config {
     pub auto_append: bool,
     pub split_every_chapters: u32,
     pub log_path: PathBuf,
+    pub check_for_updates: bool,
 }
 
 pub fn default_log_path() -> PathBuf {
@@ -44,6 +45,7 @@ impl Default for Config {
             auto_append: false,
             split_every_chapters: 0,
             log_path: default_log_path(),
+            check_for_updates: true,
         }
     }
 }
@@ -105,6 +107,7 @@ impl Config {
                 .filter(|s| !s.is_empty())
                 .map(PathBuf::from)
                 .unwrap_or(d.log_path),
+            check_for_updates: parse_bool("check_for_updates", d.check_for_updates),
         })
     }
 
@@ -137,7 +140,10 @@ impl Config {
              ; Split EPUBs into volumes of this many chapters (0 = one file per novel).\n\
              split_every_chapters = {}\n\n\
              ; Where the background sync writes its log (its console output is hidden).\n\
-             log_path = {}\n",
+             log_path = {}\n\n\
+             ; Once a day, sync asks GitHub whether a newer Vesper is out, and `vesper status` says so.\n\
+             ; Nothing is installed until you run `vesper update`.\n\
+             check_for_updates = {}\n",
             self.output_dir.display(),
             self.request_delay_ms,
             self.poll_interval_minutes,
@@ -148,6 +154,7 @@ impl Config {
             self.auto_append,
             self.split_every_chapters,
             self.log_path.display(),
+            self.check_for_updates,
         );
         std::fs::write(path, content)
             .with_context(|| format!("writing config {}", path.display()))?;
@@ -170,6 +177,7 @@ mod tests {
         cfg.auto_export = true;
         cfg.split_every_chapters = 100;
         cfg.retention_days = 7;
+        cfg.check_for_updates = false;
         cfg.write(&path).unwrap();
 
         let read = Config::read(&path).unwrap();
@@ -178,6 +186,7 @@ mod tests {
         assert!(!read.auto_append);
         assert_eq!(read.split_every_chapters, 100);
         assert_eq!(read.retention_days, 7);
+        assert!(!read.check_for_updates);
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -211,6 +220,7 @@ mod tests {
         assert_eq!(read.request_delay_ms, 500);
         assert_eq!(read.poll_interval_minutes, Config::default().poll_interval_minutes);
         assert!(!read.auto_export);
+        assert!(read.check_for_updates);
 
         std::fs::remove_dir_all(&dir).ok();
     }

@@ -359,7 +359,8 @@ vesper list <url>
 The look-don't-touch commands. `status` shows where the database and log
 live, how many novels you follow and in what state, the novels that need
 attention (chapters no source has, an EPUB that couldn't be written), when
-the last sync finished, and any errors from the most recent one. It's the
+the last sync finished, any errors from the most recent one, and whether a
+newer version of Vesper is out. It's the
 first place to look when something seems off; `subs` has the full list. `config` prints the
 config file's path and current values. `profiles` lists the site profiles
 Vesper knows about and where to put your own. `list` is a dry run: it walks
@@ -425,6 +426,11 @@ sections to worry about. Here's each option, with defaults:
 
 - `log_path` (default `vesper.log` in the app-data directory) — where the
   background sync writes its log, since it has no console to print to.
+
+- `check_for_updates` (default `true`): once a day, sync asks GitHub which
+  version of Vesper is the latest, and `vesper status` tells you when it's
+  newer than yours. Nothing is downloaded or installed until you run
+  `vesper update`. Set it to `false` and Vesper never asks.
 
 ## Where things live
 

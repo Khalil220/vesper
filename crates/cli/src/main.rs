@@ -1585,6 +1585,10 @@ async fn sync_all(config: &Config, limit: usize, delay_ms: Option<u64>) -> Resul
         Err(e) => eprintln!("! prune failed: {e}"),
     }
 
+    if config.check_for_updates {
+        check_for_update(config, &store).await;
+    }
+
     println!(
         "Sync complete: {} across {}.",
         count(total_new as usize, "new chapter"),
@@ -1599,6 +1603,27 @@ async fn sync_all(config: &Config, limit: usize, delay_ms: Option<u64>) -> Resul
         ),
     );
     Ok(())
+}
+
+async fn check_for_update(config: &Config, store: &Store) {
+    let now = vesper_core::util::now_unix();
+    if !update::check_due(store, now).unwrap_or(false) {
+        return;
+    }
+    match update::latest_release().await {
+        Ok(release) => {
+            if let Err(e) = update::record_latest(store, &release.version, now) {
+                log_line(config, &format!("update check: could not save the result: {e}"));
+            } else if update::is_newer(&release.version, VERSION) {
+                log_line(config, &format!("update check: Vesper {} is out", release.version));
+            }
+        }
+        Err(e) => log_line(config, &format!("update check failed: {e:#}")),
+    }
+}
+
+fn update_note(latest: Option<&str>) -> Option<String> {
+    latest.map(|v| format!("Vesper {v} is out, and this is {VERSION}. Run `vesper update` to install it."))
 }
 
 fn service_install(config: &Config, interval_minutes: Option<u32>) -> Result<()> {
@@ -1643,6 +1668,7 @@ fn config_show(config: &Config) -> Result<()> {
     println!("  auto_append = {}", config.auto_append);
     println!("  split_every_chapters = {}", config.split_every_chapters);
     println!("  log_path = {}", config.log_path.display());
+    println!("  check_for_updates = {}", config.check_for_updates);
     Ok(())
 }
 
@@ -1715,6 +1741,10 @@ fn status(config: &Config) -> Result<()> {
             }
         }
         Err(_) => println!("\nNo log yet; the background sync has not run."),
+    }
+
+    if let Some(note) = update_note(update::newer_release(&store, VERSION)?.as_deref()) {
+        println!("\n{note}");
     }
     Ok(())
 }
@@ -1961,6 +1991,15 @@ mod tests {
             describe_gaps(&gaps),
             "no source has ch. 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 and 2 more"
         );
+    }
+
+    #[test]
+    fn status_names_a_newer_release() {
+        assert_eq!(update_note(None), None);
+        let note = update_note(Some("9.0.0")).unwrap();
+        assert!(note.starts_with("Vesper 9.0.0 is out, and this is "), "{note}");
+        assert!(note.contains(VERSION), "{note}");
+        assert!(note.ends_with("Run `vesper update` to install it."), "{note}");
     }
 
     #[test]
