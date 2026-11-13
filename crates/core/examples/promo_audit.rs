@@ -1,18 +1,46 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Result};
 use rusqlite::{Connection, OpenFlags};
-use unicode_normalization::char::{decompose_compatible, is_combining_mark};
-use vesper_core::promo::strip_promo;
+use vesper_core::promo::{fold, strip_promo};
+use vesper_core::{default_db_path, scrub_novel, Store};
+
+const SITE_WORDS: &[&str] = &[
+    "reewebnovel",
+    "empire",
+    "panda",
+    "lightnovel",
+    "novelfire",
+    "novelphoenix",
+    "eaglesnov",
+    "myboxnovel",
+    "allnovelfull",
+    "newnovel",
+    "buyersclub",
+    "contentcopysite",
+    "betterexperience",
+];
+
+const LINK_SIGNS: &[&str] = &["t.me/", "discord.gg/"];
 
 fn main() -> Result<()> {
-    let path: PathBuf = std::env::args()
-        .nth(1)
-        .ok_or_else(|| anyhow!("usage: promo_audit <path-to-library.db>"))?
+    let mut args = std::env::args().skip(1);
+    let path: PathBuf = args
+        .next()
+        .ok_or_else(|| anyhow!("usage: promo_audit <path-to-library.db> [--apply]"))?
         .into();
+    let apply = args.any(|a| a == "--apply");
 
-    let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    audit(&path)?;
+    if apply {
+        scrub_copy(&path)?;
+    }
+    Ok(())
+}
+
+fn audit(path: &PathBuf) -> Result<()> {
+    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     let mut stmt = conn.prepare("SELECT novel_id, number, body FROM chapters")?;
     let mut rows = stmt.query([])?;
 
@@ -72,6 +100,24 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+fn scrub_copy(path: &PathBuf) -> Result<()> {
+    let live = default_db_path()?;
+    if path.canonicalize().ok() == live.canonicalize().ok() {
+        bail!("refusing to scrub the live library; point --apply at a copy");
+    }
+    let store = Store::open(path)?;
+    let ids: Vec<i64> = store.list_subscriptions()?.iter().map(|n| n.id).collect();
+    let mut chapters = 0usize;
+    let mut marks = 0usize;
+    for id in ids {
+        let report = scrub_novel(&store, id, false)?;
+        chapters += report.chapters.len();
+        marks += report.marks;
+    }
+    println!("\nscrubbed {marks} marks across {chapters} chapters in {}", path.display());
+    Ok(())
+}
+
 fn difference(original: &str, kept: &str) -> String {
     let head = original
         .char_indices()
@@ -96,32 +142,15 @@ fn difference(original: &str, kept: &str) -> String {
 fn fold_key(removed: &str) -> String {
     let folded = fold(removed);
     if folded.len() > 44 {
-        format!("{}~", &folded[..44])
+        format!("{}~", &folded[..folded.floor_char_boundary(44)])
     } else {
         folded
     }
 }
 
-fn fold(text: &str) -> String {
-    let mut out = String::new();
-    for c in text.chars() {
-        let mut pieces = String::new();
-        decompose_compatible(c, |d| {
-            if !is_combining_mark(d) {
-                pieces.push(d);
-            }
-        });
-        for d in pieces.chars().flat_map(char::to_lowercase) {
-            if d.is_alphanumeric() {
-                out.push(d);
-            }
-        }
-    }
-    out
-}
-
 fn names_the_site(text: &str) -> bool {
     let folded = fold(text);
     let tld = ["com", "net", "org"].iter().any(|t| folded.ends_with(t));
-    folded.contains("reewebnovel") || folded.contains("empire") || tld
+    let lower = text.to_lowercase();
+    tld || SITE_WORDS.iter().any(|w| folded.contains(w)) || LINK_SIGNS.iter().any(|s| lower.contains(s))
 }
