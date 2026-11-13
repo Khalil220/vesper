@@ -117,9 +117,13 @@ rules-of-the-road.
     as a domain otherwise. Evidence is one of: a TLD right after it, every word
     two letters or fewer (letter-spaced), a styled or lookalike letter in it, or
     no whitespace anywhere in it (`novel~fire~net`) other than a plain hyphen.
-    The hyphen exception is real: one novel uses "panda-novel" as a noun
-    ("spoiled by panda-novels") where the site swapped its name in for "web
-    novel", and cutting it breaks the sentence. Names that are ordinary phrases
+    The hyphen exception exists because panda-novel also swaps its name in for
+    "webnovel" inside sentences ("spoiled by panda-novels", "Some panda-novel
+    addicts believed..."). Cutting the whole word breaks the sentence, so
+    `BRANDS_ON_NOVEL` removes only the `panda-` and leaves "novels". Across
+    30,768 stored chapters "panda-novel" never appears as the author's own
+    word, and if it ever did the cost would be "the novel she wrote", not a lost
+    sentence. Names that are ordinary phrases
     (`newnovel`, `allnovelfull`, `lightnovelworld`) need the TLD regardless. A
     TLD only counts when it is whole words (`c/om`, `c.o,m`), so "reading a
     novel. Compared to" stays.

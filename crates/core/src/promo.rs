@@ -109,6 +109,8 @@ const TLDS: &[&str] = &["com", "net", "org"];
 
 const JUNK_BEFORE_TLD: usize = 2;
 
+const BRANDS_ON_NOVEL: &[&str] = &["panda"];
+
 const LEAK_OPENERS: &[&str] = &["more", "or discord", "or telegram"];
 
 const LEAK_SIGNS: &[&str] = &["t.me/+", "buyers club"];
@@ -528,6 +530,18 @@ impl<'a> Folded<'a> {
         }
     }
 
+    fn brand_on_novel_spans(&self, spans: &mut Vec<(usize, usize)>) {
+        for word in 0..self.words.len().saturating_sub(1) {
+            let hyphenated = matches!(self.gap(word), "-" | "\u{2010}");
+            if hyphenated
+                && BRANDS_ON_NOVEL.contains(&self.words[word].text.as_str())
+                && self.words[word + 1].text.starts_with("novel")
+            {
+                spans.push((self.words[word].start, self.words[word + 1].start));
+            }
+        }
+    }
+
     fn dangling_pitch_span(&self, spans: &mut Vec<(usize, usize)>) {
         let last = self.words.len() - 1;
         if !self.after(last).trim().trim_end_matches(':').is_empty() {
@@ -635,6 +649,7 @@ fn promo_spans(text: &str) -> Vec<(usize, usize)> {
     let folded = Folded::new(text);
     if !folded.words.is_empty() {
         folded.site_spans(&mut spans);
+        folded.brand_on_novel_spans(&mut spans);
         folded.stripped_domain_spans(&mut spans);
         folded.pitch_tld_span(&mut spans);
         folded.styled_tld_span(&mut spans);
@@ -1025,11 +1040,26 @@ mod tests {
     }
 
     #[test]
-    fn keeps_panda_novel_used_as_a_word() {
+    fn strips_the_site_name_glued_onto_novel() {
+        assert_strips(&[
+            (
+                "Oddly enough, a few were even close to the truth. Some panda-novel addicts believed it was the dawning of a mass mutation.",
+                Some("Oddly enough, a few were even close to the truth. Some novel addicts believed it was the dawning of a mass mutation."),
+            ),
+            (
+                "“This isn’t a cultivation novel,” Aron laughed. He wondered when she had found the time to read those strange panda-novels.",
+                Some("“This isn’t a cultivation novel,” Aron laughed. He wondered when she had found the time to read those strange novels."),
+            ),
+            (
+                "One intrepid conspiracy theorist, who had been spoiled by panda-novels, even privately believed it.",
+                Some("One intrepid conspiracy theorist, who had been spoiled by novels, even privately believed it."),
+            ),
+        ]);
         assert_keeps(&[
-            "Some panda-novel addicts believed it was true.",
-            "This isn’t a cultivation novel,” Aron laughed. Nobody told me to read those strange panda-novels.",
-            "Those who had been spoiled by panda-novels even privately believed it.",
+            "She wrote a panda novel about bamboo forests.",
+            "Pandamonium broke out in the hall.",
+            "He bought a panda-shaped cookie for her.",
+            "The red panda. Novel ideas came to him at night.",
         ]);
     }
 
