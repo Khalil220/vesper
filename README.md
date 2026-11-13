@@ -176,6 +176,9 @@ harmless.
 
 Novels that are fully caught up get a cheap freshness check rather than a
 full crawl, so a sync where nothing changed is fast and light on the sites.
+It only prints the novels that had something happen (new chapters, chapters
+no source has, a failure) and then a one-line summary, so a quiet run is a
+single line. The log records every novel either way.
 
 ### refresh
 
@@ -282,6 +285,7 @@ afterwards, or let `auto_append` handle it.
 
 ```
 vesper unsubscribe <novel>
+vesper unsub <novel>
 ```
 
 Stop following a novel. This also deletes its cached chapters, so if you
@@ -325,8 +329,10 @@ vesper list <url>
 ```
 
 The look-don't-touch commands. `status` shows where the database and log
-live, each novel's sync state, when the last sync ran, and the tail of the
-log — the first place to look when something seems off. `config` prints the
+live, how many novels you follow and in what state, the novels that need
+attention (chapters no source has, an EPUB that couldn't be written), when
+the last sync finished, and any errors from the most recent one. It's the
+first place to look when something seems off; `subs` has the full list. `config` prints the
 config file's path and current values. `profiles` lists the site profiles
 Vesper knows about and where to put your own. `list` is a dry run: it walks
 a novel's table of contents on the site and reports the chapter count and

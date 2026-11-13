@@ -116,12 +116,12 @@ mod windows {
 
         fn status(&self) -> Result<ServiceStatus> {
             let out = Command::new("schtasks")
-                .args(["/Query", "/TN", TASK_NAME])
+                .args(["/Query", "/TN", TASK_NAME, "/FO", "CSV", "/NH"])
                 .output()?;
             Ok(ServiceStatus {
                 installed: out.status.success(),
                 detail: if out.status.success() {
-                    String::from_utf8_lossy(&out.stdout).trim().to_string()
+                    super::describe_schtasks_row(&String::from_utf8_lossy(&out.stdout))
                 } else {
                     "not installed".to_string()
                 },
@@ -162,6 +162,15 @@ fn launchd_plist(exe: &Path, interval_minutes: u32, label: &str) -> String {
     )
 }
 
+fn describe_schtasks_row(csv: &str) -> String {
+    let row = csv.trim();
+    let fields: Vec<&str> = row.split("\",\"").map(|f| f.trim_matches('"')).collect();
+    match fields.as_slice() {
+        [_, next, state, ..] => format!("next run {next}, {}", state.to_lowercase()),
+        _ => row.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod render_tests {
     use super::*;
@@ -185,6 +194,15 @@ mod render_tests {
         assert!(p.contains("<string>/usr/local/bin/vesper</string>"));
         assert!(p.contains("<string>sync</string>"));
         assert!(p.contains("<integer>1800</integer>"));
+    }
+
+    #[test]
+    fn schtasks_row_reads_as_a_sentence() {
+        assert_eq!(
+            describe_schtasks_row("\"\\VesperSync\",\"11/13/2026 6:14:00 AM\",\"Ready\"\r\n"),
+            "next run 11/13/2026 6:14:00 AM, ready"
+        );
+        assert_eq!(describe_schtasks_row("unexpected"), "unexpected");
     }
 }
 

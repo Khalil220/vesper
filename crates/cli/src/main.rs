@@ -390,7 +390,7 @@ async fn export_and_track(store: &Store, config: &Config, novel: &StoredNovel) -
         }
         Err(e) => {
             let _ = store.set_export_pending(novel.id, true);
-            eprintln!("  ! export deferred (will retry next sync): {e}");
+            eprintln!("  ! EPUB not written, will retry next sync: {e}");
             Vec::new()
         }
     }
@@ -402,10 +402,11 @@ async fn post_sync(
     novel_id: i64,
     prev_state: DerivedState,
     report: &SyncReport,
-) -> Result<()> {
+) -> Result<Vec<String>> {
+    let mut notes = Vec::new();
     let final_state = store.reevaluate_completion(novel_id, config.quiet_grace_days)?;
     if final_state != prev_state {
-        eprintln!("  state: {} -> {}", prev_state.as_str(), final_state.as_str());
+        notes.push(format!("now {}, was {}", state_label(final_state), state_label(prev_state)));
     }
 
     let just_caught_up =
@@ -422,17 +423,10 @@ async fn post_sync(
         || (config.auto_append && gained_new)
         || novel.export_pending;
 
-    if should_export {
-        let paths = export_and_track(store, config, &novel).await;
-        if !paths.is_empty() {
-            eprintln!(
-                "  auto-exported {} file(s) to {}",
-                paths.len(),
-                config.output_dir.display()
-            );
-        }
+    if should_export && !export_and_track(store, config, &novel).await.is_empty() {
+        notes.push("EPUB updated".to_string());
     }
-    Ok(())
+    Ok(notes)
 }
 
 fn log_line(config: &Config, msg: &str) {
@@ -452,20 +446,33 @@ fn describe_numbers(numbers: &BTreeSet<u32>) -> String {
     const CAP: usize = 15;
     let mut list = numbers.iter().take(CAP).map(|n| n.to_string()).collect::<Vec<_>>().join(", ");
     if numbers.len() > CAP {
-        list.push_str(&format!(", … (+{} more)", numbers.len() - CAP));
+        list.push_str(&format!(" and {} more", numbers.len() - CAP));
     }
     list
 }
 
 fn describe_gaps(gaps: &BTreeSet<u32>) -> String {
-    if gaps.is_empty() {
-        return String::new();
+    format!("no source has ch. {}", describe_numbers(gaps))
+}
+
+fn count(n: usize, noun: &str) -> String {
+    format!("{n} {noun}{}", if n == 1 { "" } else { "s" })
+}
+
+fn state_label(state: DerivedState) -> &'static str {
+    match state {
+        DerivedState::Backfilling => "backfilling",
+        DerivedState::Live => "live",
+        DerivedState::LikelyComplete => "likely complete",
     }
-    format!(
-        "{} unavailable at source (404): ch. {}",
-        gaps.len(),
-        describe_numbers(gaps)
-    )
+}
+
+fn chapter_label(number: u32, title: &str) -> String {
+    if title.is_empty() || title == format!("Chapter {number}") {
+        format!("ch.{number}")
+    } else {
+        format!("ch.{number} {title}")
+    }
 }
 
 struct ProgressBar {
@@ -482,14 +489,22 @@ impl ProgressBar {
         }
     }
 
-    fn update(&mut self, p: SyncProgress) {
+    fn sync(&mut self, title: &str, p: SyncProgress) {
+        match p {
+            SyncProgress::Fetching { done, total } => {
+                self.update(&format!("{title}: downloading"), done, total)
+            }
+            SyncProgress::Upgrading { done, total } => {
+                self.update(&format!("{title}: re-downloading from the primary source"), done, total)
+            }
+        }
+    }
+
+    fn update(&mut self, label: &str, done: usize, total: usize) {
         if !self.enabled {
             return;
         }
-        let msg = match p {
-            SyncProgress::Fetching { done, total } => format!("  Fetching {done}/{total}..."),
-            SyncProgress::Upgrading { done, total } => format!("  Upgrading {done}/{total}..."),
-        };
+        let msg = format!("  {label} {done}/{total}...");
         let pad = " ".repeat(self.last_len.saturating_sub(msg.len()));
         let mut err = std::io::stderr();
         let _ = write!(err, "\r{msg}{pad}");
@@ -547,8 +562,8 @@ async fn subscribe(config: &Config, url: String, force: bool, delay_ms: Option<u
                 .unwrap_or_default();
             bail!(
                 "\"{}\" looks like #{} \"{}\"{from}, which you already follow.\n\
-                 - To add this URL as an alternate source:  vesper add-source {} {url}\n\
-                 - To subscribe as a separate novel anyway:  re-run with --force",
+                 To add this URL as a fallback source: vesper add-source {} {url}\n\
+                 To follow it as a separate novel anyway, run the same command with --force.",
                 meta.title,
                 existing.id,
                 existing.title,
@@ -587,12 +602,12 @@ async fn add_source(config: &Config, novel: String, url: String, delay_ms: Optio
         }
     }
 
-    let sid = store.add_source(found.id, source.name(), &url)?;
-    println!("Added {} as a fallback source (#{sid}) for \"{}\".", source.name(), found.title);
+    store.add_source(found.id, source.name(), &url)?;
+    println!("Added {} as a fallback source for \"{}\".", source.name(), found.title);
 
     if !store.unfilled_gaps(found.id)?.is_empty() {
         store.set_derived_state(found.id, DerivedState::Backfilling)?;
-        println!("  It has unavailable chapters; the next sync will try to fill them from this source.");
+        println!("  The next sync will try it for the chapters no source had.");
     }
     Ok(())
 }
@@ -628,14 +643,17 @@ async fn retitle_one(store: &Store, novel: &StoredNovel, delay_ms: u64) -> Resul
 
     for r in refs.iter().filter(|r| have.contains(&r.number)) {
         done += 1;
-        progress.update(SyncProgress::Upgrading { done, total });
+        progress.update(&format!("{}: reading titles", novel.title), done, total);
         match source.fetch_chapter(r).await {
             Ok(ch) => {
                 if store.update_chapter_title(novel.id, ch.number, &ch.title)? {
                     fixed += 1;
                 }
             }
-            Err(e) => eprintln!("\n  ! chapter {} — {e}", r.number),
+            Err(e) => {
+                progress.finish();
+                eprintln!("  ! ch.{}: {e}", r.number);
+            }
         }
     }
     progress.finish();
@@ -654,46 +672,52 @@ async fn refresh(
     if novel.eq_ignore_ascii_case("all") {
         let novels = store.list_subscriptions()?;
         if novels.is_empty() {
-            println!("No subscriptions to refresh.");
+            println!("You don't follow any novels yet.");
             return Ok(());
         }
-        eprintln!("Refreshing metadata for {} subscription(s)...", novels.len());
-        let mut changed = 0usize;
+        eprintln!("Refreshing {}...", count(novels.len(), "novel"));
+        let mut authors = 0usize;
         let mut retitled = 0usize;
+        let mut failed = 0usize;
         for n in &novels {
+            let mut notes = Vec::new();
             match refresh_one(&store, n, delay).await {
                 Ok(Some((old, new))) => {
-                    println!("  {} — author: {old} -> {new}", n.title);
-                    changed += 1;
+                    notes.push(format!("author changed from {old} to {new}"));
+                    authors += 1;
                 }
-                Ok(None) => println!("  {} — no author change", n.title),
-                Err(e) => eprintln!("  ! {} — {e}", n.title),
+                Ok(None) => {}
+                Err(e) => {
+                    eprintln!("  ! {}: {e}", n.title);
+                    failed += 1;
+                }
             }
             if titles {
                 match retitle_one(&store, n, delay).await {
-                    Ok(0) => println!("  {} — chapter titles already correct", n.title),
+                    Ok(0) => {}
                     Ok(fixed) => {
-                        println!("  {} — {fixed} chapter title(s) corrected", n.title);
+                        notes.push(format!("{} corrected", count(fixed, "chapter title")));
                         retitled += fixed;
-                        if config.auto_append {
-                            let paths = export_and_track(&store, config, n).await;
-                            if !paths.is_empty() {
-                                println!("  {} — exported", n.title);
-                            }
+                        if config.auto_append && !export_and_track(&store, config, n).await.is_empty() {
+                            notes.push("EPUB updated".to_string());
                         }
                     }
-                    Err(e) => eprintln!("  ! {} — titles: {e}", n.title),
+                    Err(e) => eprintln!("  ! {}: titles not checked, {e}", n.title),
                 }
             }
+            if !notes.is_empty() {
+                println!("  {}: {}", n.title, notes.join(", "));
+            }
         }
-        if changed > 0 {
+        println!("Updated {}.", count(novels.len() - failed, "novel"));
+        if authors > 0 {
             println!(
-                "\n{changed} author(s) changed — re-export those novels \
-                 (`vesper export <id>`) to move their EPUBs into the new folders."
+                "Run `vesper export <id>` for each novel whose author changed, to move its EPUB \
+                 into the new author's folder."
             );
         }
         if retitled > 0 && !config.auto_append {
-            println!("\n{retitled} chapter title(s) corrected. Run `vesper export <id>` to update the EPUBs.");
+            println!("Run `vesper export <id>` for each novel with corrected titles to update its EPUB.");
         }
         return Ok(());
     }
@@ -701,30 +725,28 @@ async fn refresh(
     let found = store
         .find_novel(&novel)?
         .ok_or_else(|| anyhow!("no subscription matches \"{novel}\""))?;
-    eprintln!("Refreshing metadata for \"{}\"...", found.title);
+    eprintln!("Refreshing \"{}\"...", found.title);
     match refresh_one(&store, &found, delay).await? {
         Some((old, new)) => {
-            println!("Refreshed \"{}\": author {old} -> {new}.", found.title);
-            println!(
-                "Run `vesper export {}` to rebuild the EPUB under the new author folder.",
-                found.id
-            );
+            println!("Updated. The author changed from {old} to {new}.");
+            println!("Run `vesper export {}` to move the EPUB into the new author's folder.", found.id);
         }
-        None => println!("Refreshed \"{}\": author unchanged.", found.title),
+        None => println!("Updated. The author is unchanged."),
     }
     if titles {
-        eprintln!("Re-reading chapter titles for \"{}\" (one request each)...", found.title);
+        eprintln!("Re-reading chapter titles, one request each...");
         match retitle_one(&store, &found, delay).await? {
-            0 => println!("Chapter titles already correct."),
+            0 => println!("Chapter titles were already correct."),
             fixed => {
-                println!("Corrected {fixed} chapter title(s).");
-                if config.auto_append {
-                    let paths = export_and_track(&store, config, &found).await;
-                    if !paths.is_empty() {
-                        println!("Exported to {}", config.output_dir.display());
-                    }
-                } else {
-                    println!("Run `vesper export {}` to rebuild the EPUB.", found.id);
+                let updated =
+                    config.auto_append && !export_and_track(&store, config, &found).await.is_empty();
+                println!(
+                    "Corrected {}{}.",
+                    count(fixed, "chapter title"),
+                    if updated { "; EPUB updated" } else { "" }
+                );
+                if !config.auto_append {
+                    println!("Run `vesper export {}` to update the EPUB.", found.id);
                 }
             }
         }
@@ -736,7 +758,7 @@ fn subs(gaps_only: bool) -> Result<()> {
     let store = Store::open_default()?;
     let novels = store.list_subscriptions()?;
     if novels.is_empty() {
-        println!("No subscriptions yet. Add one with `vesper subscribe <url>`.");
+        println!("You don't follow any novels yet. Add one with `vesper sub <url>`.");
         return Ok(());
     }
     let mut shown = 0usize;
@@ -747,25 +769,29 @@ fn subs(gaps_only: bool) -> Result<()> {
         }
         shown += 1;
         let author = n.author.as_deref().unwrap_or("Unknown Author");
-        let pending = if n.export_pending { ", export pending" } else { "" };
+        let pending = if n.export_pending { ", EPUB not written yet" } else { "" };
         println!(
-            "#{}  {} — {}  [{} chapters, {}{pending}]",
-            n.id, n.title, author, n.chapter_count, n.derived_state.as_str()
+            "#{} {} by {}: {}, {}{pending}",
+            n.id,
+            n.title,
+            author,
+            count(n.chapter_count as usize, "chapter"),
+            state_label(n.derived_state)
         );
         if !gaps.is_empty() {
-            println!("    gaps: {}", describe_gaps(&gaps));
+            println!("    {}", describe_gaps(&gaps));
         }
         for s in &n.sources {
             let seen = s
                 .last_seen_chapter
                 .map(|c| format!("last seen ch.{c}"))
-                .unwrap_or_else(|| "not yet synced".into());
+                .unwrap_or_else(|| "not synced yet".into());
             let role = if s.priority == 1 { "primary" } else { "fallback" };
-            println!("    [{role}] {} — {} ({seen})", s.name, s.url);
+            println!("    {role}: {}, {}, {seen}", s.name, s.url);
         }
     }
     if gaps_only && shown == 0 {
-        println!("No subscriptions have missing chapters.");
+        println!("No novel is missing chapters.");
     }
     Ok(())
 }
@@ -802,9 +828,9 @@ async fn refetch(
     if every {
         let total: i64 = novels.iter().map(|n| n.chapter_count).sum();
         eprintln!(
-            "Re-downloading {total} stored chapter(s) across {} novel(s){}. \
-             This is one request per chapter — expect it to take a while.",
-            novels.len(),
+            "Re-downloading {} across {}{}, one request per chapter. This takes a while.",
+            count(total as usize, "chapter"),
+            count(novels.len(), "novel"),
             if dry_run { " (dry run)" } else { "" }
         );
     }
@@ -813,8 +839,8 @@ async fn refetch(
     for n in &novels {
         if !every {
             let scope = match &targets {
-                Some(t) => format!("{} chapter(s)", t.len()),
-                None => format!("all {} stored chapter(s)", n.chapter_count),
+                Some(t) => count(t.len(), "chapter"),
+                None => format!("all {}", count(n.chapter_count as usize, "chapter")),
             };
             eprintln!(
                 "Re-downloading {scope} of \"{}\"{}...",
@@ -825,13 +851,14 @@ async fn refetch(
 
         let sources = build_sources(n, delay)?;
         let mut bar = ProgressBar::new();
+        let label = format!("{}: downloading", n.title);
         let report = vesper_core::refetch_novel(
             &store,
             n.id,
             &sources,
             targets.as_ref(),
             dry_run,
-            |_, done, total| bar.update(SyncProgress::Fetching { done, total }),
+            |_, done, total| bar.update(&label, done, total),
         )
         .await;
         bar.finish();
@@ -839,7 +866,7 @@ async fn refetch(
         let report = match report {
             Ok(r) => r,
             Err(e) if every => {
-                eprintln!("  ! {} — {e}", n.title);
+                eprintln!("  ! {}: {e}", n.title);
                 continue;
             }
             Err(e) => return Err(e),
@@ -851,7 +878,7 @@ async fn refetch(
     }
 
     if changed.is_empty() {
-        println!("Nothing to change.");
+        println!("{}", if dry_run { "Nothing would change." } else { "Nothing changed." });
     } else if !dry_run {
         println!();
         for (id, title) in &changed {
@@ -859,9 +886,8 @@ async fn refetch(
                 continue;
             };
             if config.auto_append {
-                let paths = export_and_track(&store, config, &novel).await;
-                if !paths.is_empty() {
-                    println!("Exported {title} ({} file(s)) to {}", paths.len(), config.output_dir.display());
+                if !export_and_track(&store, config, &novel).await.is_empty() {
+                    println!("{title}: EPUB updated.");
                 }
             } else {
                 println!("Run `vesper export {id}` to update the EPUB for {title}.");
@@ -883,25 +909,25 @@ fn report_refetch(report: &RefetchReport, novel: &StoredNovel, quiet: bool, dry_
     if !report.replaced.is_empty() {
         println!(
             "  {} {verb}rewritten: ch. {}",
-            report.replaced.len(),
+            count(report.replaced.len(), "chapter"),
             describe_numbers(&report.replaced.iter().copied().collect())
         );
     }
     if !report.added.is_empty() {
         println!(
             "  {} {verb}added: ch. {}",
-            report.added.len(),
+            count(report.added.len(), "chapter"),
             describe_numbers(&report.added.iter().copied().collect())
         );
     }
     if !report.unchanged.is_empty() && !quiet {
-        println!("  {} already matched the source", report.unchanged.len());
+        println!("  {} already matched the source", count(report.unchanged.len(), "chapter"));
     }
     for (number, why) in &report.skipped {
         if *number == 0 {
             eprintln!("  ! {why}");
         } else {
-            eprintln!("  ! ch.{number} left as-is — {why}");
+            eprintln!("  ! ch.{number} left as it was: {why}");
         }
     }
 }
@@ -928,17 +954,18 @@ async fn repair(
     let mut total_repaired = 0usize;
     for n in &novels {
         let sources = build_sources(n, delay)?;
+        let mut bar = ProgressBar::new();
+        let label = format!("{}: checking", n.title);
         let report = vesper_core::repair_novel(
             &store,
             n.id,
             &sources,
             chapter,
             dry_run,
-            |number, done, total| {
-                eprintln!("  {} — ch.{number} ({done}/{total})", n.title);
-            },
+            |_, done, total| bar.update(&label, done, total),
         )
         .await;
+        bar.finish();
 
         match report {
             Ok(r) if r.is_empty() => {
@@ -949,35 +976,35 @@ async fn repair(
             Ok(r) => {
                 if !r.repaired.is_empty() {
                     total_repaired += r.repaired.len();
+                    let updated = !dry_run
+                        && config.auto_append
+                        && !export_and_track(&store, config, n).await.is_empty();
                     println!(
-                        "{}: {} chapter(s) {}: ch. {}",
+                        "{}: {} {}: ch. {}{}",
                         n.title,
-                        r.repaired.len(),
+                        count(r.repaired.len(), "chapter"),
                         if dry_run { "would be repaired" } else { "repaired" },
-                        describe_numbers(&r.repaired.iter().copied().collect())
+                        describe_numbers(&r.repaired.iter().copied().collect()),
+                        if updated { "; EPUB updated" } else { "" }
                     );
-                    if !dry_run && config.auto_append {
-                        let paths = export_and_track(&store, config, n).await;
-                        if !paths.is_empty() {
-                            println!("  exported to {}", config.output_dir.display());
-                        }
-                    }
                 }
                 for (number, why) in &r.skipped {
                     if *number == 0 {
                         eprintln!("  ! {}: {why}", n.title);
                     } else {
-                        eprintln!("  ! {} ch.{number} left as-is — {why}", n.title);
+                        eprintln!("  ! {}, ch.{number} left as it was: {why}", n.title);
                     }
                 }
             }
-            Err(e) => eprintln!("  ! {} — {e}", n.title),
+            Err(e) => eprintln!("  ! {}: {e}", n.title),
         }
     }
 
     if total_repaired > 0 && !dry_run && !config.auto_append {
-        println!("
-{total_repaired} chapter(s) replaced. Run `vesper export <novel>` to update the EPUB.");
+        println!(
+            "\n{} replaced. Run `vesper export <id>` to update the EPUBs.",
+            count(total_repaired, "chapter")
+        );
     }
     Ok(())
 }
@@ -1040,8 +1067,10 @@ fn unsubscribe(novel: String) -> Result<()> {
         .ok_or_else(|| anyhow!("no subscription matches \"{novel}\""))?;
     store.remove_subscription(found.id)?;
     println!(
-        "Unsubscribed from \"{}\" (novel #{}); removed {} stored chapters.",
-        found.title, found.id, found.chapter_count
+        "Unsubscribed from \"{}\" (novel #{}) and deleted its {}.",
+        found.title,
+        found.id,
+        count(found.chapter_count as usize, "stored chapter")
     );
     Ok(())
 }
@@ -1083,7 +1112,7 @@ async fn fetch(
     ensure!(!sources.is_empty(), "no usable sources for \"{}\"", found.title);
 
     let before = store.stored_chapter_numbers(found.id)?.len();
-    eprintln!("Syncing \"{}\" from {} source(s)...", found.title, sources.len());
+    eprintln!("Checking \"{}\" on {}...", found.title, count(sources.len(), "source"));
 
     let cancel = Arc::new(AtomicBool::new(false));
     let watcher = {
@@ -1097,7 +1126,7 @@ async fn fetch(
 
     let mut bar = ProgressBar::new();
     let report = sync_novel(&store, found.id, found.derived_state, &sources, limit, |p| {
-        bar.update(p);
+        bar.sync(&found.title, p);
         if cancel.load(Ordering::SeqCst) {
             ControlFlow::Break(())
         } else {
@@ -1108,45 +1137,49 @@ async fn fetch(
     bar.finish();
     watcher.abort();
 
-    for w in &report.warnings {
-        eprintln!("  ! {w}");
-    }
-
+    let total = before + report.newly_fetched as usize;
     if report.interrupted {
         println!(
-            "Paused \"{}\": {} new chapter(s) saved (now {} stored). Resume with `vesper fetch {}`.",
-            found.title,
-            report.newly_fetched,
-            before + report.newly_fetched as usize,
+            "Paused with {} saved, {total} stored in all. Run `vesper fetch {}` to carry on.",
+            count(report.newly_fetched as usize, "new chapter"),
             found.id
         );
+        for w in &report.warnings {
+            eprintln!("  ! {w}");
+        }
         return Ok(());
     }
 
-    post_sync(&store, config, found.id, found.derived_state, &report).await?;
+    let notes = post_sync(&store, config, found.id, found.derived_state, &report).await?;
 
     let fallback_note = if report.from_fallback > 0 {
         format!(" ({} from fallback sources)", report.from_fallback)
     } else {
         String::new()
     };
-    let mode = if report.delta_mode { "delta check" } else { "full scan" };
     let upgrade_note = if report.upgraded > 0 {
-        format!(", {} upgraded from primary", report.upgraded)
+        format!(
+            ", {} re-downloaded from the primary source",
+            count(report.upgraded as usize, "chapter")
+        )
     } else {
         String::new()
     };
     println!(
-        "Fetched {} new chapters for \"{}\"{fallback_note}{upgrade_note} (now {} stored) [{mode}].",
-        report.newly_fetched,
-        found.title,
-        before + report.newly_fetched as usize
+        "{}{fallback_note}{upgrade_note}, {total} stored in all.",
+        count(report.newly_fetched as usize, "new chapter")
     );
+    for w in &report.warnings {
+        eprintln!("  ! {w}");
+    }
+    for note in &notes {
+        println!("  {note}");
+    }
     if !report.gaps.is_empty() {
         let gaps: BTreeSet<u32> = report.gaps.iter().copied().collect();
         println!(
-            "Note: {} — the source has no page for these. They're marked in the EPUB; \
-             add an alternate source (`vesper add-source {}`) to try to fill them.",
+            "  {}. The EPUB lists them on a Missing Chapters page; `vesper add-source {} <url>` \
+             adds another site to try.",
             describe_gaps(&gaps),
             found.id
         );
@@ -1171,7 +1204,7 @@ async fn fetch_to_epub(
         meta.author.as_deref().unwrap_or("Unknown Author")
     );
 
-    eprintln!("Walking the table of contents...");
+    eprintln!("Reading the chapter list...");
     let mut refs = source.discover_chapters(url, None).await?;
     ensure!(!refs.is_empty(), "no chapters found for {url}");
     if limit > 0 {
@@ -1195,7 +1228,7 @@ async fn fetch_to_epub(
     let mut interrupted = false;
 
     for (done, chapter_ref) in refs.iter().enumerate() {
-        bar.update(SyncProgress::Fetching { done, total });
+        bar.update("Downloading", done + 1, total);
         match source.fetch_chapter(chapter_ref).await {
             Ok(c) => chapters.push(c),
             Err(e) => {
@@ -1222,12 +1255,12 @@ async fn fetch_to_epub(
     };
     let paths = write_epubs(config, &meta, &chapters, cover.as_ref(), &[], out.as_deref())?;
 
-    println!(
-        "Downloaded {} of {total} chapter(s) of \"{}\" to {} file(s):",
-        chapters.len(),
-        meta.title,
-        paths.len()
-    );
+    let got = if chapters.len() == total {
+        count(total, "chapter")
+    } else {
+        format!("{} of {}", chapters.len(), count(total, "chapter"))
+    };
+    println!("Downloaded {got} of \"{}\". Saved to:", meta.title);
     for p in &paths {
         println!("  {}", p.display());
     }
@@ -1264,19 +1297,16 @@ async fn scrub(config: &Config, novel: String, dry_run: bool) -> Result<()> {
         }
         total_marks += report.marks;
         total_chapters += report.chapters.len();
+        let updated =
+            !dry_run && config.auto_append && !export_and_track(&store, config, n).await.is_empty();
         println!(
-            "{}: {} mark(s) {} in {} chapter(s).",
+            "{}: {} {} in {}{}.",
             n.title,
-            report.marks,
+            count(report.marks, "mark"),
             if dry_run { "found" } else { "removed" },
-            report.chapters.len()
+            count(report.chapters.len(), "chapter"),
+            if updated { "; EPUB updated" } else { "" }
         );
-        if !dry_run && config.auto_append {
-            let paths = export_and_track(&store, config, n).await;
-            if !paths.is_empty() {
-                println!("  {} — exported", n.title);
-            }
-        }
     }
 
     if total_chapters == 0 {
@@ -1284,11 +1314,16 @@ async fn scrub(config: &Config, novel: String, dry_run: bool) -> Result<()> {
             println!("No site marks found.");
         }
     } else if dry_run {
-        println!("\n{total_marks} mark(s) in {total_chapters} chapter(s). Run without --dry-run to remove them.");
+        println!(
+            "\n{} in {}. Run without --dry-run to remove them.",
+            count(total_marks, "mark"),
+            count(total_chapters, "chapter")
+        );
     } else if !config.auto_append {
         println!(
-            "\n{total_marks} mark(s) removed from {total_chapters} chapter(s). \
-             Run `vesper export <novel>` to update the EPUBs."
+            "\n{} removed from {}. Run `vesper export <id>` to update the EPUBs.",
+            count(total_marks, "mark"),
+            count(total_chapters, "chapter")
         );
     }
     Ok(())
@@ -1316,10 +1351,15 @@ async fn export(config: &Config, novel: String, out: Option<PathBuf>) -> Result<
         let gaps: Vec<u32> = store.unfilled_gaps(found.id)?.into_iter().collect();
         build_epub(&meta, &chapters, &out_path, cover.as_ref(), &gaps)?;
         store.mark_all_exported(found.id)?;
-        println!("Exported {} chapters of \"{}\" to {}", chapters.len(), found.title, out_path.display());
+        println!(
+            "Exported {} of \"{}\" to {}",
+            count(chapters.len(), "chapter"),
+            found.title,
+            out_path.display()
+        );
     } else {
         let paths = export_novel(&store, &found, config).await?;
-        println!("Exported {} chapters of \"{}\" to {} file(s):", chapters.len(), found.title, paths.len());
+        println!("Exported {} of \"{}\" to:", count(chapters.len(), "chapter"), found.title);
         for p in &paths {
             println!("  {}", p.display());
         }
@@ -1331,7 +1371,10 @@ fn prune(config: &Config, retention_days: Option<u32>) -> Result<()> {
     let store = Store::open_default()?;
     let days = retention_days.unwrap_or(config.retention_days);
     let n = store.apply_retention(days)?;
-    println!("Pruned {n} exported chapter(s) from completed novels (retention {days}d).");
+    println!(
+        "Deleted {} of finished novels that were exported more than {days} days ago.",
+        count(n, "chapter")
+    );
     Ok(())
 }
 
@@ -1360,7 +1403,6 @@ async fn sync_all(config: &Config, limit: usize, delay_ms: Option<u64>) -> Resul
             if let Ok(Some(last)) = store.last_synced_at(novel.id) {
                 let window = config.likely_complete_recheck_days as i64 * 86_400;
                 if vesper_core::util::now_unix() - last < window {
-                    eprintln!("[{}] finished; re-checked recently, skipping", novel.title);
                     continue;
                 }
             }
@@ -1368,32 +1410,23 @@ async fn sync_all(config: &Config, limit: usize, delay_ms: Option<u64>) -> Resul
         let sources = match build_sources(novel, delay) {
             Ok(s) if !s.is_empty() => s,
             Ok(_) => {
-                eprintln!("[{}] no usable sources; skipping", novel.title);
+                println!("{}: skipped, no supported source.", novel.title);
                 continue;
             }
             Err(e) => {
-                eprintln!("[{}] {e}; skipping", novel.title);
+                println!("{}: skipped, {e}", novel.title);
                 continue;
             }
         };
-        eprintln!("Syncing \"{}\"...", novel.title);
         let mut bar = ProgressBar::new();
         let result = sync_novel(&store, novel.id, novel.derived_state, &sources, limit, |p| {
-            bar.update(p);
+            bar.sync(&novel.title, p);
             ControlFlow::Continue(())
         })
         .await;
         bar.finish();
         match result {
             Ok(report) => {
-                for w in &report.warnings {
-                    eprintln!("  ! {w}");
-                }
-                if let Err(e) =
-                    post_sync(&store, config, novel.id, novel.derived_state, &report).await
-                {
-                    eprintln!("  ! post-sync for \"{}\" failed: {e}", novel.title);
-                }
                 total_new += report.newly_fetched;
                 let mode = if report.delta_mode { "delta" } else { "full" };
                 let mut extra = if report.upgraded > 0 {
@@ -1401,19 +1434,47 @@ async fn sync_all(config: &Config, limit: usize, delay_ms: Option<u64>) -> Resul
                 } else {
                     String::new()
                 };
+                let mut line = format!(
+                    "{}: {}",
+                    novel.title,
+                    count(report.newly_fetched as usize, "new chapter")
+                );
+                if report.upgraded > 0 {
+                    line.push_str(&format!(
+                        ", {} re-downloaded from the primary source",
+                        count(report.upgraded as usize, "chapter")
+                    ));
+                }
                 if !report.gaps.is_empty() {
                     let gaps: BTreeSet<u32> = report.gaps.iter().copied().collect();
                     extra.push_str(&format!(", {}", describe_gaps(&gaps)));
-                    eprintln!("  ! {}: {}", novel.title, describe_gaps(&gaps));
+                    line.push_str(&format!("; {}", describe_gaps(&gaps)));
                 }
-                println!("  {}: +{} new chapters [{mode}]", novel.title, report.newly_fetched);
+                let notes = match post_sync(&store, config, novel.id, novel.derived_state, &report).await {
+                    Ok(notes) => notes,
+                    Err(e) => vec![format!("! after syncing: {e}")],
+                };
+                let news = report.newly_fetched > 0
+                    || report.upgraded > 0
+                    || !report.gaps.is_empty()
+                    || !report.warnings.is_empty()
+                    || !notes.is_empty();
+                if news {
+                    println!("{line}");
+                    for w in &report.warnings {
+                        eprintln!("  ! {w}");
+                    }
+                    for note in &notes {
+                        println!("  {note}");
+                    }
+                }
                 log_line(
                     config,
                     &format!("  {}: +{} new [{mode}]{extra}", novel.title, report.newly_fetched),
                 );
             }
             Err(e) => {
-                eprintln!("  ! sync failed for \"{}\": {e}", novel.title);
+                println!("{}: failed, {e}", novel.title);
                 log_line(config, &format!("  ERROR {}: {e}", novel.title));
             }
         }
@@ -1421,15 +1482,26 @@ async fn sync_all(config: &Config, limit: usize, delay_ms: Option<u64>) -> Resul
 
     match store.apply_retention(config.retention_days) {
         Ok(n) if n > 0 => {
-            println!("Pruned {n} exported chapter(s) from completed novels.");
+            println!("Deleted {} of finished novels to save space.", count(n, "exported chapter"));
             log_line(config, &format!("pruned {n} exported chapters"));
         }
         Ok(_) => {}
         Err(e) => eprintln!("! prune failed: {e}"),
     }
 
-    println!("Sync complete: {total_new} new chapter(s) across {} novel(s).", novels.len());
-    log_line(config, &format!("sync complete: {total_new} new across {} novels", novels.len()));
+    println!(
+        "Sync complete: {} across {}.",
+        count(total_new as usize, "new chapter"),
+        count(novels.len(), "novel")
+    );
+    log_line(
+        config,
+        &format!(
+            "sync complete: {} across {}",
+            count(total_new as usize, "new chapter"),
+            count(novels.len(), "novel")
+        ),
+    );
     Ok(())
 }
 
@@ -1438,9 +1510,10 @@ fn service_install(config: &Config, interval_minutes: Option<u32>) -> Result<()>
     let exe = std::env::current_exe()?;
     service::manager()?.install(&exe, interval)?;
     println!(
-        "Installed background sync: \"{}\" runs `{}` every {interval} min, windowless.",
+        "Installed the background sync task \"{}\". It runs `{} sync` every {}.",
         service::TASK_NAME,
-        exe.display()
+        exe.display(),
+        count(interval as usize, "minute")
     );
     Ok(())
 }
@@ -1454,7 +1527,7 @@ fn service_uninstall() -> Result<()> {
 fn service_status() -> Result<()> {
     let st = service::manager()?.status()?;
     if st.installed {
-        println!("Background sync is INSTALLED.\n{}", st.detail);
+        println!("Background sync is installed: {}.", st.detail);
     } else {
         println!("Background sync is not installed. Install with `vesper service install`.");
     }
@@ -1464,76 +1537,145 @@ fn service_status() -> Result<()> {
 fn config_show(config: &Config) -> Result<()> {
     let path = vesper_core::config::config_path()?;
     println!("Config file: {}", path.display());
-    println!("  output_dir            = {}", config.output_dir.display());
-    println!("  request_delay_ms      = {}", config.request_delay_ms);
+    println!("  output_dir = {}", config.output_dir.display());
+    println!("  request_delay_ms = {}", config.request_delay_ms);
     println!("  poll_interval_minutes = {}", config.poll_interval_minutes);
-    println!("  retention_days        = {}", config.retention_days);
-    println!("  quiet_grace_days      = {}", config.quiet_grace_days);
+    println!("  retention_days = {}", config.retention_days);
+    println!("  quiet_grace_days = {}", config.quiet_grace_days);
     println!("  likely_complete_recheck_days = {}", config.likely_complete_recheck_days);
-    println!("  auto_export           = {}", config.auto_export);
-    println!("  auto_append           = {}", config.auto_append);
-    println!("  split_every_chapters  = {}", config.split_every_chapters);
-    println!("  log_path              = {}", config.log_path.display());
+    println!("  auto_export = {}", config.auto_export);
+    println!("  auto_append = {}", config.auto_append);
+    println!("  split_every_chapters = {}", config.split_every_chapters);
+    println!("  log_path = {}", config.log_path.display());
     Ok(())
 }
 
 fn status(config: &Config) -> Result<()> {
     let store = Store::open_default()?;
-    println!("Library DB: {}", vesper_core::default_db_path()?.display());
-    println!("Log file:   {}", config.log_path.display());
+    println!("Library: {}", vesper_core::default_db_path()?.display());
+    println!("Log: {}", config.log_path.display());
 
     let novels = store.list_subscriptions()?;
-    println!("\nSubscriptions: {}", novels.len());
+    let mut states: Vec<(&str, usize)> = Vec::new();
     for n in &novels {
-        let pending = if n.export_pending { ", export pending" } else { "" };
-        println!(
-            "  #{} {} — {} chapters [{}{pending}]",
-            n.id, n.title, n.chapter_count, n.derived_state.as_str()
-        );
+        let label = state_label(n.derived_state);
+        match states.iter_mut().find(|(s, _)| *s == label) {
+            Some((_, c)) => *c += 1,
+            None => states.push((label, 1)),
+        }
+    }
+    let breakdown = match states.as_slice() {
+        [(only, _)] => format!("all {only}"),
+        _ => states
+            .iter()
+            .map(|(s, c)| format!("{c} {s}"))
+            .collect::<Vec<_>>()
+            .join(", "),
+    };
+    println!("\nFollowing {}{}", count(novels.len(), "novel"), if novels.is_empty() {
+        ".".to_string()
+    } else {
+        format!(", {breakdown}.")
+    });
+
+    let mut attention = Vec::new();
+    for n in &novels {
+        let mut notes = Vec::new();
+        if n.export_pending {
+            notes.push("EPUB not written yet, the next sync retries it".to_string());
+        }
         let gaps = store.unfilled_gaps(n.id)?;
         if !gaps.is_empty() {
-            println!("      gaps: {}", describe_gaps(&gaps));
+            notes.push(describe_gaps(&gaps));
+        }
+        if !notes.is_empty() {
+            attention.push(format!("  #{} {}: {}", n.id, n.title, notes.join("; ")));
+        }
+    }
+    if !attention.is_empty() {
+        println!("Needs attention:");
+        for line in attention {
+            println!("{line}");
         }
     }
 
     match std::fs::read_to_string(&config.log_path) {
         Ok(content) => {
-            let lines: Vec<&str> = content.lines().collect();
-            if let Some(last) = lines.iter().rev().find(|l| l.contains("sync complete")) {
-                println!("\nLast completed sync: {last}");
+            let summary = last_sync(&content);
+            match summary.finished {
+                Some((at, what)) => println!("\nLast sync finished {at}: {what}."),
+                None => println!("\nNo sync has finished yet."),
             }
-            let tail: Vec<&&str> = lines.iter().rev().take(8).collect();
-            if !tail.is_empty() {
-                println!("Recent log:");
-                for l in tail.into_iter().rev() {
-                    println!("  {l}");
+            if let Some(at) = summary.unfinished {
+                println!("A sync started {at} and has not finished.");
+            }
+            if summary.errors.is_empty() {
+                println!("No errors in the most recent sync.");
+            } else {
+                println!("Errors in the most recent sync:");
+                for e in summary.errors {
+                    println!("  {e}");
                 }
             }
         }
-        Err(_) => println!("\nNo log yet (the background sync hasn't run)."),
+        Err(_) => println!("\nNo log yet; the background sync has not run."),
     }
     Ok(())
 }
 
+struct LastSync<'a> {
+    finished: Option<(&'a str, &'a str)>,
+    unfinished: Option<&'a str>,
+    errors: Vec<&'a str>,
+}
+
+fn stamped(line: &str) -> Option<(&str, &str)> {
+    line.strip_prefix('[')?.split_once("] ")
+}
+
+fn last_sync(log: &str) -> LastSync<'_> {
+    let lines: Vec<&str> = log.lines().collect();
+    let position = |prefix: &str| {
+        lines
+            .iter()
+            .rposition(|l| stamped(l).is_some_and(|(_, rest)| rest.starts_with(prefix)))
+    };
+    let completed = position("sync complete: ");
+    let started = position("sync started");
+
+    let finished = completed.and_then(|i| {
+        let (at, rest) = stamped(lines[i])?;
+        Some((at, rest.strip_prefix("sync complete: ")?))
+    });
+    let unfinished = match (started, completed) {
+        (Some(s), done) if done.map_or(true, |d| s > d) => stamped(lines[s]).map(|(at, _)| at),
+        _ => None,
+    };
+    let errors = lines[started.unwrap_or(0)..]
+        .iter()
+        .filter_map(|l| l.split_once("ERROR ").map(|(_, e)| e))
+        .collect();
+    LastSync {
+        finished,
+        unfinished,
+        errors,
+    }
+}
+
 fn profiles_show() -> Result<()> {
     use vesper_core::profiles;
-    let loaded = profiles::all();
-    if let Some(dir) = profiles::profiles_dir() {
-        println!("Add custom site profiles (.ini) in: {}", dir.display());
-        println!("(see README.txt there for the format)\n");
-    }
-    println!("Config-driven profiles:");
-    if loaded.is_empty() {
-        println!("  (none)");
-    }
-    for p in &loaded {
-        println!("  {} ({})", p.host, p.name);
-    }
-    println!("Built-in hand-written adapters:");
+    println!("Sites Vesper can read, with the name `vesper subs` shows for each:");
     println!("  chikari.moe (chikari)");
-    println!("  freewebnovel.com (freewebnovel, Tier-2 curl)");
+    println!("  freewebnovel.com (freewebnovel)");
     println!("  royalroad.com (royalroad)");
-    println!("  scribblehub.com (scribblehub, Tier-2 curl)");
+    println!("  scribblehub.com (scribblehub)");
+    for p in &profiles::all() {
+        println!("  {} ({}, from a profile)", p.host, p.name);
+    }
+    if let Some(dir) = profiles::profiles_dir() {
+        println!("\nAdd your own site profiles as .ini files in {}", dir.display());
+        println!("README.txt in that folder describes the format.");
+    }
     Ok(())
 }
 
@@ -1542,19 +1684,20 @@ async fn list(config: &Config, url: String, delay_ms: Option<u64>) -> Result<()>
 
     eprintln!("Fetching novel metadata...");
     let meta = source.fetch_novel(&url).await?;
-    eprintln!("  Title:  {}", meta.title);
-    if let Some(author) = &meta.author {
-        eprintln!("  Author: {author}");
-    }
+    println!(
+        "{} by {}",
+        meta.title,
+        meta.author.as_deref().unwrap_or("Unknown Author")
+    );
 
-    eprintln!("Walking full table of contents...");
+    eprintln!("Reading the chapter list...");
     let refs = source.discover_chapters(&url, None).await?;
     ensure!(!refs.is_empty(), "no chapters found for {url}");
 
-    println!("{} chapters discovered.", refs.len());
+    println!("{} listed.", count(refs.len(), "chapter"));
     if let (Some(first), Some(last)) = (refs.first(), refs.last()) {
-        println!("  first: ch.{} {}", first.number, first.title);
-        println!("  last:  ch.{} {}", last.number, last.title);
+        println!("  First: {}", chapter_label(first.number, &first.title));
+        println!("  Last: {}", chapter_label(last.number, &last.title));
     }
     Ok(())
 }
@@ -1629,6 +1772,74 @@ mod tests {
         assert!(!Command::Profiles.touches_library());
         assert!(!Command::Service { action: ServiceAction::Status }.touches_library());
         assert!(!Command::List { url: "x".into(), delay_ms: None }.touches_library());
+    }
+
+    #[test]
+    fn the_cli_definition_is_consistent() {
+        use clap::CommandFactory;
+        Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn sub_and_unsub_are_short_forms() {
+        let parsed = Cli::try_parse_from(["vesper", "unsub", "14"]).unwrap();
+        assert!(matches!(parsed.cmd, Command::Unsubscribe { novel } if novel == "14"));
+        let parsed = Cli::try_parse_from(["vesper", "sub", "https://example.com/n"]).unwrap();
+        assert!(matches!(parsed.cmd, Command::Subscribe { .. }));
+    }
+
+    #[test]
+    fn help_is_a_flag_not_a_command() {
+        assert!(Cli::try_parse_from(["vesper", "help"]).is_err());
+        let Err(err) = Cli::try_parse_from(["vesper", "--help"]) else {
+            panic!("--help should print help");
+        };
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
+        let help = err.to_string();
+        assert!(help.contains("Usage: vesper <COMMAND>"), "{help}");
+        assert!(!help.contains("vesper.exe"), "{help}");
+        assert!(!help.contains("help         Print"), "{help}");
+    }
+
+    #[test]
+    fn counts_use_real_plurals() {
+        assert_eq!(count(1, "chapter"), "1 chapter");
+        assert_eq!(count(0, "chapter"), "0 chapters");
+        assert_eq!(count(3, "chapter title"), "3 chapter titles");
+    }
+
+    #[test]
+    fn states_and_chapters_read_as_words() {
+        assert_eq!(state_label(DerivedState::LikelyComplete), "likely complete");
+        assert_eq!(chapter_label(5, "Chapter 5"), "ch.5");
+        assert_eq!(chapter_label(5, ""), "ch.5");
+        assert_eq!(chapter_label(1, "Nightmare Begins"), "ch.1 Nightmare Begins");
+        let gaps: BTreeSet<u32> = (1..=17).collect();
+        assert_eq!(
+            describe_gaps(&gaps),
+            "no source has ch. 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 and 2 more"
+        );
+    }
+
+    #[test]
+    fn status_reads_the_last_sync_from_the_log() {
+        let log = "\
+[2026-11-13 05:14:00] sync started (2 novels)
+[2026-11-13 05:14:01]   ERROR Old Novel: timed out
+[2026-11-13 05:14:39] sync complete: 0 new across 2 novels
+[2026-11-13 06:14:00] sync started (2 novels)
+[2026-11-13 06:14:05]   ERROR Shadow Slave: 503 Service Unavailable
+";
+        let summary = last_sync(log);
+        assert_eq!(summary.finished, Some(("2026-11-13 05:14:39", "0 new across 2 novels")));
+        assert_eq!(summary.unfinished, Some("2026-11-13 06:14:00"));
+        assert_eq!(summary.errors, vec!["Shadow Slave: 503 Service Unavailable"]);
+
+        let done = format!("{log}[2026-11-13 06:14:40] sync complete: 1 new across 2 novels\n");
+        let summary = last_sync(&done);
+        assert_eq!(summary.finished, Some(("2026-11-13 06:14:40", "1 new across 2 novels")));
+        assert_eq!(summary.unfinished, None);
+        assert_eq!(summary.errors.len(), 1);
     }
 
     #[test]
