@@ -86,23 +86,57 @@ rules-of-the-road.
   it being retried every sync; the chapter is stored, so `unfilled_gaps` never
   shows it to the user.
 - **Site adverts are matched on a *folded* copy of the paragraph, never on the
-  literal characters.** freewebnovel obfuscates its own marks, so
-  `freewebnovel::strip_promo` folds each paragraph first (NFKD via
-  `unicode-normalization`, combining marks dropped, lower-cased, punctuation
-  treated as a word break) and keeps an index map back to the original so
-  removal stays exact. One rule then covers every form seen: ASCII
-  (`Enjoy more content from freewebnovel`), styled Unicode
+  literal characters.** The sites obfuscate their marks, so `promo::strip_promo`
+  folds each paragraph first (NFKD via `unicode-normalization`, combining marks
+  dropped, lower-cased, punctuation treated as a word break, plus a lookalike
+  table for what NFKD leaves alone: small capitals `ᴄᴏᴍ`, Greek and Cyrillic
+  letters `eαglesnᴏνel`, `сoМ`, and `0` for `o`) and keeps an index map back to
+  the original so removal stays exact. One rule then covers every form seen:
+  ASCII (`Enjoy more content from freewebnovel`), styled Unicode
   (`𝐟𝐫𝕖𝗲𝘄𝚎𝗯𝕟𝐨𝕧𝐞𝚕.𝕔𝕠𝐦`, 98 spellings since each copy picks different style
-  blocks, including the irregular letterlike holes), letter-spaced
-  (`f r e e w e b n o v e l. c o m` after real dialogue), split
-  (`Updates by Freewebnovel. com`), hyphen-broken (`Continue -reading on ...`)
-  and **missing its first letter** (`reewebnovel.com`), which is why the needle
-  is `reewebnovel`. Do not go back to literal matching; the next trick is a
-  style block away. The adapter runs it at fetch time and `core::scrub`
-  (`vesper scrub`) over stored text.
-  - **A multi-word name match must be letter-spaced** (every word ≤ 2 chars) or
-    it is prose: folding joins words, so "a free web novel" reads as the domain
-    otherwise.
+  blocks, including the irregular letterlike holes), small capitals
+  (`ꜰʀᴇᴇᴡᴇʙɴᴏᴠᴇʟ.ᴄᴏᴍ`), letter-spaced (`f r e e w e b n o v e l. c o m` after
+  real dialogue), split (`Updates by Freewebnovel. com`), hyphen-broken
+  (`Continue -reading on ...`), slashed (`lig/htno/v/elpub[.]com`) and
+  **missing its first letter** (`reewebnovel.com`), which is why the needle is
+  `reewebnovel`. Do not go back to literal matching; the next trick is a style
+  block away. The freewebnovel and chikari adapters run it at fetch time and
+  `core::scrub` (`vesper scrub`) runs it over stored text.
+  - **It is not only freewebnovel.** chikari's text came from lightnovelworld,
+    which had scraped it from aggregators, so chikari chapters carry their
+    marks too, and so do some freewebnovel ones. `SITES` lists every name
+    observed: freewebnovel, panda-novel, lightnovelpub, lightnovelworld,
+    novelfire, novelphoenix, eaglesnovel, myboxnovel, allnovelfull and newnovel.
+    A needle can be shorter than the name (`pandanov`, because one copy writes
+    `pαпdα-ňᴏνê|`), and the match runs on to the full name when it is there.
+  - **A name split across words needs evidence** or it is prose, since folding
+    joins words and "a free web novel" or "a light novel published" would read
+    as a domain otherwise. Evidence is one of: a TLD right after it, every word
+    two letters or fewer (letter-spaced), a styled or lookalike letter in it, or
+    no whitespace anywhere in it (`novel~fire~net`). Names that are ordinary
+    phrases (`newnovel`, `allnovelfull`, `lightnovelworld`) need the TLD
+    regardless. A TLD only counts when it is whole words (`c/om`, `c.o,m`), so
+    "reading a novel. Compared to" stays.
+  - **Lead-ins, tails and dangling pitches come from observed wordings only**
+    (`LEAD_INS`, `TAILS`, `DANGLING_PITCHES`): "For more, visit", "The most
+    up-to-date novels are published on", "for a better experience", "to read,
+    pls" and the rest. A lead-in stops at a sentence break, so "Come visit.
+    𝐟𝐫𝐞𝐞..." keeps "Come visit." A lead-in followed by a dotted or styled TLD
+    is a mark even with the name gone (`For more, visit [.]com`). A dangling
+    pitch ("For more, visit:") must start a sentence and end the paragraph with
+    nothing but a colon after it.
+  - **The leak group's lines go too** (`More chapters in Discord server "Buyers
+    Club for Webnovels" ...`, `OR Telegram: https://t.me/+...`, `(More chapters
+    in Buyers club for TMT)`), keyed on "Buyers Club" or a private `t.me/+`
+    invite at the start of a sentence. An author's own Discord or public
+    Telegram channel stays, as does "two more Chapters will be posted soon".
+    The same goes for one aggregator's "you are reading on our content copy
+    site ... to support us" note.
+  - **An opening quote only goes with a mark when its partner closes the
+    mark.** Otherwise `test-"The latest_epɪ_sodes are on_the NovᴇlFirenᴇt`
+    would take the dialogue's closing quote with it. A cut doesn't leave a space
+    before a closing quote either, and a remainder that is dialogue punctuation
+    alone (`"..."`) is kept as a paragraph.
   - **The pitch only comes along when it opens with one of `PITCH_OPENERS`**
     (Continue, Discover, Enjoy, Experience, Explore, Find, Read, Stay, Your,
     Updates, Please). Otherwise only the domain goes. Without that guard the
@@ -137,15 +171,21 @@ rules-of-the-road.
     matcher and both were wrong together: a "sentence break, then a space" rule
     plus a scan written the same way scored 186 for 186 while missing the same
     8 marks, and the literal-character rule missed 2,690 obfuscated ones. The
-    blind check is "every occurrence of the site name anywhere in the folded
-    text". `cargo run -p vesper-core --example promo_audit -- <library.db>`
-    replays the matcher over a library, groups removals by folded form and
-    flags any that doesn't name the site. **Its flag is not enough on its own:**
-    the prose-eating walk-back passed it, because the removal did contain the
-    domain. Read the grouped list. Current numbers against a pre-scrub copy:
-    2,690 removals across 2,689 of 21,588 chapters, 14 distinct folded
-    wordings, longest 38 characters, 30 whole paragraphs dropped and 2,660
-    trailing edits, nothing added to any chapter.
+    blind check is "every occurrence of a site name anywhere in the folded
+    text", folded by something other than the matcher (Python's `unicodedata`
+    character names work). `cargo run -p vesper-core --example promo_audit --
+    <library.db>` replays the matcher over a library, groups removals by folded
+    form and flags any that doesn't name a site. **Its flag is not enough on its
+    own:** the prose-eating walk-back passed it, because the removal did contain
+    the domain. Read the grouped list. Then scrub a copy (`--apply`, which
+    refuses the live library) and run the blind scan over the result, reading
+    **every** hit: a sweep that keyed each paragraph on its first match and was
+    read from a sample hid 30 leak-group lines behind ordinary "more chapters"
+    prose. Current numbers against a copy taken before this round's scrub (it
+    had already had the freewebnovel-only one): 535 removals across 396
+    of 30,754 chapters, 51 distinct folded wordings, longest 133 characters,
+    326 whole paragraphs dropped and 209 edited, nothing added to any chapter.
+    The blind scan of the scrubbed copy finds only prose.
 - **Refetch overwrites; it never deletes.** `refetch` re-downloads stored
   chapters and replaces their text, which is the escape hatch for a site that
   changed one after we saved it. Sync can't see those: a stored chapter is
@@ -219,7 +259,9 @@ rules-of-the-road.
   ("Completed"/"Ongoing"). **Injects promo lines into the prose and obfuscates
   them** (see the site-advert invariant above): styled Unicode letters, a
   letter-spaced domain, a split domain, a missing first letter, a bare `.Côm`,
-  and occasionally a sister site (`empire`, `vipnovel.com`).
+  and occasionally a sister site (`empire`, `vipnovel.com`). Some novels it
+  scraped from elsewhere keep that site's marks (`Reading on Mybo xno vel. com
+  ,Please!`, `Read more on newn0vel. org`).
 - **chikari.moe** (hand-written adapter, Tier 1): where lightnovelworld's novel
   library moved. A SvelteKit app whose chapter pages are **client-rendered**
   (the HTML for `/novels/<slug>/<n>` is an empty app shell), so there is nothing
@@ -242,6 +284,9 @@ rules-of-the-road.
   which separates no words with spaces. **Do not tune this against
   lightnovelworld's stored text**: it space-joined mechanically and carries its
   own artifacts (`Vance 's`, `[Lv 2] ,`), so matching it makes the prose worse.
+  Bodies also carry adverts from the aggregators lightnovelworld scraped them
+  from (styled freewebnovel domains, panda-novel, lightnovelpub, novelfire and a
+  leak group's Telegram lines), so `parse_read` runs the advert matcher too.
   Status words: `releasing` / `completed` / `hiatus` / `cancelled` / `dropped`.
   A `locked` chapter is early access — a *retryable* error, not a 404 gap.
   Chapter `number` is typed as a float; a non-integral one is skipped, never
@@ -318,9 +363,11 @@ rules-of-the-road.
   little.
 - The advert matcher gets the same treatment: `cargo run -p vesper-core
   --example promo_audit -- <path-to-library.db>` runs it over every stored
-  chapter and reports each removal, flagging any that doesn't name the site.
-  Read-only and offline, but point it at a library copy that still *has* the
-  marks, since a scrubbed one has nothing left to catch.
+  chapter and reports each removal, flagging any that doesn't name a site.
+  Offline, and read-only unless given `--apply`, which then scrubs every novel
+  in that file so an independent scan can read the result. `--apply` refuses
+  the live library. Point it at a library copy that still *has* the marks,
+  since a scrubbed one has nothing left to catch.
 - Site *moves* need the same treatment on a real library: `cargo run -p
   vesper-core --example live_migration -- <path-to-library.db> [--apply]`
   resolves each stale subscription on the new site and compares stored chapter
@@ -364,11 +411,15 @@ Cargo workspace, two crates under `crates/`:
     Generic over `Fetcher`, which is the seam the tests feed canned JSON
     through; `resolve_on_chikari` is public so `examples/live_migration` can
     preview a real library without writing to it.
+  - `promo` holds the site-advert matcher (see the invariant above).
+    `strip_promo` is pure and works on one paragraph; `strip_promo_paragraphs`
+    leaves a chapter that is nothing but marks alone. `fold` is public so the
+    audit example groups removals the same way.
   - `refetch` — re-download stored chapters and replace their text (see the
     invariant above). Overwrite-only; there is no delete path by design.
   - `scrub` — strip injected site adverts from *stored* chapters, no network
-    (see the site-advert invariant above). Uses `freewebnovel::strip_promo`,
-    the same pure function the adapter applies at fetch time, and writes through
+    (see the site-advert invariant above). Uses `promo::strip_promo`, the
+    same pure function the adapters apply at fetch time, and writes through
     `store::update_chapter_body` so the source attribution is left alone.
   - `repair` — re-fetch chapters stored as a site's gating placeholder (see the
     invariant above). `looks_like_gate_stub` and the replacement check are pure

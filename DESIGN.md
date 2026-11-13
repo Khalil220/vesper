@@ -487,11 +487,34 @@ Because the sync runs unnoticed, it must be inspectable. **Partially implemented
   passed it, because the removal did contain the domain. So **read the removal
   list, don't just check the flag.** Reading it produced the rule that the pitch
   only comes along when it opens with one of the site's own eleven pitch words.
-  Current state: 2,690 marks across 2,689 of 21,588 chapters, 14 distinct folded
-  wordings, longest 38 characters, nothing added to any chapter, and a folded
-  sweep for the site name anywhere in the library comes back empty.
+  That first pass removed 2,690 marks across 2,689 of 21,588 chapters.
 
-  The adapter filters at fetch time, and because a stored chapter is never revisited,
+  Then marks turned up again, and they were not only freewebnovel's. chikari's
+  text came from lightnovelworld, which had scraped it from other aggregators,
+  so it carries their marks: panda-novel, lightnovelpub, novelfire,
+  eaglesnovel, allnovelfull, a leak group's Telegram and "Buyers Club" Discord
+  lines, and freewebnovel's own in small capitals. Some freewebnovel novels
+  carry myboxnovel and newnovel marks the same way. The new tricks were
+  lookalike letters NFKD does not fold (small capitals, Greek `ν` for `v`,
+  Cyrillic `с` for `c`), names cut up with slashes and `[.]`, and pitches whose
+  domain an earlier scraper had already removed, leaving "For more, visit
+  [.]com" or just "For more, visit:". So the matcher moved out of the
+  freewebnovel adapter into its own `promo` module, chikari runs it at fetch
+  time as well, and folding gained a lookalike table. A site name split across
+  words still needs evidence before it counts (a TLD after it, letter-spacing,
+  styled letters, or no whitespace in it), because "a light novel published"
+  folds to the same letters as a domain.
+
+  The third lesson came out of validating that. The scrubbed copy got a sweep
+  that keyed each paragraph on its first match, and its "more chapters" bucket
+  was read from a sample. Thirty leak-group lines sat in that bucket behind
+  ordinary author's notes ("two more Chapters will be posted soon"). So **read
+  every hit, not a sample.** Current state, against a copy taken before this
+  round: 535 removals across 396 of 30,754 chapters, 51 distinct folded
+  wordings, nothing added to any chapter, and a sweep of the scrubbed copy that
+  folds with Python's own Unicode names finds only prose.
+
+  The adapters filter at fetch time, and because a stored chapter is never revisited,
   `core::scrub` does the same over text already saved — a local DB pass rather
   than thousands of requests to re-download prose that is already right apart
   from one line. It writes through `store::update_chapter_body`, which leaves
