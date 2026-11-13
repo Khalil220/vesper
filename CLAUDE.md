@@ -348,7 +348,7 @@ rules-of-the-road.
   lightnovelworld's stored text**: it space-joined mechanically and carries its
   own artifacts (`Vance 's`, `[Lv 2] ,`), so matching it makes the prose worse.
   Some bodies are double-escaped JSON: after parsing, the text still holds a
-  literal `>` or `&` (so "2/5 -> 3/5"), which `parse_read`
+  literal `\u003e` or `\u0026` (so "2/5 -\u003e 3/5"), which `parse_read`
   decodes, surrogate pairs included; a backslash that isn't a whole `\uXXXX`
   escape stays as written.
   Bodies also carry adverts from the aggregators lightnovelworld scraped them
