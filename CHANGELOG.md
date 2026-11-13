@@ -1,5 +1,50 @@
 # Changelog
 
+## 1.5.0
+
+- Add `vesper update`, which downloads the latest release and replaces the
+  copy you ran with it.
+- Sync checks once a day for a newer version, and `vesper status` says when
+  one is out. `check_for_updates = false` in the config turns this off.
+- Add `vesper unsub`, short for `vesper unsubscribe`.
+- Strip other sites' adverts too, not only freewebnovel's, including the ones
+  in chikari.moe's chapters and a leak group's Telegram lines. Chapters from
+  chikari.moe are cleaned as they download.
+- `vesper service install` and `vesper service status` warn on Windows when
+  SmartScreen will block the background sync, and say how to unblock
+  `vesper.exe`.
+- Fix Royal Road failing with "403 Forbidden".
+- Fix chikari.moe chapters showing escape codes such as `2/5 -\u003e 3/5`.
+- Fix words running together where a site put a line break inside a
+  paragraph, as in Royal Road's "Chapter 001Good Morning Brother".
+- Fix a finished novel being downloaded again in full each time it was
+  rechecked after `prune` deleted its chapters.
+- Fix a pruned novel's EPUB being overwritten by a partial copy when
+  downloading its chapters again stopped early.
+- `vesper refresh` picks up a title the site changed, and moves the EPUB
+  when the title or author changes.
+- Help and output say each thing once. `sync` prints only the novels that
+  had something happen, plus a one-line summary. `status` shows what needs
+  attention and how the last sync went instead of listing every novel again.
+  Output uses readable wording instead of technical labels.
+- Remove the `help` subcommand in favor of `-h`.
+
+### Upgrading
+
+Download this release by hand; `vesper update` handles the ones after it.
+
+To clear other sites' adverts out of chapters you already have:
+
+```
+vesper scrub all
+```
+
+To fix chikari.moe chapters that show escape codes:
+
+```
+vesper refetch <novel>
+```
+
 ## 1.4.0
 
 - Chapters from freewebnovel no longer carry the adverts the site drops into
