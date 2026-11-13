@@ -6,6 +6,7 @@ use url::Url;
 
 use crate::fetch::Fetcher;
 use crate::model::{Chapter, ChapterRef, NovelMeta, NovelStatus};
+use crate::promo::strip_promo_paragraphs;
 use crate::source::{parse_status_hint, Source};
 use crate::util::clean_chapter_title;
 
@@ -272,7 +273,7 @@ fn parse_read(json: &Value, fallback: &ChapterRef) -> Result<Chapter> {
         .get("body")
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow!("ch.{} came back without a body", fallback.number))?;
-    let paragraphs = body_paragraphs(body);
+    let paragraphs = strip_promo_paragraphs(&body_paragraphs(body));
     if paragraphs.is_empty() {
         return Err(anyhow!("ch.{} came back with an empty body", fallback.number));
     }
@@ -477,6 +478,21 @@ mod tests {
         assert_eq!(
             ch.paragraphs,
             vec!["First paragraph.", "Second paragraph.", "Third paragraph."]
+        );
+    }
+
+    #[test]
+    fn strips_the_marks_other_sites_left_in_the_body() {
+        let v = json!({
+            "number": 4.0,
+            "title": "Chapter 4",
+            "body": "\"Yin’er, I think you’ve got things mixed up.\" 𝒻𝘳ℯℯ𝑤ℯ𝒷𝘯ℴ𝓋ℯ𝘭.𝑐ℴ𝑚
+She laughed."
+        });
+        let ch = parse_read(&v, &a_ref(4)).unwrap();
+        assert_eq!(
+            ch.paragraphs,
+            vec!["\"Yin’er, I think you’ve got things mixed up.\"", "She laughed."]
         );
     }
 
