@@ -295,6 +295,10 @@ rules-of-the-road.
   which separates no words with spaces. **Do not tune this against
   lightnovelworld's stored text**: it space-joined mechanically and carries its
   own artifacts (`Vance 's`, `[Lv 2] ,`), so matching it makes the prose worse.
+  Some bodies are double-escaped JSON: after parsing, the text still holds a
+  literal `>` or `&` (so "2/5 -> 3/5"), which `parse_read`
+  decodes, surrogate pairs included; a backslash that isn't a whole `\uXXXX`
+  escape stays as written.
   Bodies also carry adverts from the aggregators lightnovelworld scraped them
   from (styled freewebnovel domains, panda-novel, lightnovelpub, novelfire and a
   leak group's Telegram lines), so `parse_read` runs the advert matcher too.
