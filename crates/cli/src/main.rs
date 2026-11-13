@@ -823,12 +823,20 @@ fn subs(gaps_only: bool) -> Result<()> {
         shown += 1;
         let author = n.author.as_deref().unwrap_or("Unknown Author");
         let pending = if n.export_pending { ", EPUB not written yet" } else { "" };
+        let pruned = store.pruned_chapters(n.id)?.len();
+        let held = if pruned > 0 {
+            format!(
+                "{} stored and {pruned} pruned after export",
+                count(n.chapter_count as usize, "chapter")
+            )
+        } else {
+            count(n.chapter_count as usize, "chapter")
+        };
         println!(
-            "#{} {} by {}: {}, {}{pending}",
+            "#{} {} by {}: {held}, {}{pending}",
             n.id,
             n.title,
             author,
-            count(n.chapter_count as usize, "chapter"),
             state_label(n.derived_state)
         );
         if !gaps.is_empty() {
@@ -1166,6 +1174,15 @@ async fn fetch(
 
     let before = store.stored_chapter_numbers(found.id)?.len();
     eprintln!("Checking \"{}\" on {}...", found.title, count(sources.len(), "source"));
+    let pruned = store.pruned_chapters(found.id)?.len();
+    let mut state = found.derived_state;
+    if pruned > 0 {
+        eprintln!("Downloading the {} that prune deleted after export, too.", count(pruned, "chapter"));
+        if state == DerivedState::LikelyComplete {
+            state = DerivedState::Live;
+            store.set_derived_state(found.id, state)?;
+        }
+    }
 
     let cancel = Arc::new(AtomicBool::new(false));
     let watcher = {
@@ -1178,7 +1195,7 @@ async fn fetch(
     };
 
     let mut bar = ProgressBar::new();
-    let report = sync_novel(&store, found.id, found.derived_state, &sources, limit, |p| {
+    let report = sync_novel(&store, found.id, state, &sources, limit, |p| {
         bar.sync(&found.title, p);
         if cancel.load(Ordering::SeqCst) {
             ControlFlow::Break(())
@@ -1190,11 +1207,11 @@ async fn fetch(
     bar.finish();
     watcher.abort();
 
-    let total = before + report.newly_fetched as usize;
+    let total = before + (report.newly_fetched + report.restored) as usize;
     if report.interrupted {
         println!(
             "Paused with {} saved, {total} stored in all. Run `vesper fetch {}` to carry on.",
-            count(report.newly_fetched as usize, "new chapter"),
+            count((report.newly_fetched + report.restored) as usize, "chapter"),
             found.id
         );
         for w in &report.warnings {
@@ -1203,14 +1220,14 @@ async fn fetch(
         return Ok(());
     }
 
-    let notes = post_sync(&store, config, found.id, found.derived_state, &report).await?;
+    let notes = post_sync(&store, config, found.id, state, &report).await?;
 
     let fallback_note = if report.from_fallback > 0 {
         format!(" ({} from fallback sources)", report.from_fallback)
     } else {
         String::new()
     };
-    let upgrade_note = if report.upgraded > 0 {
+    let mut upgrade_note = if report.upgraded > 0 {
         format!(
             ", {} re-downloaded from the primary source",
             count(report.upgraded as usize, "chapter")
@@ -1218,6 +1235,9 @@ async fn fetch(
     } else {
         String::new()
     };
+    if report.restored > 0 {
+        upgrade_note.push_str(&format!(", {} restored", count(report.restored as usize, "pruned chapter")));
+    }
     println!(
         "{}{fallback_note}{upgrade_note}, {total} stored in all.",
         count(report.newly_fetched as usize, "new chapter")
@@ -1498,6 +1518,13 @@ async fn sync_all(config: &Config, limit: usize, delay_ms: Option<u64>) -> Resul
                         count(report.upgraded as usize, "chapter")
                     ));
                 }
+                if report.restored > 0 {
+                    line.push_str(&format!(
+                        ", {} restored",
+                        count(report.restored as usize, "pruned chapter")
+                    ));
+                    extra.push_str(&format!(", {} restored", report.restored));
+                }
                 if !report.gaps.is_empty() {
                     let gaps: BTreeSet<u32> = report.gaps.iter().copied().collect();
                     extra.push_str(&format!(", {}", describe_gaps(&gaps)));
@@ -1509,6 +1536,7 @@ async fn sync_all(config: &Config, limit: usize, delay_ms: Option<u64>) -> Resul
                 };
                 let news = report.newly_fetched > 0
                     || report.upgraded > 0
+                    || report.restored > 0
                     || !report.gaps.is_empty()
                     || !report.warnings.is_empty()
                     || !notes.is_empty();

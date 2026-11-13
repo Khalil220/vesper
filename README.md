@@ -311,8 +311,12 @@ are actually done: labeled complete by the site, no new chapters observed
 for a good while, and already exported. The paranoia is intentional; site
 status labels lie all the time ("completed" novels come back from the dead
 constantly), so the label alone is never enough. Chapters that haven't been
-exported yet are never deleted, period. And if a pruned novel does revive,
-the next sync just re-downloads what it needs.
+exported yet are never deleted, period. Vesper remembers what it pruned, so
+checking a finished novel for updates doesn't download it all over again. If a
+pruned novel does revive, the next sync downloads the pruned chapters back
+along with the new ones and rebuilds the EPUB once it has them all; until
+then the existing EPUB is left alone. `vesper fetch <novel>` brings them back
+on request, and `vesper subs` shows how many a novel has pruned.
 
 ### service
 

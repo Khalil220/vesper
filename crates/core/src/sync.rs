@@ -20,6 +20,7 @@ pub struct SyncReport {
     pub newly_fetched: u32,
     pub from_fallback: u32,
     pub upgraded: u32,
+    pub restored: u32,
     pub new_state: DerivedState,
     pub delta_mode: bool,
     pub warnings: Vec<String>,
@@ -29,6 +30,10 @@ pub struct SyncReport {
 }
 
 type Discovered<'a> = Vec<(&'a StoredSource, &'a dyn Source, BTreeMap<u32, ChapterRef>)>;
+
+fn listed(discovered: &Discovered<'_>) -> BTreeSet<u32> {
+    discovered.iter().flat_map(|(_, _, map)| map.keys().copied()).collect()
+}
 
 async fn discover<'a>(
     sources: &'a [(StoredSource, Box<dyn Source>)],
@@ -66,24 +71,28 @@ pub async fn sync_novel(
 ) -> Result<SyncReport> {
     let is_backfilling = matches!(state, DerivedState::Backfilling);
     let have = store.stored_chapter_numbers(novel_id)?;
-    let max_have = have.iter().copied().max().unwrap_or(0);
+    let pruned = store.pruned_chapters(novel_id)?;
+    let max_have = have.iter().chain(&pruned).copied().max().unwrap_or(0);
     let mut gaps = store.gaps(novel_id)?;
+    let restoring = !pruned.is_empty() && state != DerivedState::LikelyComplete;
+    let full_walk = is_backfilling || restoring;
 
     let mut report = SyncReport {
         newly_fetched: 0,
         from_fallback: 0,
         upgraded: 0,
+        restored: 0,
         new_state: state,
-        delta_mode: !is_backfilling,
+        delta_mode: !full_walk,
         warnings: Vec::new(),
         failures: Vec::new(),
         gaps: Vec::new(),
         interrupted: false,
     };
 
-    let mut discovered = discover(sources, is_backfilling, &mut report.warnings).await;
+    let mut discovered = discover(sources, full_walk, &mut report.warnings).await;
 
-    if !is_backfilling {
+    if !full_walk {
         let min_new = discovered
             .iter()
             .flat_map(|(_, _, m)| m.keys().copied())
@@ -121,11 +130,20 @@ pub async fn sync_novel(
         }
     }
 
-    let mut target: BTreeSet<u32> = BTreeSet::new();
-    for (_, _, map) in &discovered {
-        target.extend(map.keys().copied());
+    let mut target = listed(&discovered);
+    let revived = !pruned.is_empty()
+        && target.iter().any(|n| !have.contains(n) && !pruned.contains(n));
+    if revived && report.delta_mode {
+        discovered = discover(sources, true, &mut report.warnings).await;
+        report.delta_mode = false;
+        target = listed(&discovered);
     }
-    let missing: Vec<u32> = target.difference(&have).copied().collect();
+    let restore = restoring || revived;
+    let missing: Vec<u32> = target
+        .iter()
+        .copied()
+        .filter(|n| !have.contains(n) && (restore || !pruned.contains(n)))
+        .collect();
     let to_fetch: Vec<u32> = if limit == 0 {
         missing
     } else {
@@ -146,9 +164,13 @@ pub async fn sync_novel(
             match src.fetch_chapter(cref).await {
                 Ok(chapter) => {
                     if store.insert_chapter_if_absent(novel_id, meta.id, &chapter)? {
-                        report.newly_fetched += 1;
-                        if idx > 0 {
-                            report.from_fallback += 1;
+                        if pruned.contains(&num) {
+                            report.restored += 1;
+                        } else {
+                            report.newly_fetched += 1;
+                            if idx > 0 {
+                                report.from_fallback += 1;
+                            }
                         }
                     }
                     if is_primary {
@@ -396,6 +418,106 @@ mod tests {
     fn pair(store: &Store, id: i64, mocks: Vec<Box<dyn Source>>) -> Vec<(StoredSource, Box<dyn Source>)> {
         let novel = store.find_novel(&id.to_string()).unwrap().unwrap();
         novel.sources.into_iter().zip(mocks).collect()
+    }
+
+    async fn backfill_then_prune(store: &Store, id: i64, sources: &[(StoredSource, Box<dyn Source>)]) {
+        sync_novel(store, id, DerivedState::Backfilling, sources, 0, |_| ControlFlow::Continue(()))
+            .await
+            .unwrap();
+        store.mark_all_exported(id).unwrap();
+        store.set_derived_state(id, DerivedState::LikelyComplete).unwrap();
+        store.apply_retention(0).unwrap();
+        assert!(store.stored_chapter_numbers(id).unwrap().is_empty(), "everything was pruned");
+    }
+
+    #[tokio::test]
+    async fn a_quiet_recheck_of_a_pruned_novel_downloads_nothing() {
+        for window in [None, Some(2)] {
+            let store = Store::open_in_memory().unwrap();
+            let id = subscribe(&store);
+            let mock = MockSource::new("primary", &[1, 2, 3, 4, 5]);
+            let mock = match window {
+                Some(k) => mock.with_latest_window(k),
+                None => mock,
+            };
+            let sources = pair(&store, id, vec![Box::new(mock)]);
+            backfill_then_prune(&store, id, &sources).await;
+
+            let report = sync_novel(&store, id, DerivedState::LikelyComplete, &sources, 0, |_| {
+                ControlFlow::Continue(())
+            })
+            .await
+            .unwrap();
+
+            assert_eq!(report.newly_fetched, 0, "window {window:?}");
+            assert_eq!(report.restored, 0, "window {window:?}");
+            assert_eq!(report.new_state, DerivedState::LikelyComplete, "window {window:?}");
+            assert!(store.stored_chapter_numbers(id).unwrap().is_empty(), "window {window:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_revived_novel_downloads_its_pruned_chapters_back() {
+        let store = Store::open_in_memory().unwrap();
+        let id = subscribe(&store);
+        let before = pair(&store, id, vec![Box::new(MockSource::new("primary", &[1, 2, 3, 4, 5]))]);
+        backfill_then_prune(&store, id, &before).await;
+
+        let after = pair(
+            &store,
+            id,
+            vec![Box::new(MockSource::new("primary", &[1, 2, 3, 4, 5, 6]).with_latest_window(2))],
+        );
+        let report = sync_novel(&store, id, DerivedState::LikelyComplete, &after, 0, |_| {
+            ControlFlow::Continue(())
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(report.newly_fetched, 1, "only ch.6 is new");
+        assert_eq!(report.restored, 5);
+        assert!(!report.delta_mode, "a revival walks the whole list to find the pruned chapters");
+        assert_eq!(report.new_state, DerivedState::Live);
+        assert_eq!(store.stored_chapter_numbers(id).unwrap(), (1..=6).collect());
+        assert!(store.pruned_chapters(id).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_unfinished_restore_carries_on_next_sync() {
+        let store = Store::open_in_memory().unwrap();
+        let id = subscribe(&store);
+        let before = pair(&store, id, vec![Box::new(MockSource::new("primary", &[1, 2, 3, 4, 5]))]);
+        backfill_then_prune(&store, id, &before).await;
+
+        let after = pair(
+            &store,
+            id,
+            vec![Box::new(MockSource::new("primary", &[1, 2, 3, 4, 5, 6]).with_latest_window(2))],
+        );
+        let first = sync_novel(&store, id, DerivedState::LikelyComplete, &after, 3, |_| {
+            ControlFlow::Continue(())
+        })
+        .await
+        .unwrap();
+        assert_eq!(first.restored, 3);
+        assert_eq!(store.pruned_chapters(id).unwrap(), BTreeSet::from([4, 5]));
+
+        let second = sync_novel(&store, id, first.new_state, &after, 0, |_| ControlFlow::Continue(()))
+            .await
+            .unwrap();
+        assert_eq!(second.restored, 2);
+        assert_eq!(second.newly_fetched, 1);
+        assert_eq!(store.stored_chapter_numbers(id).unwrap(), (1..=6).collect());
+
+        store.mark_all_exported(id).unwrap();
+        store.set_derived_state(id, DerivedState::LikelyComplete).unwrap();
+        store.apply_retention(0).unwrap();
+        store.set_derived_state(id, DerivedState::Live).unwrap();
+        let live = sync_novel(&store, id, DerivedState::Live, &after, 0, |_| ControlFlow::Continue(()))
+            .await
+            .unwrap();
+        assert_eq!(live.restored, 6, "a live novel with pruned chapters always restores them");
+        assert!(store.pruned_chapters(id).unwrap().is_empty());
     }
 
     #[tokio::test]

@@ -246,6 +246,18 @@ rules-of-the-road.
   DB (append = regenerate-from-DB); only *Likely complete* novels (labeled
   complete AND quiet for the grace window AND exported) get purged. Never on
   the label alone; never an un-exported chapter. Revival re-hydrates.
+- **A pruned chapter is accounted for, not missing.** `apply_retention`
+  records every number it deletes in `pruned_chapters`, and sync counts those
+  like stored ones. Without that record, the next recheck of a likely-complete
+  novel saw an empty chapter list and downloaded the whole book again, every
+  time, which undid the prune and cost a full crawl per finished novel every
+  few months. Sync restores pruned chapters only when the novel needs them: a
+  genuinely new chapter (revival, which forces a full walk to find them) or a
+  state other than likely complete, so a restore cut short carries on next
+  run. `vesper fetch` on a pruned novel asks for them explicitly by moving it
+  back to live. Inserting a chapter clears its record; restored chapters are
+  counted in `SyncReport.restored`, apart from `newly_fetched`, so they never
+  read as new.
 - **Auto-export via a Backfilling -> Live state machine**, not a chapter-count
   heuristic. `auto_export` and `auto_append` are separate toggles.
 - **EPUB writes are atomic** (temp file + rename). A sharing-violation on

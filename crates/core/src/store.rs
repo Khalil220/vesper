@@ -134,6 +134,12 @@ impl Store {
                 PRIMARY KEY (novel_id, number)
             );
 
+            CREATE TABLE IF NOT EXISTS pruned_chapters (
+                novel_id INTEGER NOT NULL REFERENCES novels(id) ON DELETE CASCADE,
+                number   INTEGER NOT NULL,
+                PRIMARY KEY (novel_id, number)
+            );
+
             CREATE TABLE IF NOT EXISTS meta (
                 key   TEXT PRIMARY KEY,
                 value TEXT NOT NULL
@@ -632,7 +638,34 @@ impl Store {
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0)",
             params![novel_id, chapter.number, chapter.title, body, source_id, now_unix()],
         )?;
+        if changed > 0 {
+            self.conn.execute(
+                "DELETE FROM pruned_chapters WHERE novel_id = ?1 AND number = ?2",
+                params![novel_id, chapter.number],
+            )?;
+        }
         Ok(changed > 0)
+    }
+
+    pub fn pruned_chapters(&self, novel_id: i64) -> Result<BTreeSet<u32>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT number FROM pruned_chapters WHERE novel_id = ?1")?;
+        let rows = stmt.query_map(params![novel_id], |r| r.get::<_, i64>(0))?;
+        let mut set = BTreeSet::new();
+        for n in rows {
+            set.insert(n? as u32);
+        }
+        Ok(set)
+    }
+
+    pub fn forget_pruned(&self, novel_id: i64) -> Result<BTreeSet<u32>> {
+        let pruned = self.pruned_chapters(novel_id)?;
+        self.conn.execute(
+            "DELETE FROM pruned_chapters WHERE novel_id = ?1",
+            params![novel_id],
+        )?;
+        Ok(pruned)
     }
 
     pub fn load_chapters(&self, novel_id: i64) -> Result<Vec<Chapter>> {
@@ -832,13 +865,32 @@ impl Store {
 
     pub fn apply_retention(&self, retention_days: u32) -> Result<usize> {
         let cutoff = now_unix() - retention_days as i64 * 86_400;
-        let n = self.conn.execute(
-            "DELETE FROM chapters
-             WHERE exported = 1 AND exported_at IS NOT NULL AND exported_at <= ?1
-               AND novel_id IN (SELECT id FROM novels WHERE derived_state = 'likely_complete')",
-            params![cutoff],
-        )?;
-        Ok(n)
+        const PRUNABLE: &str = "exported = 1 AND exported_at IS NOT NULL AND exported_at <= ?1
+               AND novel_id IN (SELECT id FROM novels WHERE derived_state = 'likely_complete')";
+        self.conn.execute_batch("BEGIN;")?;
+        let outcome = self
+            .conn
+            .execute(
+                &format!(
+                    "INSERT OR IGNORE INTO pruned_chapters (novel_id, number)
+                     SELECT novel_id, number FROM chapters WHERE {PRUNABLE}"
+                ),
+                params![cutoff],
+            )
+            .and_then(|_| {
+                self.conn
+                    .execute(&format!("DELETE FROM chapters WHERE {PRUNABLE}"), params![cutoff])
+            });
+        match outcome {
+            Ok(n) => {
+                self.conn.execute_batch("COMMIT;")?;
+                Ok(n)
+            }
+            Err(e) => {
+                let _ = self.conn.execute_batch("ROLLBACK;");
+                Err(e.into())
+            }
+        }
     }
 
     pub fn set_export_pending(&self, novel_id: i64, pending: bool) -> Result<()> {
@@ -1019,6 +1071,40 @@ mod tests {
         assert_eq!(novel.sources.len(), 1);
         assert_eq!(novel.primary_source().unwrap().priority, 1);
         assert_eq!(novel.derived_state, DerivedState::Backfilling);
+    }
+
+    #[test]
+    fn prune_remembers_what_it_deleted_until_the_chapter_returns() {
+        let s = mem_store();
+        let id = s.subscribe(&sample_meta("https://example.com/a.html"), "example").unwrap();
+        let source = s.find_novel(&id.to_string()).unwrap().unwrap().sources[0].id;
+        for n in 1..=3 {
+            s.insert_chapter_if_absent(id, source, &chapter(n)).unwrap();
+        }
+        s.mark_all_exported(id).unwrap();
+        s.set_derived_state(id, DerivedState::LikelyComplete).unwrap();
+
+        assert_eq!(s.apply_retention(0).unwrap(), 3);
+        assert!(s.stored_chapter_numbers(id).unwrap().is_empty());
+        assert_eq!(s.pruned_chapters(id).unwrap(), BTreeSet::from([1, 2, 3]));
+
+        s.insert_chapter_if_absent(id, source, &chapter(2)).unwrap();
+        assert_eq!(s.pruned_chapters(id).unwrap(), BTreeSet::from([1, 3]));
+        assert_eq!(s.forget_pruned(id).unwrap(), BTreeSet::from([1, 3]));
+        assert!(s.pruned_chapters(id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn unsubscribing_drops_the_prune_record_too() {
+        let s = mem_store();
+        let id = s.subscribe(&sample_meta("https://example.com/a.html"), "example").unwrap();
+        let source = s.find_novel(&id.to_string()).unwrap().unwrap().sources[0].id;
+        s.insert_chapter_if_absent(id, source, &chapter(1)).unwrap();
+        s.mark_all_exported(id).unwrap();
+        s.set_derived_state(id, DerivedState::LikelyComplete).unwrap();
+        s.apply_retention(0).unwrap();
+        s.remove_subscription(id).unwrap();
+        assert!(s.pruned_chapters(id).unwrap().is_empty());
     }
 
     #[test]

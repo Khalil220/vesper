@@ -201,7 +201,9 @@ export, regeneration is impossible. Resolution:
   activity keeps it *Ongoing*. Once purged, the EPUB is the archive of record.
 - **Revival after purge:** if a purged novel later gets new chapters, it reverts
   to *Ongoing* and its working set is re-hydrated (re-fetch the tail from source,
-  or read existing chapters back from the EPUB) before appending. The generous
+  or read existing chapters back from the EPUB) before appending. Purged numbers
+  are recorded, so a recheck that finds nothing new downloads nothing; the
+  re-fetch happens only on a real revival or when asked for with `vesper fetch`. The generous
   quiet grace window makes this rare. Until the working set is whole again, no
   export may replace the EPUB: every write checks the chapter numbers already
   in the file and refuses one that would drop any, so an interrupted
