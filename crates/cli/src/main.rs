@@ -19,7 +19,13 @@ use vesper_core::{
 };
 
 #[derive(Parser)]
-#[command(name = "vesper", about = "Vesper: webnovel crawler -> EPUB", version)]
+#[command(
+    name = "vesper",
+    bin_name = "vesper",
+    about = "Download web novels and keep them as EPUBs",
+    version,
+    disable_help_subcommand = true
+)]
 struct Cli {
     #[command(subcommand)]
     cmd: Command,
@@ -27,177 +33,166 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Subscribe to a novel (registers it and its primary source).
-    #[command(alias = "sub")]
+    /// Follow a novel so sync keeps downloading its new chapters.
+    #[command(visible_alias = "sub")]
     Subscribe {
-        /// Novel landing-page URL.
+        /// The novel's main page on a supported site.
         url: String,
-        /// Subscribe even if this looks like a novel you already follow (creates a
-        /// separate entry instead of stopping to suggest `add-source`).
+        /// Follow it as a separate novel even if it looks like one you already follow.
         #[arg(long)]
         force: bool,
-        /// Override the request delay, in milliseconds (default: config value).
-        #[arg(long)]
+        /// Milliseconds to wait between requests, instead of request_delay_ms from the config.
+        #[arg(long, value_name = "MS")]
         delay_ms: Option<u64>,
     },
-    /// Add an alternate (fallback) source to an existing subscription.
+    /// Add another site as a fallback source for a novel you follow.
     AddSource {
-        /// Existing novel: its id (from `vesper subs`), or the exact title
-        /// (quote it if it contains spaces).
+        /// Novel id (see `vesper subs`) or exact title, in quotes if it has spaces.
         novel: String,
-        /// New source URL for the same novel.
+        /// The same novel's main page on the other site.
         url: String,
-        /// Override the request delay, in milliseconds (default: config value).
-        #[arg(long)]
+        /// Milliseconds to wait between requests, instead of request_delay_ms from the config.
+        #[arg(long, value_name = "MS")]
         delay_ms: Option<u64>,
     },
-    /// List all subscriptions.
+    /// List the novels you follow and their sources.
     Subs {
-        /// Show only novels that have missing (unavailable) chapters.
+        /// Show only novels with chapters that no source has.
         #[arg(long)]
         gaps: bool,
     },
-    /// Re-fetch a subscription's metadata (author, cover, genre, status) from its
-    /// primary source; stored chapters are left untouched.
+    /// Update a novel's author, cover, genre and status from its primary source.
     Refresh {
-        /// Novel to refresh: its id (from `vesper subs`) or exact title (quote if
-        /// it has spaces), or `all` for every subscription.
+        /// Novel id (see `vesper subs`) or exact title, in quotes if it has spaces, or `all`.
         novel: String,
-        /// Also re-read every stored chapter's title from the source. Slow (one
-        /// request per chapter) — for repairing titles saved before an adapter
-        /// fix; a normal sync never revisits a chapter it already has.
+        /// Also re-read every stored chapter's title, one request per chapter. Only needed
+        /// to fix titles that were saved wrong.
         #[arg(long)]
         titles: bool,
-        /// Override the request delay, in milliseconds (default: config value).
-        #[arg(long)]
+        /// Milliseconds to wait between requests, instead of request_delay_ms from the config.
+        #[arg(long, value_name = "MS")]
         delay_ms: Option<u64>,
     },
-    /// Re-download chapters that are already stored, replacing their text.
+    /// Download chapters you already have again and replace their text.
     Refetch {
-        /// Novel to re-download: its id (from `vesper subs`), or the exact title
-        /// (quote it if it contains spaces).
+        /// Novel id (see `vesper subs`) or exact title, in quotes if it has spaces, or `all`.
         novel: String,
-        /// Which chapters, e.g. "152", "152-154" or "1,5,10-20". Default: all.
-        #[arg(long)]
+        /// Only these chapters, such as 152, 152-154 or 1,5,10-20.
+        #[arg(long, value_name = "LIST")]
         chapters: Option<String>,
-        /// Report what would change without writing anything.
+        /// Show what would change without saving anything.
         #[arg(long)]
         dry_run: bool,
-        /// Override the request delay, in milliseconds (default: config value).
-        #[arg(long)]
+        /// Milliseconds to wait between requests, instead of request_delay_ms from the config.
+        #[arg(long, value_name = "MS")]
         delay_ms: Option<u64>,
     },
-    /// Re-fetch chapters stored as a site's "log in to read" placeholder.
+    /// Download chapters again that were saved as a site's "log in to read" notice.
     Repair {
-        /// Novel to repair: its id (from `vesper subs`) or exact title (quote if
-        /// it has spaces), or `all` for every subscription.
+        /// Novel id (see `vesper subs`) or exact title, in quotes if it has spaces, or `all`.
         novel: String,
-        /// Repair one specific chapter, whatever its stored text looks like.
-        #[arg(long)]
+        /// Repair this one chapter, whatever its saved text looks like.
+        #[arg(long, value_name = "NUMBER")]
         chapter: Option<u32>,
-        /// Report what would be repaired without changing anything.
+        /// Show what would change without saving anything.
         #[arg(long)]
         dry_run: bool,
-        /// Override the request delay, in milliseconds (default: config value).
-        #[arg(long)]
+        /// Milliseconds to wait between requests, instead of request_delay_ms from the config.
+        #[arg(long, value_name = "MS")]
         delay_ms: Option<u64>,
     },
-    /// Make one of a novel's sources its primary (e.g. after a site shuts down).
+    /// Make another of a novel's sources its primary one, for example after a site shuts down.
     SetPrimary {
-        /// Novel: its id (from `vesper subs`), or the exact title (quote it if
-        /// it contains spaces).
+        /// Novel id (see `vesper subs`) or exact title, in quotes if it has spaces.
         novel: String,
-        /// Source to promote: its URL, or its site name as shown by `vesper subs`.
+        /// The source's URL, or its site name as `vesper subs` shows it.
         source: String,
     },
-    /// Remove a subscription and its downloaded chapters.
+    /// Stop following a novel and delete its downloaded chapters.
+    #[command(visible_alias = "unsub")]
     Unsubscribe {
-        /// Novel to remove: its id (from `vesper subs`), or the exact title
-        /// (quote it if it contains spaces).
+        /// Novel id (see `vesper subs`) or exact title, in quotes if it has spaces.
         novel: String,
     },
-    /// Download chapters for a subscribed novel, or a URL straight to an EPUB.
+    /// Download new chapters for a novel you follow, or a novel's URL straight to an EPUB.
     Fetch {
-        /// Novel to fetch: its id (from `vesper subs`), the exact title (quote
-        /// it if it contains spaces), or a novel's URL. A URL you don't follow
-        /// is downloaded and exported without being stored.
+        /// Novel id (see `vesper subs`), exact title in quotes if it has spaces, or the URL
+        /// of a novel you don't follow, which is saved as an EPUB without joining your library.
         novel: String,
-        /// Max new chapters to fetch this run (0 = all missing).
-        #[arg(long, default_value_t = 0)]
+        /// Stop after this many new chapters. 0, the default, means no limit.
+        #[arg(long, value_name = "COUNT", default_value_t = 0, hide_default_value = true)]
         limit: usize,
-        /// Output path for the EPUB (only for a URL you don't follow).
-        #[arg(long)]
+        /// Where to save the EPUB. Only for the URL of a novel you don't follow.
+        #[arg(long, value_name = "PATH")]
         out: Option<PathBuf>,
-        /// Override the request delay, in milliseconds (default: config value).
-        #[arg(long)]
+        /// Milliseconds to wait between requests, instead of request_delay_ms from the config.
+        #[arg(long, value_name = "MS")]
         delay_ms: Option<u64>,
     },
-    /// Strip injected site adverts from stored chapters (no network).
+    /// Remove site adverts from chapters you already have, without going online.
     Scrub {
-        /// Novel to scrub: its id (from `vesper subs`) or exact title (quote if
-        /// it has spaces), or `all` for every subscription.
+        /// Novel id (see `vesper subs`) or exact title, in quotes if it has spaces, or `all`.
         novel: String,
-        /// Report what would change without writing anything.
+        /// Show what would change without saving anything.
         #[arg(long)]
         dry_run: bool,
     },
-    /// Build an EPUB from a subscribed novel's stored chapters.
+    /// Build the EPUB for a novel you follow from its downloaded chapters.
     Export {
-        /// Novel to export: its id (from `vesper subs`), or the exact title
-        /// (quote it if it contains spaces).
+        /// Novel id (see `vesper subs`) or exact title, in quotes if it has spaces.
         novel: String,
-        /// Output path override (single file, ignores output_dir/splitting).
-        #[arg(long)]
+        /// Save one EPUB at this path, instead of the library folder and any volume split.
+        #[arg(long, value_name = "PATH")]
         out: Option<PathBuf>,
     },
-    /// Purge exported chapters of completed novels to free space.
+    /// Delete the downloaded chapters of finished novels once they are exported, to save space.
     Prune {
-        /// Days to keep exported chapters before purging (default: config value).
-        #[arg(long)]
+        /// Days to keep exported chapters, instead of retention_days from the config.
+        #[arg(long, value_name = "DAYS")]
         retention_days: Option<u32>,
     },
-    /// Sync all subscriptions (what the background task runs).
+    /// Check every novel you follow for new chapters. The background task runs this.
     Sync {
-        /// Max new chapters per novel this run (0 = all missing).
-        #[arg(long, default_value_t = 0)]
+        /// Stop after this many new chapters per novel. 0, the default, means no limit.
+        #[arg(long, value_name = "COUNT", default_value_t = 0, hide_default_value = true)]
         limit: usize,
-        /// Override the request delay, in milliseconds (default: config value).
-        #[arg(long)]
+        /// Milliseconds to wait between requests, instead of request_delay_ms from the config.
+        #[arg(long, value_name = "MS")]
         delay_ms: Option<u64>,
     },
-    /// Manage the background sync task (install/uninstall/status).
+    /// Install, remove or check the background sync task.
     #[command(disable_help_subcommand = true)]
     Service {
         #[command(subcommand)]
         action: ServiceAction,
     },
-    /// Show the config file path and current settings.
+    /// Show where the config file is and the settings in it.
     Config,
-    /// Show library status: subscriptions, last sync, and recent log lines.
+    /// Show which novels need attention and how the last sync went.
     Status,
-    /// List loaded site profiles and where to add custom ones.
+    /// List the sites Vesper can read and where to add your own.
     Profiles,
-    /// List a novel's discovered chapters (walks the full ToC; no DB, no bodies).
+    /// Show how many chapters a novel's page lists, without saving anything.
     List {
-        /// Novel landing-page URL.
+        /// The novel's main page on a supported site.
         url: String,
-        /// Override the request delay, in milliseconds (default: config value).
-        #[arg(long)]
+        /// Milliseconds to wait between requests, instead of request_delay_ms from the config.
+        #[arg(long, value_name = "MS")]
         delay_ms: Option<u64>,
     },
 }
 
 #[derive(Subcommand)]
 enum ServiceAction {
-    /// Install the background sync task (Windows Task Scheduler).
+    /// Run `vesper sync` on a schedule under your user account.
     Install {
-        /// Interval in minutes (defaults to poll_interval_minutes from config).
-        #[arg(long)]
+        /// Minutes between runs, instead of poll_interval_minutes from the config.
+        #[arg(long, value_name = "MINUTES")]
         interval_minutes: Option<u32>,
     },
     /// Remove the background sync task.
     Uninstall,
-    /// Show whether the background sync task is installed.
+    /// Show whether the background sync task is installed and when it runs next.
     Status,
 }
 
