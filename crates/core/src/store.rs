@@ -756,7 +756,8 @@ impl Store {
 
     pub fn update_novel_meta(&self, novel_id: i64, meta: &NovelMeta) -> Result<()> {
         self.conn.execute(
-            "UPDATE novels SET author = ?2, cover_url = ?3, genre = ?4, status_hint = ?5, updated_at = ?6
+            "UPDATE novels SET author = ?2, cover_url = ?3, genre = ?4, status_hint = ?5, updated_at = ?6,
+             title = ?7
              WHERE id = ?1",
             params![
                 novel_id,
@@ -765,6 +766,7 @@ impl Store {
                 meta.genre,
                 meta.status_hint.as_str(),
                 now_unix(),
+                meta.title,
             ],
         )?;
         Ok(())
@@ -1017,6 +1019,19 @@ mod tests {
         assert_eq!(novel.sources.len(), 1);
         assert_eq!(novel.primary_source().unwrap().priority, 1);
         assert_eq!(novel.derived_state, DerivedState::Backfilling);
+    }
+
+    #[test]
+    fn refreshed_metadata_includes_the_title() {
+        let s = mem_store();
+        let id = s.subscribe(&sample_meta("https://example.com/a.html"), "example").unwrap();
+        let mut renamed = sample_meta("https://example.com/a.html");
+        renamed.title = "Test Novel, Renamed".into();
+        renamed.author = Some("Another Author".into());
+        s.update_novel_meta(id, &renamed).unwrap();
+        let novel = s.find_novel(&id.to_string()).unwrap().unwrap();
+        assert_eq!(novel.title, "Test Novel, Renamed");
+        assert_eq!(novel.author.as_deref(), Some("Another Author"));
     }
 
     #[test]

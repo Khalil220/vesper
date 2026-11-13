@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use anyhow::{anyhow, bail, ensure, Result};
 use clap::{Parser, Subcommand};
+use vesper_core::paths::UNKNOWN_AUTHOR;
 use vesper_core::{
     build_epub, build_source, download_cover, epub_path, migrate_lightnovelworld, sync_novel,
     Chapter, Config, Cover, DerivedState, MigrationOutcome, MigrationReport, NovelMeta,
@@ -612,17 +613,55 @@ async fn add_source(config: &Config, novel: String, url: String, delay_ms: Optio
     Ok(())
 }
 
-async fn refresh_one(store: &Store, novel: &StoredNovel, delay_ms: u64) -> Result<Option<(String, String)>> {
+async fn refresh_one(
+    store: &Store,
+    config: &Config,
+    novel: &StoredNovel,
+    delay_ms: u64,
+) -> Result<(StoredNovel, Vec<String>)> {
     let primary = novel
         .primary_source()
         .ok_or_else(|| anyhow!("\"{}\" has no source to refresh from", novel.title))?;
     let source = source_for(&primary.url, delay_ms)?;
     let meta = source.fetch_novel(&primary.url).await?;
     store.update_novel_meta(novel.id, &meta)?;
+    let current = store
+        .find_novel(&novel.id.to_string())?
+        .ok_or_else(|| anyhow!("novel #{} vanished", novel.id))?;
 
-    let old = novel.author.as_deref().unwrap_or("Unknown Author").to_string();
-    let new = meta.author.as_deref().unwrap_or("Unknown Author").to_string();
-    Ok((old != new).then_some((old, new)))
+    let mut changes = Vec::new();
+    if meta.title != novel.title {
+        changes.push(format!("renamed to \"{}\"", meta.title));
+    }
+    let old_author = novel.author.as_deref().unwrap_or(UNKNOWN_AUTHOR);
+    let new_author = meta.author.as_deref().unwrap_or(UNKNOWN_AUTHOR);
+    if old_author != new_author {
+        changes.push(format!("author changed from {old_author} to {new_author}"));
+    }
+    if changes.is_empty() {
+        return Ok((current, changes));
+    }
+
+    let moved = vesper_core::paths::relocate_epubs(
+        &config.output_dir,
+        (novel.author.as_deref(), &novel.title),
+        (meta.author.as_deref(), &meta.title),
+    )?;
+    let exported = !moved.is_empty()
+        || epub_path(&config.output_dir, meta.author.as_deref(), &meta.title, None).is_file()
+        || epub_path(&config.output_dir, meta.author.as_deref(), &meta.title, Some(1)).is_file();
+    let rebuilt = exported
+        && current.derived_state != DerivedState::LikelyComplete
+        && !export_and_track(store, config, &current).await.is_empty();
+    match (moved.is_empty(), rebuilt) {
+        (false, true) => changes.push("EPUB moved and rebuilt under the new name".into()),
+        (false, false) => changes.push(
+            "EPUB moved to the new folder; the title inside it updates on its next export".into(),
+        ),
+        (true, true) => changes.push("EPUB rebuilt".into()),
+        (true, false) => {}
+    }
+    Ok((current, changes))
 }
 
 async fn retitle_one(store: &Store, novel: &StoredNovel, delay_ms: u64) -> Result<usize> {
@@ -676,29 +715,26 @@ async fn refresh(
             return Ok(());
         }
         eprintln!("Refreshing {}...", count(novels.len(), "novel"));
-        let mut authors = 0usize;
         let mut retitled = 0usize;
         let mut failed = 0usize;
         for n in &novels {
-            let mut notes = Vec::new();
-            match refresh_one(&store, n, delay).await {
-                Ok(Some((old, new))) => {
-                    notes.push(format!("author changed from {old} to {new}"));
-                    authors += 1;
-                }
-                Ok(None) => {}
+            let (current, mut notes) = match refresh_one(&store, config, n, delay).await {
+                Ok(refreshed) => refreshed,
                 Err(e) => {
                     eprintln!("  ! {}: {e}", n.title);
                     failed += 1;
+                    (n.clone(), Vec::new())
                 }
-            }
+            };
             if titles {
-                match retitle_one(&store, n, delay).await {
+                match retitle_one(&store, &current, delay).await {
                     Ok(0) => {}
                     Ok(fixed) => {
                         notes.push(format!("{} corrected", count(fixed, "chapter title")));
                         retitled += fixed;
-                        if config.auto_append && !export_and_track(&store, config, n).await.is_empty() {
+                        if config.auto_append
+                            && !export_and_track(&store, config, &current).await.is_empty()
+                        {
                             notes.push("EPUB updated".to_string());
                         }
                     }
@@ -706,16 +742,10 @@ async fn refresh(
                 }
             }
             if !notes.is_empty() {
-                println!("  {}: {}", n.title, notes.join(", "));
+                println!("  {}: {}", n.title, notes.join("; "));
             }
         }
         println!("Updated {}.", count(novels.len() - failed, "novel"));
-        if authors > 0 {
-            println!(
-                "Run `vesper export <id>` for each novel whose author changed, to move its EPUB \
-                 into the new author's folder."
-            );
-        }
         if retitled > 0 && !config.auto_append {
             println!("Run `vesper export <id>` for each novel with corrected titles to update its EPUB.");
         }
@@ -726,27 +756,26 @@ async fn refresh(
         .find_novel(&novel)?
         .ok_or_else(|| anyhow!("no subscription matches \"{novel}\""))?;
     eprintln!("Refreshing \"{}\"...", found.title);
-    match refresh_one(&store, &found, delay).await? {
-        Some((old, new)) => {
-            println!("Updated. The author changed from {old} to {new}.");
-            println!("Run `vesper export {}` to move the EPUB into the new author's folder.", found.id);
-        }
-        None => println!("Updated. The author is unchanged."),
+    let (current, changes) = refresh_one(&store, config, &found, delay).await?;
+    if changes.is_empty() {
+        println!("Updated \"{}\". The title and author are unchanged.", found.title);
+    } else {
+        println!("Updated \"{}\": {}.", found.title, changes.join("; "));
     }
     if titles {
         eprintln!("Re-reading chapter titles, one request each...");
-        match retitle_one(&store, &found, delay).await? {
+        match retitle_one(&store, &current, delay).await? {
             0 => println!("Chapter titles were already correct."),
             fixed => {
-                let updated =
-                    config.auto_append && !export_and_track(&store, config, &found).await.is_empty();
+                let updated = config.auto_append
+                    && !export_and_track(&store, config, &current).await.is_empty();
                 println!(
                     "Corrected {}{}.",
                     count(fixed, "chapter title"),
                     if updated { "; EPUB updated" } else { "" }
                 );
                 if !config.auto_append {
-                    println!("Run `vesper export {}` to update the EPUB.", found.id);
+                    println!("Run `vesper export {}` to update the EPUB.", current.id);
                 }
             }
         }

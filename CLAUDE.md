@@ -450,7 +450,13 @@ Cargo workspace, two crates under `crates/`:
     `NovelStatus`).
   - `epub` — EPUB packaging: reconstructed XHTML, atomic temp-file+rename,
     cover + `dc:subject` genre, "Missing Chapters" page for 404 gaps.
-  - `paths` — library layout (`epub_path`, `novel_dir`).
+  - `paths` — library layout (`epub_path`, `novel_dir`). `relocate_epubs`
+    moves a novel's EPUBs (single file and every volume) when `refresh` finds
+    its title or author changed, never over an existing file, and removes the
+    emptied folders. `refresh` moves rather than rebuilds first because a
+    likely-complete novel may have had its chapters pruned, which makes the
+    EPUB on disk the only full copy; it rebuilds only novels prune can't have
+    touched.
   - `store` — SQLite persistence: novels/sources/chapters/chapter_gaps/meta
     schema, WAL, resume-aware insert, gap record/clear/list, normalized-title
     lookup, subscriptions listed in id order. `update_chapter_title` is the

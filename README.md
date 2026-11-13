@@ -186,10 +186,18 @@ single line. The log records every novel either way.
 vesper refresh <novel|all> [--titles]
 ```
 
-Re-fetch a novel's metadata — author, cover, genre, status — from its main
-source, leaving chapters alone. Useful when the author field was empty at
-subscribe time (some sites are slow to fill these in) or a novel finally
-flipped to "Completed". `all` does every subscription.
+Re-fetch a novel's metadata (title, author, cover, genre, status) from its
+primary source, leaving chapters alone. Useful when the author field was empty
+at subscribe time (some sites are slow to fill these in), a site renamed the
+novel or fixed a typo in its title, or a novel finally flipped to "Completed".
+`all` does every subscription.
+
+The EPUB lives in a folder named after the author and title, so when either
+changes, Vesper moves the existing EPUB to the new folder and removes the old
+one if it ends up empty. It then rebuilds the book so the title inside matches,
+except for a likely-complete novel, whose chapters `prune` may already have
+deleted: that one is only moved, and its inside title catches up the next time
+it is exported. A file already sitting at the new path is never overwritten.
 
 `--titles` additionally re-reads the *chapter* titles of everything already
 downloaded and overwrites the ones that differ. A normal sync never revisits a
