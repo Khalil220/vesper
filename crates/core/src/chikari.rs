@@ -167,7 +167,7 @@ fn parse_chapter_page(json: &Value, slug: &str) -> Result<(Vec<ChapterRef>, u32)
 }
 
 fn chapter_title(item: &Value, number: u32) -> String {
-    let raw = str_field(item, "title").unwrap_or_default();
+    let raw = decode_unicode_escapes(&str_field(item, "title").unwrap_or_default());
     let cleaned = strip_leading_number_colon(&clean_chapter_title(&raw));
     if cleaned.is_empty() {
         format!("Chapter {number}")
@@ -254,8 +254,50 @@ fn inline_tag_end(s: &str, start: usize) -> Option<usize> {
         .then_some(start + 1 + close + 1)
 }
 
+fn hex_unit(s: &str) -> Option<u32> {
+    let digits = s.strip_prefix("\\u")?.get(..4)?;
+    if !digits.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    u32::from_str_radix(digits, 16).ok()
+}
+
+fn decode_unicode_escapes(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(at) = rest.find("\\u") {
+        out.push_str(&rest[..at]);
+        rest = &rest[at..];
+        let Some(unit) = hex_unit(rest) else {
+            out.push('\\');
+            rest = &rest[1..];
+            continue;
+        };
+        let low = (0xD800..0xDC00).contains(&unit).then(|| hex_unit(&rest[6..])).flatten();
+        let (decoded, used) = match low {
+            Some(low) if (0xDC00..0xE000).contains(&low) => {
+                (char::from_u32(0x10000 + ((unit - 0xD800) << 10) + (low - 0xDC00)), 12)
+            }
+            _ => (char::from_u32(unit), 6),
+        };
+        match decoded {
+            Some(c) => {
+                out.push(c);
+                rest = &rest[used..];
+            }
+            None => {
+                out.push('\\');
+                rest = &rest[1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 fn body_paragraphs(body: &str) -> Vec<String> {
-    body.split('\n')
+    decode_unicode_escapes(body)
+        .split('\n')
         .map(|line| strip_inline_markup(line).trim().to_string())
         .filter(|line| !line.is_empty())
         .collect()
@@ -479,6 +521,27 @@ mod tests {
             ch.paragraphs,
             vec!["First paragraph.", "Second paragraph.", "Third paragraph."]
         );
+    }
+
+    #[test]
+    fn decodes_escapes_the_api_left_in_the_text() {
+        let v = json!({
+            "number": 440.0,
+            "title": "Chapter 440 - 440: Rock \\u0026 Roll",
+            "body": "Skill Level: 2/5 -\\u003e 3/5\nSmile \\ud83d\\ude00 and a path C:\\users stays."
+        });
+        let ch = parse_read(&v, &a_ref(440)).unwrap();
+        assert_eq!(ch.title, "Rock & Roll");
+        assert_eq!(
+            ch.paragraphs,
+            vec!["Skill Level: 2/5 -> 3/5", "Smile \u{1F600} and a path C:\\users stays."]
+        );
+    }
+
+    #[test]
+    fn leaves_a_backslash_that_is_not_an_escape() {
+        assert_eq!(decode_unicode_escapes("\\u12 and \\uZZZZ"), "\\u12 and \\uZZZZ");
+        assert_eq!(decode_unicode_escapes("lone \\ud83d here"), "lone \\ud83d here");
     }
 
     #[test]
