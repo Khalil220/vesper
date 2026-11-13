@@ -12,6 +12,7 @@ pub mod scrub;
 pub mod scribblehub;
 pub mod paths;
 pub mod profiles;
+pub mod promo;
 pub mod refetch;
 pub mod repair;
 pub mod source;

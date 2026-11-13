@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use anyhow::{anyhow, Result};
 use rusqlite::{Connection, OpenFlags};
 use unicode_normalization::char::{decompose_compatible, is_combining_mark};
-use vesper_core::freewebnovel::strip_promo;
+use vesper_core::promo::strip_promo;
 
 fn main() -> Result<()> {
     let path: PathBuf = std::env::args()

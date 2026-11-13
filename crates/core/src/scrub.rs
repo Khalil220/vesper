@@ -1,6 +1,6 @@
 use anyhow::Result;
 
-use crate::freewebnovel::strip_promo;
+use crate::promo::strip_promo;
 use crate::store::Store;
 
 #[derive(Debug, Default)]
