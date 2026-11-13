@@ -266,9 +266,9 @@ rules-of-the-road.
   chapter numbers already in the target file or volumes
   (`epub::chapters_in_epub`, from the `chapter_NNNNN.xhtml` entry names) and
   refuses a write that would drop any of them. Prune makes the EPUB the only
-  full copy of a likely-complete novel, and the next recheck re-downloads it
-  from chapter 1, so a run cut short by `--limit`, a rate limit or an outage
-  would otherwise export the partial set over the archive. An automatic export
+  full copy of a likely-complete novel, and when a revival restores its pruned
+  chapters, a run cut short by `--limit`, a rate limit or an outage would
+  otherwise export the partial set over the archive. An automatic export
   that hits this is marked pending and retried once the chapters are back.
   Every EPUB write goes through `write_epubs`; don't call `build_epub` around
   it.
