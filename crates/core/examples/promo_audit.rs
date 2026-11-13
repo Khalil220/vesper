@@ -20,6 +20,9 @@ const SITE_WORDS: &[&str] = &[
     "buyersclub",
     "contentcopysite",
     "betterexperience",
+    "morevisit",
+    "pleasevisit",
+    "chaptersvisit",
 ];
 
 const LINK_SIGNS: &[&str] = &["t.me/", "discord.gg/"];
@@ -48,6 +51,7 @@ fn audit(path: &PathBuf) -> Result<()> {
     let mut touched = 0usize;
     let mut removals: BTreeMap<String, usize> = BTreeMap::new();
     let mut prose_eaten: Vec<(i64, u32, String)> = Vec::new();
+    let mut longest = 0usize;
 
     while let Some(row) = rows.next()? {
         let (novel_id, number, body): (i64, u32, String) = (row.get(0)?, row.get(1)?, row.get(2)?);
@@ -66,6 +70,7 @@ fn audit(path: &PathBuf) -> Result<()> {
             if !names_the_site(&removed) {
                 prose_eaten.push((novel_id, number, removed.clone()));
             }
+            longest = longest.max(removed.chars().count());
             *removals.entry(fold_key(&removed)).or_default() += 1;
         }
         if changed {
@@ -77,10 +82,7 @@ fn audit(path: &PathBuf) -> Result<()> {
     println!("chapters scanned: {chapters}");
     println!("chapters the matcher would change: {touched}");
     println!("removals: {total} ({} distinct wordings)", removals.len());
-    println!(
-        "longest removal: {} chars",
-        removals.keys().map(|r| r.chars().count()).max().unwrap_or(0)
-    );
+    println!("longest removal: {longest} chars");
 
     if prose_eaten.is_empty() {
         println!("removals that do not name the site: none");
