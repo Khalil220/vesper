@@ -105,18 +105,24 @@ rules-of-the-road.
   - **It is not only freewebnovel.** chikari's text came from lightnovelworld,
     which had scraped it from aggregators, so chikari chapters carry their
     marks too, and so do some freewebnovel ones. `SITES` lists every name
-    observed: freewebnovel, panda-novel, lightnovelpub, lightnovelworld,
-    novelfire, novelphoenix, eaglesnovel, myboxnovel, allnovelfull and newnovel.
-    A needle can be shorter than the name (`pandanov`, because one copy writes
-    `pαпdα-ňᴏνê|`), and the match runs on to the full name when it is there.
+    observed: freewebnovel, panda-novel, pandasnovel, lightnovelpub,
+    lightnovelworld, lightsnovel, novelfire, novelphoenix, eaglesnovel,
+    myboxnovel, allnovelfull and newnovel. A needle can be shorter than the name
+    (`pandanov`, because one copy writes `pαпdα-ňᴏνê|`; `andasnovel`, because
+    one drops the `p`), and the match runs on to the full name when it is there.
+    Up to two short junk words glued between the name and its TLD go with it
+    (`pαndα\`noν?1--сoМ`, `eaglesnov?1,сoМ`).
   - **A name split across words needs evidence** or it is prose, since folding
     joins words and "a free web novel" or "a light novel published" would read
     as a domain otherwise. Evidence is one of: a TLD right after it, every word
     two letters or fewer (letter-spaced), a styled or lookalike letter in it, or
-    no whitespace anywhere in it (`novel~fire~net`). Names that are ordinary
-    phrases (`newnovel`, `allnovelfull`, `lightnovelworld`) need the TLD
-    regardless. A TLD only counts when it is whole words (`c/om`, `c.o,m`), so
-    "reading a novel. Compared to" stays.
+    no whitespace anywhere in it (`novel~fire~net`) other than a plain hyphen.
+    The hyphen exception is real: one novel uses "panda-novel" as a noun
+    ("spoiled by panda-novels") where the site swapped its name in for "web
+    novel", and cutting it breaks the sentence. Names that are ordinary phrases
+    (`newnovel`, `allnovelfull`, `lightnovelworld`) need the TLD regardless. A
+    TLD only counts when it is whole words (`c/om`, `c.o,m`), so "reading a
+    novel. Compared to" stays.
   - **Lead-ins, tails and dangling pitches come from observed wordings only**
     (`LEAD_INS`, `TAILS`, `DANGLING_PITCHES`): "For more, visit", "The most
     up-to-date novels are published on", "for a better experience", "to read,

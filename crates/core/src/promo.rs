@@ -41,7 +41,9 @@ const SITES: &[Site] = &[
     Site { needle: "freewebnovel", name: "freewebnovel", needs_tld: false },
     Site { needle: "reewebnovel", name: "reewebnovel", needs_tld: false },
     Site { needle: "pandanov", name: "pandanovel", needs_tld: false },
+    Site { needle: "andasnovel", name: "andasnovel", needs_tld: false },
     Site { needle: "lightnovelpub", name: "lightnovelpub", needs_tld: false },
+    Site { needle: "lightsnovel", name: "lightsnovel", needs_tld: false },
     Site { needle: "novelfire", name: "novelfire", needs_tld: false },
     Site { needle: "novelphoenix", name: "novelphoenix", needs_tld: false },
     Site { needle: "eaglesnov", name: "eaglesnovel", needs_tld: false },
@@ -104,6 +106,8 @@ const PITCH_OPENERS: &[&str] = &[
 ];
 
 const TLDS: &[&str] = &["com", "net", "org"];
+
+const JUNK_BEFORE_TLD: usize = 2;
 
 const LEAK_OPENERS: &[&str] = &["more", "or discord", "or telegram"];
 
@@ -337,6 +341,22 @@ impl<'a> Folded<'a> {
             .flatten()
     }
 
+    fn tld_past_junk(&self, word: usize) -> Option<usize> {
+        let mut at = word;
+        for _ in 0..=JUNK_BEFORE_TLD {
+            if let Some(tld) = self.tld_after(at) {
+                return Some(tld);
+            }
+            let next = at + 1;
+            let glued = next < self.words.len() && !self.gap(at).contains(char::is_whitespace);
+            if !glued || self.words[next].text.chars().count() > 2 {
+                return None;
+            }
+            at = next;
+        }
+        None
+    }
+
     fn lead_in_before(&self, word: usize) -> Option<usize> {
         if word == 0 || breaks_sentence(self.gap(word - 1)) {
             return None;
@@ -403,7 +423,10 @@ impl<'a> Folded<'a> {
         has_tld
             || words.iter().any(|w| w.styled)
             || words.iter().all(|w| w.text.chars().count() <= 2)
-            || (first..last).all(|i| !self.gap(i).contains(char::is_whitespace))
+            || (first..last).all(|i| {
+                let gap = self.gap(i);
+                !gap.contains(char::is_whitespace) && !matches!(gap, "-" | "\u{2010}")
+            })
     }
 
     fn site_spans(&self, spans: &mut Vec<(usize, usize)>) {
@@ -418,7 +441,7 @@ impl<'a> Folded<'a> {
                     };
                 let first = self.owner[hit];
                 let last = self.owner[from - 1];
-                let tld = self.tld_after(last);
+                let tld = self.tld_past_junk(last);
                 if !self.names_a_site(first, last, tld.is_some(), site.needs_tld) {
                     continue;
                 }
@@ -986,6 +1009,27 @@ mod tests {
                 "pαпdα-ňᴏνê|·сóМ However, their purpose was not to clash head-on.",
                 Some("However, their purpose was not to clash head-on."),
             ),
+            (
+                "pαndα`noν?1--сoМ It took him 5 hours to finish reading the complete document.",
+                Some("It took him 5 hours to finish reading the complete document."),
+            ),
+            (
+                "ραndαsnοvεl.cοm This same pattern of devastation repeated itself.",
+                Some("This same pattern of devastation repeated itself."),
+            ),
+            (
+                "andasnovel.com Despite their expressions, nobody moved.",
+                Some("Despite their expressions, nobody moved."),
+            ),
+        ]);
+    }
+
+    #[test]
+    fn keeps_panda_novel_used_as_a_word() {
+        assert_keeps(&[
+            "Some panda-novel addicts believed it was true.",
+            "This isn’t a cultivation novel,” Aron laughed. Nobody told me to read those strange panda-novels.",
+            "Those who had been spoiled by panda-novels even privately believed it.",
         ]);
     }
 
@@ -1077,6 +1121,10 @@ mod tests {
                 Some("She became the only ally they had."),
             ),
             ("Read more at Novel~Phoenix", None),
+            (
+                "lightsnοvεl.cοm General Nzagi frowned and looked at the map.",
+                Some("General Nzagi frowned and looked at the map."),
+            ),
         ]);
     }
 
