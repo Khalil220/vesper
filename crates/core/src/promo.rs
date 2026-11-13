@@ -72,6 +72,15 @@ const LEAD_INS: &[&str] = &[
     "visit",
 ];
 
+const DANGLING_PITCHES: &[&str] = &[
+    "ifyouwanttoreadmorechapterspleasevisit",
+    "ifyouwanttoreadmorechaptersvisit",
+    "wanttoseemorechapterspleasevisit",
+    "readmorevisit",
+    "formorevisit",
+    "pleasevisit",
+];
+
 const TAILS: &[&str] = &[
     "toexperiencefasterupdatespeed",
     "forabetterexperience",
@@ -98,7 +107,7 @@ const TLDS: &[&str] = &["com", "net", "org"];
 
 const LEAK_OPENERS: &[&str] = &["more", "or discord", "or telegram"];
 
-const LEAK_SIGNS: &[&str] = &["t.me/", "buyers club"];
+const LEAK_SIGNS: &[&str] = &["t.me/+", "buyers club"];
 
 const COPY_SITE_NOTE: &str = "you are reading on our content copy site";
 
@@ -496,6 +505,24 @@ impl<'a> Folded<'a> {
         }
     }
 
+    fn dangling_pitch_span(&self, spans: &mut Vec<(usize, usize)>) {
+        let last = self.words.len() - 1;
+        if !self.after(last).trim().trim_end_matches(':').is_empty() {
+            return;
+        }
+        let Some(first) = DANGLING_PITCHES
+            .iter()
+            .filter(|pitch| self.flat.ends_with(**pitch))
+            .find_map(|pitch| self.word_starting_at(self.flat.len() - pitch.len()))
+        else {
+            return;
+        };
+        let before = self.text[..self.words[first].start].trim_end();
+        if before.is_empty() || before.ends_with(['.', '!', '?', '"', '\u{201d}', '\u{2019}']) {
+            spans.push((self.words[first].start, self.text.len()));
+        }
+    }
+
     fn empire_span(&self, spans: &mut Vec<(usize, usize)>) {
         let last = self.words.len() - 1;
         let word = &self.words[last];
@@ -516,28 +543,46 @@ impl<'a> Folded<'a> {
 }
 
 fn leak_spans(lower: &str, spans: &mut Vec<(usize, usize)>) {
-    let mut line_start = 0;
-    for line in lower.split('\n') {
-        let body = line.trim_start();
-        let opens = LEAK_OPENERS.iter().any(|o| {
-            body.strip_prefix(o)
-                .is_some_and(|rest| !rest.starts_with(|c: char| c.is_alphanumeric()))
-        });
-        let leaked = opens && LEAK_SIGNS.iter().any(|s| body.contains(s));
-        if leaked {
-            spans.push((line_start + line.len() - body.len(), line_start + line.trim_end().len()));
+    for opener in LEAK_OPENERS {
+        let mut from = 0;
+        while let Some(at) = lower[from..].find(opener).map(|i| i + from) {
+            from = at + opener.len();
+            spans.extend(leak_at(lower, at, from));
         }
-        line_start += line.len() + 1;
+    }
+}
+
+fn leak_at(lower: &str, at: usize, opener_end: usize) -> Option<(usize, usize)> {
+    if lower[opener_end..].starts_with(char::is_alphanumeric) {
+        return None;
+    }
+    let bracketed = lower[..at].ends_with('(');
+    let before = lower[..at].trim_end_matches([' ', '\t']);
+    let opens_sentence = before.is_empty()
+        || before.ends_with(['\n', '.', '!', '?', '"', '\u{201d}', '\u{2019}', ')']);
+    if !bracketed && !opens_sentence {
+        return None;
     }
 
-    let mut from = 0;
-    while let Some(open) = lower[from..].find("(more chapters").map(|i| i + from) {
-        let close = lower[open..].find(')').map_or(lower.len(), |i| open + i + 1);
-        if LEAK_SIGNS.iter().any(|s| lower[open..close].contains(s)) {
-            spans.push((open, close));
+    let line_end = lower[at..].find('\n').map_or(lower.len(), |i| at + i);
+    let mut end = if bracketed {
+        lower[at..line_end].find(')').map_or(line_end, |i| at + i + 1)
+    } else {
+        line_end
+    };
+    if !bracketed && lower[at..end].trim_end().ends_with(':') && end < lower.len() {
+        let rest = &lower[end + 1..];
+        let link = rest.trim_start_matches([' ', '\t']);
+        if link.starts_with("t.me/+") || link.starts_with("https://t.me/+") {
+            end += 1 + rest.find('\n').unwrap_or(rest.len());
         }
-        from = close;
     }
+
+    let start = if bracketed { at - 1 } else { at };
+    LEAK_SIGNS
+        .iter()
+        .any(|sign| lower[at..end].contains(sign))
+        .then_some((start, end))
 }
 
 fn copy_site_spans(text: &str, lower: &str, spans: &mut Vec<(usize, usize)>) {
@@ -571,6 +616,7 @@ fn promo_spans(text: &str) -> Vec<(usize, usize)> {
         folded.pitch_tld_span(&mut spans);
         folded.styled_tld_span(&mut spans);
         folded.edge_fragment_spans(&mut spans);
+        folded.dangling_pitch_span(&mut spans);
         folded.empire_span(&mut spans);
     }
 
@@ -861,6 +907,9 @@ mod tests {
             "NunuNote: You can find all Visual Representations at discord.gg/NunuXD",
             "More visuals of the guild hall are up at discord.gg/NunuXD",
             "Moreover, the group chat moved to t.me/guildhall last week.",
+            "More art and early chapters are up at t.me/guildhall",
+            "Hey guys, two more Chapters will be posted soon.",
+            "Join the group chat for more chapters t.me/+AbCdEf",
             "PS: it’s a new week, new goals, if we’re able to hit a 100 power stones, there’ll be bonus Chapters at the end of the week..",
         ] {
             assert_eq!(strip_promo(note).as_deref(), Some(note), "{note:?}");
@@ -1042,10 +1091,42 @@ mod tests {
             ("More chapters: t.me/+Z9CFfQjA6p9iM2My", None),
             ("More: t.me/+Z9CFfQjA6p9iM2My", None),
             ("More in t.me/+Z9CFfQjA6p9iM2My", None),
+            ("More chapters in Telegram: \nt.me/+Z9CFfQjA6p9iM2My", None),
+            (
+                "Yuan could casually give away such a precious item. More chapters in Telegram t.me/+Z9CFfQjA6p9iM2My",
+                Some("Yuan could casually give away such a precious item."),
+            ),
+            (
+                "He had never seen it before. More chapters in Telegram with a link: t.me/+Z9CFfQjA6p9iM2My\nThe bidding went on.",
+                Some("He had never seen it before. The bidding went on."),
+            ),
             (
                 "\"That was a quick response,\" she said.(More chapters in Buyers club for TMT)",
                 Some("\"That was a quick response,\" she said."),
             ),
+        ]);
+    }
+
+    #[test]
+    fn strips_a_pitch_left_without_its_domain() {
+        assert_strips(&[
+            (
+                "Li Jinxi is a threat if she refuses to be on their side.If you want to read more chapters, visit",
+                Some("Li Jinxi is a threat if she refuses to be on their side."),
+            ),
+            ("For more, visit:", None),
+            ("Read more, visit:", None),
+            (
+                "The blow sent out a small shockwave.please visit",
+                Some("The blow sent out a small shockwave."),
+            ),
+        ]);
+        assert_keeps(&[
+            "He told me to visit.",
+            "If you want to read more, visit the library.",
+            "\"Please visit.\"",
+            "He asked her to please visit",
+            "For more, visit the archive.",
         ]);
     }
 
