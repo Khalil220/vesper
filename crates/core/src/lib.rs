@@ -54,8 +54,7 @@ pub fn build_source(url: &str, delay: std::time::Duration) -> Option<Box<dyn Sou
             Some(Box::new(LightNovelWorldSource::new(fetcher)))
         }
         "royalroad.com" | "www.royalroad.com" => {
-            let fetcher = ReqwestFetcher::new(delay).ok()?;
-            Some(Box::new(RoyalRoadSource::new(fetcher)))
+            Some(Box::new(RoyalRoadSource::new(CurlFetcher::new(delay))))
         }
         "scribblehub.com" | "www.scribblehub.com" => {
             Some(Box::new(ScribbleHubSource::new(CurlFetcher::new(delay))))

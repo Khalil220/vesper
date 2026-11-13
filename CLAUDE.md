@@ -39,7 +39,8 @@ rules-of-the-road.
   intended, not something to compact.
 - **Tiered fetcher behind a trait.** Tier 1 = `ReqwestFetcher` (browser UA +
   headers). Tier 2 = `CurlFetcher` (shells out to system `curl`; GET and form
-  POST), for hosts where Tier 1 gets challenged (freewebnovel, scribblehub).
+  POST), for hosts where Tier 1 gets challenged (freewebnovel, scribblehub,
+  royalroad).
   `build_source` picks tier + adapter per host. Escalate further only if a
   site needs it.
 - **Adaptive, per-host politeness:** modest delay + jitter, one request in
@@ -325,7 +326,10 @@ rules-of-the-road.
   `/chapter/N/` id sequence has 404 holes** (deleted/merged chapters), so the
   generated 1..N range hits dead URLs — handled by the 404-gap logic above,
   not a bug.
-- **royalroad.com** (hand-written adapter, Tier 1): whole chapter list is a
+- **royalroad.com** (hand-written adapter, Tier 2 curl): since November 2026
+  Cloudflare answers Tier 1 with a 403 `Cf-Mitigated: challenge` on every
+  page, homepage included, while the curl tier's header set gets a 200. Whole
+  chapter list is a
   `window.chapters = [...]` JSON array in the fiction page (serde_json) —
   1-request discovery, but chapter URLs use non-sequential DB ids so the list
   must be read, not generated. Metadata: `<title>` (minus "| Royal Road"),
